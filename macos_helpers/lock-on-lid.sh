@@ -12,5 +12,5 @@ while true; do
         /usr/bin/pmset displaysleepnow
     fi
     prev="$cur"
-    sleep 2
+    sleep 10
 done

@@ -25,7 +25,7 @@ closed, the Mac is awake, and the screen is unlocked. Bad.
   behavior so an unplugged Mac in a bag doesn't cook itself.
 
 ### 2. `lock-on-lid.sh` + `com.zmc.lock-on-lid.plist`
-**LaunchAgent (per-user).** Polls `AppleClamshellState` every 2s. When
+**LaunchAgent (per-user).** Polls `AppleClamshellState` every 10s. When
 the lid transitions open → closed, calls `pmset displaysleepnow` —
 puts the *display* to sleep without sleeping the *Mac*. Combined with
 "Require password immediately after sleep or screensaver" in System
