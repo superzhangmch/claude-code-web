@@ -23,8 +23,6 @@ them makes them findable by title.
     "session_id": "7f283905-1a06-4d86-8f2b-995b9a4f8133",
     "title": "user given title",
     "project_path": "/Users/you/projects/example",
-    "last_visit": "2026-04-15 10:58",
-    "last_user_msg": "the last thing the user said...",
     "first_user_msg": "the first thing the user said..."
   }
 ]
@@ -63,8 +61,7 @@ Run these as **two separate bash commands** (the marker must be written to the J
 python3.11 -c "
 import json, os, sys
 session_file = sys.argv[1]
-first_msg = last_msg = None
-first_ts = last_ts = None
+first_msg = None
 sid = None
 with open(session_file) as f:
     for line in f:
@@ -74,18 +71,12 @@ with open(session_file) as f:
                 sid = obj['sessionId']
             if obj.get('type') == 'user' and obj.get('message', {}).get('role') == 'user':
                 content = obj['message']['content']
-                if isinstance(content, str) and content.strip():
-                    if first_msg is None:
-                        first_msg = content[:150]
-                        first_ts = obj.get('timestamp', '')
-                    last_msg = content[:150]
-                    last_ts = obj.get('timestamp', '')
+                if isinstance(content, str) and content.strip() and first_msg is None:
+                    first_msg = content[:150]
         except: pass
 print(json.dumps({
     'session_id': sid or os.path.basename(session_file).replace('.jsonl',''),
     'first_user_msg': first_msg or '',
-    'last_user_msg': last_msg or '',
-    'last_visit': (last_ts or '')[:16].replace('T',' ')
 }))
 " "\$SESSION_FILE"
 ```
@@ -101,7 +92,7 @@ Steps:
 2. Find the current session file and extract info using the method above.
 3. Read `~/.claude/session_index.json` (create with `[]` if missing).
 4. Check if an entry with the same `session_id` already exists:
-   - If yes: update `title`, `last_visit`, `last_user_msg` (keep `first_user_msg`).
+   - If yes: update `title` (keep `first_user_msg` and `project_path`).
    - If no: append a new entry with all fields including `project_path` from `$PWD`.
 5. Write the updated JSON back to `~/.claude/session_index.json`.
 6. Confirm: "Session saved as **<title>**. Resume with: `claude --resume <session_id>`"
@@ -112,10 +103,13 @@ Triggered by: "find session about XXX", "which session was about XXX", "search s
 
 Steps:
 1. Read `~/.claude/session_index.json`.
-2. Search all fields (title, first_user_msg, last_user_msg, project_path) for the keyword (case-insensitive).
-3. Display matching results:
+2. Search all fields (title, first_user_msg, project_path) for the keyword (case-insensitive).
+3. For activity timestamps, stat the corresponding JSONL file under
+   `~/.claude/projects/` and use its mtime — the index intentionally
+   does not store activity time so it never goes stale.
+4. Display matching results:
    ```
-   **<title>** (<last_visit>)
+   **<title>** (<jsonl mtime>)
    Project: <project_path>
    First msg: <first_user_msg>
    Resume: claude --resume <session_id>
@@ -127,4 +121,6 @@ Triggered by: "list sessions", "show my sessions", "list named sessions"
 
 Steps:
 1. Read `~/.claude/session_index.json`.
-2. Display all entries sorted by `last_visit` descending, in a readable table or list format.
+2. For each entry, stat the corresponding JSONL under
+   `~/.claude/projects/` for its mtime; sort entries by mtime
+   descending and display in a readable table or list format.

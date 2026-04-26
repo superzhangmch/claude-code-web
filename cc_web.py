@@ -117,7 +117,6 @@ def load_session_index() -> list[dict]:
     if not isinstance(data, list):
         return []
     data = [e for e in data if e.get("session_id") and e.get("title")]
-    data.sort(key=lambda e: e.get("last_visit", ""), reverse=True)
     return data
 
 
@@ -664,7 +663,9 @@ def build_picker_sessions() -> list[dict]:
         sid = jsonl.stem
         last_visit = _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
         is_bound = sid in bound_ids
-        # JSONL is authoritative (index's last_user_msg is frozen at name-time).
+        # last_user_msg / first_user_msg / last_visit derived from JSONL on
+        # every request (the index intentionally only stores title +
+        # project_path + first_user_msg snapshot).
         ctx = extract_recent_context(jsonl, n_exchanges=3, max_user_chars=64, max_response_chars=100)
         exs = ctx["exchanges"]
         last_ex = exs[-1] if exs else None
