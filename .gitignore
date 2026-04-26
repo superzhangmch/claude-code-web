@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+
+# local-only deploy script with real hosts/paths/credentials
+deploy.sh
