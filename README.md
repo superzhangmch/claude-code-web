@@ -93,6 +93,20 @@ Open `http://<that-ip>:8765/`, enter the token, and your active
 sessions show up in the picker. Click `Attach` (or `Enter` if already
 bound) to open one.
 
+## Name your sessions (recommended)
+
+Install the bundled `session-name` Claude Code skill so you can title
+sessions ("remember this session as …") and have those titles show up
+at the top of the web picker. Without it, sessions appear as
+`(unnamed)` and you only have first-user-message + timestamp to
+recognize them by.
+
+```sh
+cp -R skills/session-name ~/.claude/skills/
+```
+
+See `skills/README.md` for details.
+
 ## Keep the Mac awake (lid closed)
 
 `macos_helpers/` ships two launchd jobs that together let you close the

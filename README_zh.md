@@ -82,6 +82,20 @@ tailscale ip -4
 浏览器访问 `http://<那个 IP>:8765/`，输入 token，picker 里就能看到
 当前活跃的 sessions。点 `Attach` (已绑过则显示 `Enter`) 进入。
 
+## 给 session 起名(强烈推荐)
+
+把仓库里的 `session-name` Claude Code skill 装到 `~/.claude/skills/`，
+之后在任何 claude session 里说"remember this session as XXX"就能给
+当前 session 起个标题。`cc_web` picker 会优先显示有标题的 session，
+没装这个 skill 的话 picker 里全是 `(unnamed) <第一条消息>`，只能靠
+时间排序找。
+
+```sh
+cp -R skills/session-name ~/.claude/skills/
+```
+
+详见 `skills/README.md`。
+
 ## 让 Mac 合盖不睡
 
 `macos_helpers/` 里两个 launchd job 配合解决"合盖 → Mac 不睡 + 屏幕
