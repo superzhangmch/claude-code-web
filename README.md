@@ -1,20 +1,48 @@
 # claude-code-web
 
-View and reply to your local **Claude Code** sessions (running in iTerm2)
-from a remote browser, including your phone.
+Keep talking to your half-finished **Claude Code** task even when you're
+not at the Mac. Pull out your phone on the subway, see what Claude
+replied, type a follow-up, walk away again.
 
-## What it does
+## The goal
 
-A small FastAPI server runs on the Mac where `claude` runs. It uses
-iTerm2's Python API to discover tabs running `claude`, reads their JSONL
-transcripts, matches them to your picked session via screen-content +
-LLM, and forwards what you type in the browser into the live tab.
+You start a long Claude Code task in iTerm2, leave the office, want to
+check in from your phone. The conversation, the context, the in-flight
+TODO — all of it lives in that one terminal session on the office Mac.
+We want to **drive that exact session remotely**, not lose it and start
+over.
 
-You can also open a new `claude` / `claude --resume` tab from a
-predefined cwd allowlist — useful when you're away from the Mac.
+To make that work end-to-end you need three things:
 
-The browser side is a single static page. iOS-friendly: install as a
-PWA via Safari → Add to Home Screen.
+1. **The Mac stays awake** even when its lid is closed, so the remote
+   server keeps responding. (`macos_helpers/` solves this — see its
+   README.)
+2. **Network reach** from wherever you are back to that Mac. The Mac
+   typically lives behind NAT/firewalls and has no public IP. **Tailscale**
+   gives every device a stable `100.x.x.x` IP that's reachable from any
+   network you've joined to your Tailnet.
+3. **A bridge** between a browser and the live `claude` process inside
+   that iTerm2 tab — discovering the tab, reading its transcript,
+   forwarding what you type. **That's what this repo provides.**
+
+## What this repo does
+
+`cc_web.py` runs a small FastAPI server on the Mac. It uses iTerm2's
+Python API to:
+
+- Discover every iTerm2 tab where `claude` is the foreground process.
+- Read each tab's transcript from `~/.claude/projects/<…>.jsonl`.
+- Match the session you pick in the browser to the right tab via
+  screen-content scoring + an LLM tie-breaker (claude-code doesn't
+  expose pid → session\_id, so the matcher infers it).
+- Forward what you type in the browser into the live tab via iTerm2's
+  `send_text` API. Multi-line input goes as a bracketed paste so Claude
+  sees one message.
+- Spawn new tabs for `claude` / `claude --resume` from a cwd allowlist
+  when you want to start work on the office Mac while away from it.
+
+The browser side is one static page. iOS users can install it as a PWA
+via Safari → Add to Home Screen.
 
 ## Install
 
@@ -65,9 +93,13 @@ Open `http://<that-ip>:8765/`, enter the token, and your active
 sessions show up in the picker. Click `Attach` (or `Enter` if already
 bound) to open one.
 
-## Optional
+## Keep the Mac awake (lid closed)
 
-`macos_helpers/` has two launchd plists for keeping the Mac awake on AC
-and locking the screen on lid-close (so the server stays reachable with
-the lid down). Edit the paths inside before installing — neither is
-required.
+`macos_helpers/` ships two launchd jobs that together let you close the
+lid and walk away without the Mac sleeping or the screen staying
+unlocked. See `macos_helpers/README.md` for what they do and how to
+install them. Optional but strongly recommended for the use case.
+
+## Other languages
+
+- 中文: [README_zh.md](README_zh.md)
