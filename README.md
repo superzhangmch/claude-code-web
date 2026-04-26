@@ -46,13 +46,24 @@ directory for the *New session* button.
 
 ## Run
 
+Bind to a specific IP — the Tailscale interface (`100.x.x.x`) is the
+recommended setup so the server is only reachable over your VPN.
+**Don't use `0.0.0.0`** unless you trust every network the Mac is on:
+that binds to all interfaces, public Wi-Fi included.
+
 ```sh
-.venv/bin/uvicorn cc_web:app --host 0.0.0.0 --port 8765
+# find your Tailscale IP
+tailscale ip -4
+# then bind to it
+.venv/bin/uvicorn cc_web:app --host 100.x.x.x --port 8765
 ```
 
-Open `http://<mac-ip>:8765/` (Tailscale IP works), enter the token, and
-your active sessions show up in the picker. Click `Attach` (or `Enter`
-if already bound) to open one.
+For LAN-only use, bind to your LAN IP (`192.168.x.x` / `10.x.x.x`)
+instead. For local-only testing, `--host 127.0.0.1`.
+
+Open `http://<that-ip>:8765/`, enter the token, and your active
+sessions show up in the picker. Click `Attach` (or `Enter` if already
+bound) to open one.
 
 ## Optional
 
