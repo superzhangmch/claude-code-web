@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.zmc.lock-on-lid</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOUR_USERNAME/bin/lock-on-lid.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/lock-on-lid.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/lock-on-lid.log</string>
+</dict>
+</plist>

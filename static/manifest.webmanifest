@@ -1,0 +1,13 @@
+{
+  "name": "Claude Code Web",
+  "short_name": "Claude",
+  "display": "standalone",
+  "orientation": "portrait",
+  "start_url": "/",
+  "scope": "/",
+  "background_color": "#15171f",
+  "theme_color": "#15171f",
+  "icons": [
+    { "src": "/static/icon-180.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}
