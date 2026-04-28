@@ -37,7 +37,7 @@ body { display: flex; flex-direction: column; height: 100dvh; }
 header {
   padding: 10px 14px;
   padding-top: calc(10px + env(safe-area-inset-top));
-  background: var(--panel);
+  background: #000;
   border-bottom: 1px solid var(--border);
   display: flex; align-items: center; gap: 8px;
   flex-shrink: 0;
@@ -88,7 +88,7 @@ main {
   font-weight: 500; text-transform: uppercase; letter-spacing: .05em;
 }
 .session-card {
-  background: var(--panel); border: 1px solid var(--border);
+  background: #000; border: 1px solid #4a4f5e;
   border-radius: 6px; padding: 12px; margin-bottom: 8px;
   cursor: pointer;
 }
@@ -120,8 +120,8 @@ main {
   margin-bottom: 8px; padding: 6px 8px;
   border-radius: 4px; word-break: break-word;
 }
-.session-card .msg-block.user { background: #2b2431; color: #c8ccd5; border-left: 2px solid var(--accent); }
-.session-card .msg-block.claude { background: #181b26; border-left: 2px solid var(--assistant); }
+.session-card .msg-block.user { background: #000; color: #c8ccd5; border-left: 2px solid var(--accent); }
+.session-card .msg-block.claude { background: #000; border-left: 2px solid var(--assistant); }
 .session-card .msg-block .ts {
   font-size: 9px; color: var(--muted); margin-bottom: 2px;
   text-transform: uppercase; letter-spacing: 0.05em;
@@ -134,8 +134,8 @@ main {
   margin-top: 10px; display: flex; gap: 6px; justify-content: flex-end;
 }
 .session-card .attach-row button {
-  background: var(--accent); color: #1b1b1b;
-  border: 0; border-radius: 4px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
   padding: 6px 14px; font-weight: 600; font-size: 12px; cursor: pointer;
 }
 .session-card .chevron {
@@ -157,16 +157,20 @@ main {
 
 .msg {
   margin: 0 0 14px 0; padding: 10px 14px;
-  background: var(--panel); border-left: 3px solid var(--assistant);
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  border-left: 2px solid var(--assistant);
   border-radius: 4px;
 }
 .msg.user {
   border-left-color: var(--accent);
-  background: #2b2431; color: #9aa0ab;
+  background: #000; color: #9aa0ab;
   margin-left: 32px;
 }
 .msg.user .markdown { color: #9aa0ab; }
-.msg.assistant { background: #181b26; }
+.msg.assistant { background: #000; }
 .msg.tool { border-left-color: #4ec9b0; background: #1a211f; }
 .msg.thinking { border-left-color: #7a7a7a; background: #1a1a22; font-style: italic; color: var(--muted); }
 .msg .role {
@@ -263,7 +267,7 @@ main {
 footer {
   flex-shrink: 0; padding: 8px 10px;
   padding-bottom: calc(8px + env(safe-area-inset-bottom));
-  background: var(--panel); border-top: 1px solid var(--border);
+  background: #000; border-top: 1px solid var(--border);
   display: flex; gap: 8px;
 }
 footer.hidden { display: none; }
@@ -275,8 +279,8 @@ footer textarea {
   min-height: 40px; max-height: 30vh;
 }
 footer button {
-  background: var(--accent); color: #1b1b1b;
-  border: 0; border-radius: 6px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
   padding: 0 10px; font-weight: 600; font-size: 13px;
   cursor: pointer; flex-shrink: 0;
 }
