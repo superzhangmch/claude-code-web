@@ -193,9 +193,13 @@ main {
 .msg .markdown pre code { background: none; padding: 0; font-size: 12.5px; }
 .msg .markdown ul, .msg .markdown ol { margin: .3em 0 .7em 1.4em; padding: 0; }
 .msg .markdown a { color: var(--accent); }
+.msg .markdown .table-wrap {
+  max-width: 100%; overflow-x: auto;
+  margin: .5em 0;
+  -webkit-overflow-scrolling: touch;
+}
 .msg .markdown table {
-  border-collapse: collapse; margin: .5em 0;
-  display: block; max-width: 100%; overflow-x: auto;
+  border-collapse: collapse; margin: 0;
   font-size: 12.5px;
 }
 .msg .markdown th, .msg .markdown td {
@@ -557,6 +561,16 @@ footer button.icon {
     try { html = marked.parse(text || ""); } catch { html = (text || ""); }
     const tmp = document.createElement("div");
     tmp.innerHTML = html;
+    // Wrap every <table> in a scrollable div so wide tables don't blow out
+    // the message bubble on narrow screens (phone). The table keeps its
+    // native cell layout; the wrapper provides horizontal scroll only when
+    // the table actually exceeds the viewport.
+    tmp.querySelectorAll("table").forEach(t => {
+      const wrap = document.createElement("div");
+      wrap.className = "table-wrap";
+      t.parentNode.insertBefore(wrap, t);
+      wrap.appendChild(t);
+    });
     tmp.querySelectorAll("a").forEach(a => {
       const t = (a.textContent || "").trim();
       if (/^https?:\/\//i.test(t)) {

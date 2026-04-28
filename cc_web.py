@@ -210,7 +210,7 @@ def _trunc_msg(text: str, ts: str, max_chars: int) -> dict:
         out = text
     else:
         skipped = len(text) - 2 * max_chars
-        out = f"{text[:max_chars]}[..{skipped} chars skipped..]{text[-max_chars:]}"
+        out = f"{text[:max_chars]} ..[{skipped} chars skipped].. {text[-max_chars:]}"
     return {"text": out, "ts": ts}
 
 
