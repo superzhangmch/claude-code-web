@@ -1002,23 +1002,38 @@ async def post_attach(payload: AttachPayload):
     top = scored[0] if scored else None
     llm_pick = await llm_pick_candidate(jsonl, scored)
 
-    # Auto-bind only if the LLM and the heuristic AGREE on the same tab AND that
-    # tab actually had a non-zero score. Anything else (LLM rejects, LLM differs
-    # from top scorer, or all scores are zero) → pop the dialog so the user
-    # picks. This is conservative on purpose: misrouting input is the worst
-    # failure mode.
-    if (top and llm_pick and top["score"] > 0
-            and llm_pick == top["ref"].iterm_session_id):
-        b = _build_binding(sid, top["ref"], jsonl)
-        if b:
-            bindings.insert(b)
-            return {
-                "result": "bound",
-                "binding": _serialize_binding(b),
-                "score": top["score"],
-                "llm_pick": llm_pick,
-                "auto_bind_reason": "llm_and_score_agree",
-            }
+    # Auto-bind iff the LLM picked a tab AND no scored candidate >0 contradicts
+    # it. Two cases satisfy that:
+    #   1. heuristic top has score>0 and matches the LLM's pick (both agree)
+    #   2. ALL candidates score 0 (heuristic is silent — trust the LLM alone)
+    # Anything else (LLM rejected; or some other tab scored >0 against LLM's
+    # choice) → pop the dialog. Misrouting input is the worst failure mode,
+    # but a confident LLM with no contradicting heuristic signal is good
+    # enough to skip the manual confirm.
+    if llm_pick:
+        contradicting = next(
+            (c for c in scored
+             if c["score"] > 0 and c["ref"].iterm_session_id != llm_pick),
+            None,
+        )
+        chosen = next(
+            (c for c in scored if c["ref"].iterm_session_id == llm_pick),
+            None,
+        )
+        if chosen and contradicting is None:
+            b = _build_binding(sid, chosen["ref"], jsonl)
+            if b:
+                bindings.insert(b)
+                reason = ("llm_alone_heuristic_silent"
+                          if chosen["score"] == 0
+                          else "llm_and_score_agree")
+                return {
+                    "result": "bound",
+                    "binding": _serialize_binding(b),
+                    "score": chosen["score"],
+                    "llm_pick": llm_pick,
+                    "auto_bind_reason": reason,
+                }
 
     result = "no_match" if (not top or top["score"] == 0) else "choose"
     return {
