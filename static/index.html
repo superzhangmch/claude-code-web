@@ -128,7 +128,7 @@ main {
 }
 .session-card .msg-block .body {
   font-size: 12px; line-height: 1.45;
-  white-space: pre-wrap; max-height: 120px; overflow-y: auto;
+  white-space: pre-wrap;
 }
 .session-card .attach-row {
   margin-top: 10px; display: flex; gap: 6px; justify-content: flex-end;
@@ -332,6 +332,16 @@ footer button.icon {
 }
 .candidate:hover { border-color: var(--accent); }
 .candidate.selected { border-color: var(--accent); background: var(--panel2); }
+.candidate.llm-pick {
+  border-color: var(--accent); border-width: 2px; padding: 9px 0;
+  box-shadow: 0 0 0 2px rgba(255, 168, 75, 0.15);
+}
+.candidate .llm-badge {
+  background: var(--accent); color: #1b1b1b;
+  font: 600 9px/1 ui-monospace, Menlo, monospace;
+  letter-spacing: 0.05em; padding: 2px 5px; border-radius: 3px;
+  text-transform: uppercase;
+}
 .candidate .row1 { display: flex; align-items: center; gap: 8px; margin: 0 10px 4px; }
 .candidate .score-bar {
   flex: 1; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden;
@@ -873,13 +883,19 @@ footer button.icon {
     for (const c of (data.candidates || [])) {
       const el = document.createElement("div");
       el.className = "candidate";
+      const isLLMPick = llmPick && llmPick === c.iterm_session_id;
+      if (isLLMPick) el.classList.add("llm-pick");
       const r1 = document.createElement("div"); r1.className = "row1";
+      if (isLLMPick) {
+        const badge = document.createElement("span");
+        badge.className = "llm-badge"; badge.textContent = "LLM ★";
+        r1.appendChild(badge);
+      }
       const sb = document.createElement("div"); sb.className = "score-bar";
       const sf = document.createElement("div"); sf.className = "score-fill"; sf.style.width = (c.score * 100) + "%";
       sb.appendChild(sf);
       const st = document.createElement("div"); st.className = "score-text";
-      const isLLMPick = llmPick && llmPick === c.iterm_session_id;
-      st.textContent = (isLLMPick ? "★ " : "") + "score " + (c.score * 100).toFixed(0) + "% (" + c.matched_count + " match)";
+      st.textContent = "score " + (c.score * 100).toFixed(0) + "% (" + c.matched_count + " match)";
       r1.appendChild(sb); r1.appendChild(st);
       el.appendChild(r1);
       const info = document.createElement("div"); info.className = "info";
