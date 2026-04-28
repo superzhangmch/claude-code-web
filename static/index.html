@@ -1347,15 +1347,22 @@ footer button.icon {
   newDlgCancel.addEventListener("click", () => newDlg.classList.remove("show"));
   newDlgOk.addEventListener("click", async () => {
     if (!selectedCwd) return;
-    newDlgOk.disabled = true; newDlgOk.textContent = "Opening…";
+    newDlg.classList.remove("show");
+    showLoading("Opening new claude tab…");
     const r = await authedFetch("/api/new-session", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ cwd: selectedCwd }),
     });
-    if (!r.ok) { alert("Failed: " + (await r.text())); newDlgOk.disabled = false; newDlgOk.textContent = "Confirm"; return; }
-    newDlg.classList.remove("show");
-    setTimeout(refreshPicker, 2500);
+    hideLoading();
+    if (!r.ok) { alert("Failed: " + (await r.text())); return; }
+    const d = await r.json();
+    if (d.result === "bound" && d.binding) {
+      enterTranscript(d.binding.claude_session_id, d.label || selectedCwd);
+    } else {
+      // Server didn't catch the new claude in time — refresh picker as fallback.
+      setTimeout(refreshPicker, 1500);
+    }
   });
 
   // ---------- start ----------

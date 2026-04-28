@@ -1247,9 +1247,54 @@ async def post_new_session(payload: NewSessionPayload):
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
     label = _next_tmp_label()
+    request_started = _time.time()
     iterm_id = await bridge.open_new_claude_tab(cwd, label)
     if not iterm_id:
         raise HTTPException(status_code=500, detail="failed to open new tab")
+
+    # Poll: wait for the new claude pid to show up on this iterm tab AND for
+    # claude to create its JSONL under ~/.claude/projects/<encoded cwd>/.
+    # claude generates a fresh session_id on start, so we discover it by
+    # picking the newest JSONL born after our request started.
+    encoded = cwd.replace("/", "-").replace("_", "-")
+    proj_dir = PROJECTS_ROOT / encoded
+    deadline = _time.time() + 12.0
+    bound: Optional[Binding] = None
+    while _time.time() < deadline:
+        await asyncio.sleep(0.6)
+        try:
+            refs = await bridge.list_claude_tabs()
+        except Exception:
+            continue
+        match = next((r for r in refs if r.iterm_session_id == iterm_id), None)
+        if match is None or not proj_dir.exists():
+            continue
+        fresh: list[tuple[float, Path]] = []
+        for jsonl in proj_dir.glob("*.jsonl"):
+            try:
+                st = jsonl.stat()
+            except OSError:
+                continue
+            birth = getattr(st, "st_birthtime", st.st_ctime)
+            if birth >= request_started - 1.0:
+                fresh.append((birth, jsonl))
+        if not fresh:
+            continue
+        fresh.sort(reverse=True)
+        jsonl_path = fresh[0][1]
+        sid = jsonl_path.stem
+        b = _build_binding(sid, match, jsonl_path)
+        if b:
+            bindings.insert(b)
+            bound = b
+            break
+
+    if bound:
+        return {
+            "ok": True, "result": "bound",
+            "binding": _serialize_binding(bound),
+            "iterm_session_id": iterm_id, "label": label, "cwd": cwd,
+        }
     return {"ok": True, "iterm_session_id": iterm_id, "label": label, "cwd": cwd}
 
 
