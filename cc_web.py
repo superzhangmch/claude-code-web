@@ -328,8 +328,13 @@ def _slice_middle(s: str, n: int) -> str:
 
 def _normalize_for_match(s: str) -> str:
     """Strip the markdown rendering chars so JSONL ↔ screen comparison survives
-    Ink-rendered bold/italic/code/headers."""
+    Ink-rendered bold/italic/code/headers. Also collapse iTerm2's wide-char
+    padding (NULL bytes between glyphs) into whitespace."""
     s = s.strip()
+    # iTerm2 packs cell padding around wide chars (CJK, emoji) as \x00 — these
+    # would block substring matches between JSONL text and screen content. Fold
+    # them into spaces so the \s+ collapse below merges them away.
+    s = s.replace("\x00", " ")
     # remove common markdown punctuation that Ink will hide
     for ch in ("**", "__", "`", "#", ">", "*", "_"):
         s = s.replace(ch, "")
