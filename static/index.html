@@ -201,7 +201,9 @@ main {
 .msg .markdown table {
   border-collapse: collapse; margin: 0;
   font-size: 12.5px;
+  min-width: max-content;
 }
+.msg .markdown td, .msg .markdown th { white-space: nowrap; }
 .msg .markdown th, .msg .markdown td {
   border: 1px solid var(--border);
   padding: 4px 8px; text-align: left; vertical-align: top;
