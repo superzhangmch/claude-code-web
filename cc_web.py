@@ -1027,63 +1027,65 @@ async def post_attach(payload: AttachPayload):
 
     top = scored[0] if scored else None
     llm_pick = await llm_pick_candidate(jsonl, scored)
+    AUTO_BIND_MIN_SCORE = 0.05
 
-    # Auto-bind iff the LLM picked a tab AND no scored candidate >0 contradicts
-    # it. Two cases satisfy that:
-    #   1. heuristic top has score>0 and matches the LLM's pick (both agree)
-    #   2. ALL candidates score 0 (heuristic is silent — trust the LLM alone)
-    # Anything else (LLM rejected; or some other tab scored >0 against LLM's
-    # choice) → pop the dialog. Misrouting input is the worst failure mode,
-    # but a confident LLM with no contradicting heuristic signal is good
-    # enough to skip the manual confirm.
-    if llm_pick:
-        contradicting = next(
-            (c for c in scored
-             if c["score"] > 0 and c["ref"].iterm_session_id != llm_pick),
-            None,
-        )
-        chosen = next(
-            (c for c in scored if c["ref"].iterm_session_id == llm_pick),
-            None,
-        )
-        if chosen and contradicting is None:
-            # Conflict check: same pid already bound to a DIFFERENT live session.
-            # Surface it instead of silently stealing the tab.
-            existing = bindings.get_by_pid(chosen["ref"].pid)
-            if (existing and existing.claude_session_id != sid
-                    and verify_binding(existing)):
-                return {
-                    "result": "conflict",
-                    "session_id": sid,
-                    "candidates": [_candidate_dict(c) for c in scored],
-                    "llm_pick": llm_pick,
-                    "conflict": {
-                        "iterm_session_id": chosen["ref"].iterm_session_id,
-                        "pid": chosen["ref"].pid,
-                        "with_session": existing.claude_session_id,
-                    },
-                }
-            b = _build_binding(sid, chosen["ref"], jsonl)
-            if b:
-                bindings.insert(b)
-                reason = ("llm_alone_heuristic_silent"
-                          if chosen["score"] == 0
-                          else "llm_and_score_agree")
-                return {
-                    "result": "bound",
-                    "binding": _serialize_binding(b),
-                    "score": chosen["score"],
-                    "llm_pick": llm_pick,
-                    "auto_bind_reason": reason,
-                }
+    # Auto-bind requires HIGH confidence on multiple axes:
+    #   - LLM picked some tab
+    #   - that tab is the top scorer (heuristic agrees with LLM)
+    #   - the top score is decisively non-trivial (> 5%)
+    # Otherwise pop the candidate dialog so the user can verify by reading
+    # the screen content of each candidate. Misrouting is the worst failure.
+    if (llm_pick and top
+            and top["score"] > AUTO_BIND_MIN_SCORE
+            and top["ref"].iterm_session_id == llm_pick):
+        chosen = top
+        # Conflict check: same pid already bound to a DIFFERENT live session.
+        existing = bindings.get_by_pid(chosen["ref"].pid)
+        if (existing and existing.claude_session_id != sid
+                and verify_binding(existing)):
+            return {
+                "result": "conflict",
+                "session_id": sid,
+                "candidates": _candidates_with_conflicts(scored, sid),
+                "llm_pick": llm_pick,
+                "conflict": {
+                    "iterm_session_id": chosen["ref"].iterm_session_id,
+                    "pid": chosen["ref"].pid,
+                    "with_session": existing.claude_session_id,
+                },
+            }
+        b = _build_binding(sid, chosen["ref"], jsonl)
+        if b:
+            bindings.insert(b)
+            return {
+                "result": "bound",
+                "binding": _serialize_binding(b),
+                "score": chosen["score"],
+                "llm_pick": llm_pick,
+                "auto_bind_reason": "llm_and_score_agree",
+            }
 
     result = "no_match" if (not top or top["score"] == 0) else "choose"
     return {
         "result": result,
         "session_id": sid,
-        "candidates": [_candidate_dict(c) for c in scored],
+        "candidates": _candidates_with_conflicts(scored, sid),
         "llm_pick": llm_pick,
     }
+
+
+def _candidates_with_conflicts(scored: list[dict], requesting_sid: str) -> list[dict]:
+    """Like _candidate_dict but each entry also carries `bound_to_other`
+    naming the OTHER session this pid is already bound to (if any)."""
+    out = []
+    for c in scored:
+        d = _candidate_dict(c)
+        existing = bindings.get_by_pid(c["ref"].pid)
+        if (existing and existing.claude_session_id != requesting_sid
+                and verify_binding(existing)):
+            d["bound_to_other"] = existing.claude_session_id
+        out.append(d)
+    return out
 
 
 @app.post("/api/attach/confirm", dependencies=[Depends(require_token)])
