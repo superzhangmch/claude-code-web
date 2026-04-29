@@ -357,6 +357,28 @@ footer button.icon {
   border-color: var(--accent); border-width: 2px; padding: 9px 0;
   box-shadow: 0 0 0 2px rgba(255, 168, 75, 0.15);
 }
+.candidate .evidence {
+  margin: 0 10px 4px;
+  font: 11px/1.4 ui-monospace, Menlo, monospace;
+}
+.candidate .evidence .pair {
+  display: grid; grid-template-columns: 38px 1fr; gap: 0 6px;
+  padding: 3px 0; border-top: 1px dashed var(--border);
+}
+.candidate .evidence .pair:first-child { border-top: 0; }
+.candidate .evidence .pair .label {
+  color: var(--muted); text-align: right;
+}
+.candidate .evidence .pair .text { color: var(--text); word-break: break-all; }
+.candidate .evidence .pair.transcript .label { color: var(--accent); }
+.candidate .evidence .pair.screen .label { color: var(--assistant); }
+.candidate .evidence .verdict {
+  display: inline-block; font-size: 9px; font-weight: 600;
+  padding: 1px 5px; border-radius: 3px; letter-spacing: 0.05em;
+  text-transform: uppercase; margin-left: 6px;
+}
+.candidate .evidence .verdict.ok { background: #1f3a26; color: #6ee884; }
+.candidate .evidence .verdict.fake { background: #3a1f1f; color: #ff8b6a; }
 .candidate.conflict {
   border-color: #ff6a6a;
   box-shadow: inset 0 0 0 1px rgba(255,107,107,0.3);
@@ -975,6 +997,36 @@ footer button.icon {
         warn.className = "candidate-conflict";
         warn.textContent = `⚠ already bound to session [${c.bound_to_other.slice(0, 8)}] — picking this steals it`;
         el.appendChild(warn);
+      }
+      // Evidence pairs from the LLM, shown only on the LLM-picked candidate.
+      if (isLLMPick && Array.isArray(data.llm_matches) && data.llm_matches.length) {
+        const ev = document.createElement("div"); ev.className = "evidence";
+        const head = document.createElement("div"); head.className = "pair";
+        const headLbl = document.createElement("div"); headLbl.className = "label";
+        headLbl.textContent = "LLM ★";
+        const headText = document.createElement("div"); headText.className = "text";
+        headText.textContent = data.llm_verified
+          ? "evidence (all verified)"
+          : "evidence (some unverified — be careful)";
+        head.appendChild(headLbl); head.appendChild(headText);
+        ev.appendChild(head);
+        for (const mp of data.llm_matches) {
+          const verdictCls = mp.verdict === "OK" ? "ok" : "fake";
+          const tRow = document.createElement("div"); tRow.className = "pair transcript";
+          const tLbl = document.createElement("div"); tLbl.className = "label"; tLbl.textContent = "session";
+          const tText = document.createElement("div"); tText.className = "text";
+          tText.textContent = mp.transcript || "";
+          const v = document.createElement("span"); v.className = "verdict " + verdictCls;
+          v.textContent = mp.verdict || "";
+          tText.appendChild(v);
+          tRow.appendChild(tLbl); tRow.appendChild(tText); ev.appendChild(tRow);
+          const sRow = document.createElement("div"); sRow.className = "pair screen";
+          const sLbl = document.createElement("div"); sLbl.className = "label"; sLbl.textContent = "screen";
+          const sText = document.createElement("div"); sText.className = "text";
+          sText.textContent = mp.screen || "";
+          sRow.appendChild(sLbl); sRow.appendChild(sText); ev.appendChild(sRow);
+        }
+        el.appendChild(ev);
       }
       const tail = document.createElement("div"); tail.className = "screen-tail";
       tail.textContent = (c.screen_tail || "").replace(/ /g, " ");

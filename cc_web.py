@@ -374,19 +374,33 @@ def _llm_http_post(url: str, headers: dict, body: dict, timeout: float) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
-async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> Optional[str]:
-    """Ask the configured LLM which iterm tab is the best match for this session.
+async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
+    """Ask the configured LLM which iterm tab matches this session AND
+    return the evidence pairs it used as proof. Each evidence pair gets
+    locally re-verified by substring-matching both sides into their
+    claimed source after our normalize step. Returns:
 
-    Returns iterm_session_id of the picked candidate, or None if the LLM
-    declines / call fails / config missing."""
+        {
+            "pick": Optional[str],   # iterm_session_id of the picked tab
+            "matches": [              # evidence pairs from the LLM
+                {"transcript": str, "screen": str, "verdict": "OK"|"TRANSCRIPT_FAKE"|"SCREEN_FAKE"},
+                ...
+            ],
+            "all_verified": bool,     # True iff matches non-empty AND every verdict==OK
+            "raw": Optional[str],     # raw model text (for debug)
+        }
+
+    Empty result {pick: None, matches: [], all_verified: False} on any
+    failure (config missing, HTTP error, parse error, tab=0)."""
+    empty = {"pick": None, "matches": [], "all_verified": False, "raw": None}
     if not scored:
-        return None
+        return empty
     cfg = _load_llm_conf()
     api_base = cfg.get("api_base", "").rstrip("/")
     api_key = cfg.get("api_key", "")
     model = cfg.get("model", "")
     if not api_base or not model:
-        return None
+        return empty
 
     ctx = extract_recent_context(jsonl_path, n_exchanges=5,
                                  max_user_chars=400, max_response_chars=500)
@@ -407,35 +421,49 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> Optional[s
             )
 
     tabs = []
+    screen_by_tab: dict[int, str] = {}
     for i, c in enumerate(scored, 1):
         ref = c["ref"]
         tail = (c.get("screen") or "")[-1500:]
+        screen_by_tab[i] = tail
         tabs.append(f"### Tab {i} (pid={ref.pid}, cwd={ref.cwd})\n{tail}")
     tabs_text = "\n\n".join(tabs)
+    transcript_full = (latest_block + "\n" + older_block).strip()
 
     prompt = (
         "You match a Claude Code session to one of several iTerm2 tabs.\n"
         "\n"
-        "DECISION PROCEDURE — follow it step by step:\n"
-        "1. Read the SESSION LATEST MESSAGE block carefully. Extract concrete\n"
-        "   tokens from it: file paths, file names, function names, URL paths,\n"
-        "   distinctive identifiers, distinctive Chinese phrases.\n"
-        "2. For each candidate tab, check whether ANY of those exact tokens\n"
+        "DECISION PROCEDURE:\n"
+        "1. Read the SESSION LATEST MESSAGE. Extract concrete tokens —\n"
+        "   file paths, file names, identifiers, URL paths, distinctive\n"
+        "   Chinese/English phrases.\n"
+        "2. For each candidate tab, count how many of those exact tokens\n"
         "   appear literally in that tab's screen text.\n"
-        "3. The tab whose screen contains the most exact-token hits from the\n"
-        "   latest message is the answer.\n"
-        "4. Older context is for tie-breaking ONLY. Topical similarity (e.g.\n"
-        "   both tabs talk about 'payments') without any shared exact token\n"
-        "   is NOT a match — return 0 instead of guessing.\n"
-        "5. The user may have just switched topic; do not let the older\n"
-        "   exchanges' theme override the latest message's evidence.\n"
+        "3. The tab with the most exact-token hits wins. Topical similarity\n"
+        "   without shared exact tokens means tab=0 (no match).\n"
+        "4. Older context is for tiebreaking only. Don't let older topic\n"
+        "   override the latest message's evidence.\n"
         "\n"
-        f"Return one integer: 0 if no tab has clear exact-token overlap, else 1..{len(scored)}.\n"
+        "OUTPUT — return ONLY valid JSON, no prose, no code fence:\n"
+        "{\n"
+        f'  "tab": <integer 0..{len(scored)}>,\n'
+        '  "matches": [\n'
+        '    {"transcript": "<5-50 char snippet from session>", "screen": "<5-50 char snippet from picked tab>"},\n'
+        "    ...\n"
+        "  ]\n"
+        "}\n"
+        "\n"
+        "RULES for `matches`:\n"
+        "- Provide 1-3 strongest evidence pairs.\n"
+        "- transcript snippet MUST be copied verbatim from SESSION blocks.\n"
+        "- screen snippet MUST be copied verbatim from the picked tab's screen.\n"
+        "- Each pair should support that the snippets refer to the SAME thing.\n"
+        "- If tab=0, matches must be [].\n"
         "\n"
         f"=== SESSION LATEST MESSAGE (decisive) ===\n{latest_block or '(none)'}\n\n"
         f"=== SESSION OLDER CONTEXT (tiebreaker only) ===\n{older_block or '(none)'}\n\n"
         f"=== CANDIDATE TABS ===\n{tabs_text}\n\n"
-        "Answer with just one number."
+        "JSON answer:"
     )
 
     url = f"{api_base}/v1/chat/completions"
@@ -446,33 +474,71 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> Optional[s
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 8,
+        "max_tokens": 1500,
         "temperature": 0,
     }
     try:
         raw = await asyncio.wait_for(
-            asyncio.to_thread(_llm_http_post, url, headers, body, 20.0),
-            timeout=25.0,
+            asyncio.to_thread(_llm_http_post, url, headers, body, 30.0),
+            timeout=35.0,
         )
     except (urllib.error.URLError, asyncio.TimeoutError, OSError, ValueError) as e:
         log.info("llm pick HTTP failed: %s", e)
-        return None
+        return empty
     except Exception as e:
         log.info("llm pick unexpected error: %s", e)
-        return None
+        return empty
     try:
         d = json.loads(raw)
         content = d["choices"][0]["message"]["content"]
     except (KeyError, IndexError, json.JSONDecodeError) as e:
         log.info("llm pick parse failed: %s; body=%s", e, raw[:500])
-        return None
-    m = re.search(r"\d+", content or "")
-    if not m:
-        return None
-    n = int(m.group(0))
-    if n < 1 or n > len(scored):
-        return None
-    return scored[n - 1]["ref"].iterm_session_id
+        return empty
+
+    # Extract JSON object from content (strip any code fence / surrounding text)
+    s = (content or "").strip()
+    m = re.search(r"\{.*\}", s, re.S)
+    if m:
+        s = m.group(0)
+    try:
+        parsed = json.loads(s)
+    except json.JSONDecodeError as e:
+        log.info("llm pick output not JSON: %s; content=%s", e, (content or "")[:300])
+        return {"pick": None, "matches": [], "all_verified": False, "raw": content}
+    tab = parsed.get("tab")
+    if not isinstance(tab, int) or tab < 0 or tab > len(scored):
+        return {"pick": None, "matches": [], "all_verified": False, "raw": content}
+    if tab == 0:
+        return {"pick": None, "matches": [], "all_verified": False, "raw": content}
+
+    pick_iterm_id = scored[tab - 1]["ref"].iterm_session_id
+    screen_text = screen_by_tab.get(tab, "")
+    norm_transcript = _normalize_for_match(transcript_full)
+    norm_screen = _normalize_for_match(screen_text)
+    raw_matches = parsed.get("matches") or []
+    verified: list[dict] = []
+    for pair in raw_matches:
+        if not isinstance(pair, dict):
+            continue
+        t_snip = (pair.get("transcript") or "").strip()
+        s_snip = (pair.get("screen") or "").strip()
+        t_norm = _normalize_for_match(t_snip)
+        s_norm = _normalize_for_match(s_snip)
+        t_in = bool(t_norm) and t_norm in norm_transcript
+        s_in = bool(s_norm) and s_norm in norm_screen
+        verdict = "OK" if (t_in and s_in) else (
+            "TRANSCRIPT_FAKE" if not t_in else "SCREEN_FAKE"
+        )
+        verified.append({
+            "transcript": t_snip, "screen": s_snip, "verdict": verdict,
+        })
+    all_ok = bool(verified) and all(v["verdict"] == "OK" for v in verified)
+    return {
+        "pick": pick_iterm_id,
+        "matches": verified,
+        "all_verified": all_ok,
+        "raw": content,
+    }
 
 
 # ---------- the binding cache ----------
@@ -1048,16 +1114,20 @@ async def post_attach(payload: AttachPayload):
     scored.sort(key=lambda x: x["score"], reverse=True)
 
     top = scored[0] if scored else None
-    llm_pick = await llm_pick_candidate(jsonl, scored)
+    llm_result = await llm_pick_candidate(jsonl, scored)
+    llm_pick = llm_result.get("pick")
+    llm_matches = llm_result.get("matches") or []
+    llm_verified = bool(llm_result.get("all_verified"))
     AUTO_BIND_MIN_SCORE = 0.05
 
     # Auto-bind requires HIGH confidence on multiple axes:
     #   - LLM picked some tab
+    #   - LLM's evidence pairs ALL pass local substring verification
     #   - that tab is the top scorer (heuristic agrees with LLM)
     #   - the top score is decisively non-trivial (> 5%)
-    # Otherwise pop the candidate dialog so the user can verify by reading
-    # the screen content of each candidate. Misrouting is the worst failure.
-    if (llm_pick and top
+    # Anything weaker pops the candidate dialog so the user can verify
+    # by reading the screen content of each candidate.
+    if (llm_pick and llm_verified and top
             and top["score"] > AUTO_BIND_MIN_SCORE
             and top["ref"].iterm_session_id == llm_pick):
         chosen = top
@@ -1070,6 +1140,8 @@ async def post_attach(payload: AttachPayload):
                 "session_id": sid,
                 "candidates": _candidates_with_conflicts(scored, sid),
                 "llm_pick": llm_pick,
+                "llm_matches": llm_matches,
+                "llm_verified": llm_verified,
                 "conflict": {
                     "iterm_session_id": chosen["ref"].iterm_session_id,
                     "pid": chosen["ref"].pid,
@@ -1084,7 +1156,9 @@ async def post_attach(payload: AttachPayload):
                 "binding": _serialize_binding(b),
                 "score": chosen["score"],
                 "llm_pick": llm_pick,
-                "auto_bind_reason": "llm_and_score_agree",
+                "llm_matches": llm_matches,
+                "llm_verified": llm_verified,
+                "auto_bind_reason": "llm_and_score_agree_verified",
             }
 
     result = "no_match" if (not top or top["score"] == 0) else "choose"
@@ -1093,6 +1167,8 @@ async def post_attach(payload: AttachPayload):
         "session_id": sid,
         "candidates": _candidates_with_conflicts(scored, sid),
         "llm_pick": llm_pick,
+        "llm_matches": llm_matches,
+        "llm_verified": llm_verified,
     }
 
 
