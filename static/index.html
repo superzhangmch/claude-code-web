@@ -138,6 +138,8 @@ main {
   border: 1px solid var(--border); border-radius: 4px;
   padding: 6px 14px; font-weight: 600; font-size: 12px; cursor: pointer;
 }
+.session-card .attach-row button.detach { color: var(--muted); }
+.session-card .attach-row button.detach:hover { color: #ff8b6a; border-color: #ff6a6a; }
 .session-card .chevron {
   font-size: 12px; color: var(--muted);
   transition: transform 0.15s; display: inline-block;
@@ -830,6 +832,23 @@ footer button.icon {
         }
       }
       const attachRow = document.createElement("div"); attachRow.className = "attach-row";
+      if (s.bound) {
+        const detachBtn = document.createElement("button");
+        detachBtn.textContent = "Detach";
+        detachBtn.className = "detach";
+        detachBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          detachBtn.disabled = true; detachBtn.textContent = "Detaching…";
+          const r = await authedFetch("/api/detach", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ claude_session_id: s.claude_session_id }),
+          });
+          if (!r.ok) { alert("Detach failed: " + await r.text()); detachBtn.disabled = false; detachBtn.textContent = "Detach"; return; }
+          refreshPicker();
+        });
+        attachRow.appendChild(detachBtn);
+      }
       const attachBtn = document.createElement("button");
       attachBtn.textContent = s.bound ? "Enter" : "Attach";
       attachBtn.addEventListener("click", (e) => {
