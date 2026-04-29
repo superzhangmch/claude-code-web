@@ -357,6 +357,12 @@ footer button.icon {
   border-color: var(--accent); border-width: 2px; padding: 9px 0;
   box-shadow: 0 0 0 2px rgba(255, 168, 75, 0.15);
 }
+.conflict-banner {
+  background: rgba(255,107,107,0.12); color: #ff8b6a;
+  border: 1px solid #ff6a6a; border-radius: 4px;
+  padding: 6px 8px; margin-bottom: 6px;
+  font-size: 12px; line-height: 1.4;
+}
 .candidate .llm-badge {
   background: var(--accent); color: #1b1b1b;
   font: 600 9px/1 ui-monospace, Menlo, monospace;
@@ -861,26 +867,10 @@ footer button.icon {
       return;
     }
     if (data.result === "conflict") {
-      const c = data.conflict || {};
-      const otherSid = (c.with_session || "").slice(0, 8);
-      const ok = confirm(
-        `iTerm tab pid=${c.pid} is already bound to a different session [${otherSid}].\n\n` +
-        `Reattaching this session here will steal the tab from that session.\n\nContinue?`
-      );
-      if (!ok) return;
-      showLoading("Forcing attach…");
-      const r2 = await authedFetch("/api/attach/confirm", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          claude_session_id: sid,
-          iterm_session_id: c.iterm_session_id,
-          force: true,
-        }),
-      });
-      hideLoading();
-      if (!r2.ok) { alert("Confirm failed: " + await r2.text()); return; }
-      enterTranscript(sid, label);
+      // Reuse the candidate dialog so the user can see the screen contents of
+      // the conflicting tab (and any others). The dialog will show a warning
+      // banner and pre-select the conflicting tab.
+      openCandidateDialog(sid, label, data);
       return;
     }
     if (data.result === "not_running") {
@@ -929,24 +919,41 @@ footer button.icon {
   let candiState = { sid: null, label: "", picked: null };
 
   function openCandidateDialog(sid, label, data) {
-    candiState = { sid, label, picked: null };
+    const conflict = data.conflict || null;
+    candiState = { sid, label, picked: null, conflict };
     candiOk.disabled = true;
     candiOk.textContent = "Confirm";
     const llmPick = data.llm_pick || null;
     const top = (data.candidates && data.candidates[0]) || null;
     const topScoreId = top ? top.iterm_session_id : null;
     const llmDisagreesTop = llmPick && topScoreId && llmPick !== topScoreId;
+    candiMsg.textContent = "";
+    candiMsg.innerHTML = "";
+    if (conflict) {
+      const warn = document.createElement("div");
+      warn.className = "conflict-banner";
+      warn.textContent =
+        `⚠ Tab pid=${conflict.pid} is already bound to session ` +
+        `[${(conflict.with_session || "").slice(0, 8)}]. Confirming will steal it.`;
+      candiMsg.appendChild(warn);
+    }
     let header = (data.result === "no_match")
       ? "No tab matched on content. "
+      : (data.result === "conflict")
+      ? "LLM picked the tab marked ★, but that tab is already bound. "
       : "Multiple tabs could be this session. ";
-    if (llmPick && llmDisagreesTop) {
+    if (llmPick && llmDisagreesTop && data.result !== "conflict") {
       header += "LLM disagrees with top score — picked ★ instead. Verify.";
-    } else if (llmPick) {
+    } else if (llmPick && data.result !== "conflict") {
       header += "LLM picked ★ — verify before confirming.";
-    } else {
+    } else if (!llmPick) {
       header += "LLM did not pick any tab. Verify visually or cancel.";
+    } else {
+      header += "Verify the screen content matches before confirming.";
     }
-    candiMsg.textContent = header;
+    const headerNode = document.createElement("div");
+    headerNode.textContent = header;
+    candiMsg.appendChild(headerNode);
     candiList.innerHTML = "";
     let pickedEl = null;
     for (const c of (data.candidates || [])) {
@@ -993,30 +1000,45 @@ footer button.icon {
   candiOk.addEventListener("click", async () => {
     if (!candiState.picked) return;
     candiOk.disabled = true; candiOk.textContent = "Binding…";
-    async function attempt(force) {
-      return authedFetch("/api/attach/confirm", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          claude_session_id: candiState.sid,
-          iterm_session_id: candiState.picked,
-          force: !!force,
-        }),
-      });
-    }
-    let resp = await attempt(false);
+    // If the user picks the tab that was already in conflict, confirming
+    // here is the user's explicit ack — send force=true. For any other tab
+    // pick, send force=false so the server can still warn about a separate
+    // conflict on a tab the user manually chose.
+    const force = !!(candiState.conflict
+                     && candiState.conflict.iterm_session_id === candiState.picked);
+    let resp = await authedFetch("/api/attach/confirm", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        claude_session_id: candiState.sid,
+        iterm_session_id: candiState.picked,
+        force,
+      }),
+    });
     if (!resp.ok) { alert("Confirm failed: " + await resp.text()); candiOk.disabled = false; candiOk.textContent = "Confirm"; return; }
     let data = await resp.json();
     if (data.result === "conflict") {
-      const c = data.conflict || {};
-      const otherSid = (c.with_session || "").slice(0, 8);
-      const ok = confirm(
-        `iTerm tab pid=${c.pid} is already bound to session [${otherSid}].\n\n` +
-        `Continue and steal the tab?`
-      );
-      if (!ok) { candiOk.disabled = false; candiOk.textContent = "Confirm"; return; }
-      resp = await attempt(true);
-      if (!resp.ok) { alert("Confirm failed: " + await resp.text()); candiOk.disabled = false; candiOk.textContent = "Confirm"; return; }
+      // The tab the user manually picked has its own conflict — re-open the
+      // dialog with the new conflict info instead of doing a browser confirm.
+      candiOk.disabled = false; candiOk.textContent = "Confirm";
+      const reopen = {
+        result: "conflict",
+        candidates: [], // no rescan; reuse existing list
+        llm_pick: null,
+        conflict: data.conflict,
+      };
+      // preserve current candidate list visually — just update the banner+state
+      candiState.conflict = data.conflict;
+      const banner = candiMsg.querySelector(".conflict-banner");
+      const txt = `⚠ Tab pid=${data.conflict.pid} is already bound to session ` +
+                  `[${(data.conflict.with_session || "").slice(0,8)}]. Click Confirm again to steal it.`;
+      if (banner) { banner.textContent = txt; }
+      else {
+        const w = document.createElement("div");
+        w.className = "conflict-banner"; w.textContent = txt;
+        candiMsg.insertBefore(w, candiMsg.firstChild);
+      }
+      return;
     }
     candiDlg.classList.remove("show");
     enterTranscript(candiState.sid, candiState.label);
