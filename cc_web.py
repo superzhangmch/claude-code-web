@@ -463,6 +463,8 @@ class Binding:
     pid_start: float
     cwd: str
     jsonl_path: Path
+    window_index: int = 0
+    tab_index: int = 0
     bound_at: float = field(default_factory=_time.time)
 
 
@@ -668,7 +670,12 @@ def build_picker_sessions() -> list[dict]:
     for mtime, jsonl, named in items:
         sid = jsonl.stem
         last_visit = _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        try:
+            file_size = jsonl.stat().st_size
+        except OSError:
+            file_size = 0
         is_bound = sid in bound_ids
+        binding_info = bindings.get_by_session(sid) if is_bound else None
         # last_user_msg / first_user_msg / last_visit derived from JSONL on
         # every request (the index intentionally only stores title +
         # project_path + first_user_msg snapshot).
@@ -681,6 +688,7 @@ def build_picker_sessions() -> list[dict]:
             "title": (named.get("title") if named else ""),
             "project_path": (named.get("project_path") if named else "") or _project_path_from_jsonl(jsonl) or "",
             "last_visit": last_visit,
+            "file_size": file_size,
             "first_user_msg": ctx["first_user_msg"],
             "first_ts": ctx["first_ts"],
             "last_user_msg": last_user["text"] if last_user else "",
@@ -688,6 +696,7 @@ def build_picker_sessions() -> list[dict]:
             "exchanges": exs,        # last 3 user+response pairs
             "named": named is not None,
             "bound": is_bound,
+            "binding": _serialize_binding(binding_info) if binding_info else None,
         })
     return out
 
@@ -889,12 +898,22 @@ async def _binding_reaper(interval_sec: float = 30.0) -> None:
                 bindings.remove_session(b.claude_session_id)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+async def _bg_initial_connect() -> None:
     try:
         await bridge.connect()
+        log.info("iTerm2 bridge connected")
     except Exception as e:
-        log.warning("initial iTerm2 connect failed: %s (will retry lazily)", e)
+        log.warning("initial iTerm2 connect failed: %s "
+                    "(will retry on first request)", e)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Fire-and-forget the initial connect. When launched by launchd, iTerm2
+    # may pop a "Allow this script to control iTerm?" dialog that no one will
+    # click — synchronously awaiting connect there hangs startup forever.
+    # ensure_connected will retry lazily on the first real request.
+    asyncio.create_task(_bg_initial_connect())
     reaper_task = asyncio.create_task(_binding_reaper(30.0))
     try:
         yield
@@ -918,6 +937,7 @@ class AttachPayload(BaseModel):
 class AttachConfirmPayload(BaseModel):
     claude_session_id: str
     iterm_session_id: str
+    force: bool = False
 
 
 class DetachPayload(BaseModel):
@@ -1027,6 +1047,22 @@ async def post_attach(payload: AttachPayload):
             None,
         )
         if chosen and contradicting is None:
+            # Conflict check: same pid already bound to a DIFFERENT live session.
+            # Surface it instead of silently stealing the tab.
+            existing = bindings.get_by_pid(chosen["ref"].pid)
+            if (existing and existing.claude_session_id != sid
+                    and verify_binding(existing)):
+                return {
+                    "result": "conflict",
+                    "session_id": sid,
+                    "candidates": [_candidate_dict(c) for c in scored],
+                    "llm_pick": llm_pick,
+                    "conflict": {
+                        "iterm_session_id": chosen["ref"].iterm_session_id,
+                        "pid": chosen["ref"].pid,
+                        "with_session": existing.claude_session_id,
+                    },
+                }
             b = _build_binding(sid, chosen["ref"], jsonl)
             if b:
                 bindings.insert(b)
@@ -1064,6 +1100,18 @@ async def post_attach_confirm(payload: AttachConfirmPayload):
     jsonl = find_jsonl_for_session(payload.claude_session_id)
     if jsonl is None:
         raise HTTPException(status_code=404, detail="unknown session_id")
+    if not payload.force:
+        existing = bindings.get_by_pid(ref.pid)
+        if (existing and existing.claude_session_id != payload.claude_session_id
+                and verify_binding(existing)):
+            return {
+                "result": "conflict",
+                "conflict": {
+                    "iterm_session_id": ref.iterm_session_id,
+                    "pid": ref.pid,
+                    "with_session": existing.claude_session_id,
+                },
+            }
     b = _build_binding(payload.claude_session_id, ref, jsonl)
     if not b:
         raise HTTPException(status_code=500, detail="could not derive pid_start")
@@ -1312,6 +1360,8 @@ def _build_binding(sid: str, ref: ClaudeSessionRef, jsonl: Path) -> Optional[Bin
         pid_start=pid_start,
         cwd=ref.cwd,
         jsonl_path=jsonl,
+        window_index=ref.window_index,
+        tab_index=ref.tab_index,
     )
 
 
@@ -1321,6 +1371,8 @@ def _serialize_binding(b: Binding) -> dict:
         "iterm_session_id": b.iterm_session_id,
         "pid": b.pid,
         "cwd": b.cwd,
+        "window_index": b.window_index,
+        "tab_index": b.tab_index,
         "bound_at": b.bound_at,
     }
 

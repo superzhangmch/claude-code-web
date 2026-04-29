@@ -732,13 +732,28 @@ footer button.icon {
       cwd.textContent = s.project_path || "";
       card.appendChild(cwd);
 
+      function fmtSize(n) {
+        if (!n) return "";
+        if (n < 1024) return n + "B";
+        if (n < 1024*1024) return (n/1024).toFixed(0) + "KB";
+        return (n/1024/1024).toFixed(1) + "MB";
+      }
+
       const badges = document.createElement("div");
       badges.className = "badges";
-      if (s.bound) {
+      if (s.bound && s.binding) {
+        const b = document.createElement("span"); b.className = "badge bound";
+        b.textContent = `connected · pid ${s.binding.pid} · w${(s.binding.window_index||0)+1}t${(s.binding.tab_index||0)+1}`;
+        badges.appendChild(b);
+      } else if (s.bound) {
         const b = document.createElement("span"); b.className = "badge bound"; b.textContent = "connected"; badges.appendChild(b);
       }
       if (!s.named) {
         const b = document.createElement("span"); b.className = "badge unnamed"; b.textContent = "unnamed"; badges.appendChild(b);
+      }
+      if (s.file_size) {
+        const b = document.createElement("span"); b.className = "badge unnamed"; b.textContent = fmtSize(s.file_size);
+        badges.appendChild(b);
       }
       if (badges.children.length) card.appendChild(badges);
 
@@ -843,6 +858,29 @@ footer button.icon {
     }
     if (data.result === "choose" || data.result === "no_match") {
       openCandidateDialog(sid, label, data);
+      return;
+    }
+    if (data.result === "conflict") {
+      const c = data.conflict || {};
+      const otherSid = (c.with_session || "").slice(0, 8);
+      const ok = confirm(
+        `iTerm tab pid=${c.pid} is already bound to a different session [${otherSid}].\n\n` +
+        `Reattaching this session here will steal the tab from that session.\n\nContinue?`
+      );
+      if (!ok) return;
+      showLoading("Forcing attach…");
+      const r2 = await authedFetch("/api/attach/confirm", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          claude_session_id: sid,
+          iterm_session_id: c.iterm_session_id,
+          force: true,
+        }),
+      });
+      hideLoading();
+      if (!r2.ok) { alert("Confirm failed: " + await r2.text()); return; }
+      enterTranscript(sid, label);
       return;
     }
     if (data.result === "not_running") {
@@ -955,15 +993,31 @@ footer button.icon {
   candiOk.addEventListener("click", async () => {
     if (!candiState.picked) return;
     candiOk.disabled = true; candiOk.textContent = "Binding…";
-    const resp = await authedFetch("/api/attach/confirm", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        claude_session_id: candiState.sid,
-        iterm_session_id: candiState.picked,
-      }),
-    });
+    async function attempt(force) {
+      return authedFetch("/api/attach/confirm", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          claude_session_id: candiState.sid,
+          iterm_session_id: candiState.picked,
+          force: !!force,
+        }),
+      });
+    }
+    let resp = await attempt(false);
     if (!resp.ok) { alert("Confirm failed: " + await resp.text()); candiOk.disabled = false; candiOk.textContent = "Confirm"; return; }
+    let data = await resp.json();
+    if (data.result === "conflict") {
+      const c = data.conflict || {};
+      const otherSid = (c.with_session || "").slice(0, 8);
+      const ok = confirm(
+        `iTerm tab pid=${c.pid} is already bound to session [${otherSid}].\n\n` +
+        `Continue and steal the tab?`
+      );
+      if (!ok) { candiOk.disabled = false; candiOk.textContent = "Confirm"; return; }
+      resp = await attempt(true);
+      if (!resp.ok) { alert("Confirm failed: " + await resp.text()); candiOk.disabled = false; candiOk.textContent = "Confirm"; return; }
+    }
     candiDlg.classList.remove("show");
     enterTranscript(candiState.sid, candiState.label);
   });
