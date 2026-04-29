@@ -32,6 +32,28 @@ puts the *display* to sleep without sleeping the *Mac*. Combined with
 Settings → Lock Screen, this gives you lid-close screen lock back, on
 top of disablesleep.
 
+### 3. `cc-web-start.sh` + `com.zmc.cc-web.plist` (auto-start cc_web)
+**LaunchAgent (per-user).** Auto-starts the cc_web uvicorn server at
+user login (and respawns it if the process dies, via `KeepAlive`).
+The wrapper script picks up the Tailscale IP at launch time
+(`tailscale ip -4`) so the plist itself doesn't need to be edited per
+machine — find the project under `~/claude-code-web` (or
+`~/Desktop/my_code/claude-code-web` etc.) and exec
+`./.venv/bin/uvicorn cc_web:app --host <tailscale ip> --port 8765`.
+
+Caveats:
+- LaunchAgent only starts at *user login*. If the Mac reboots and no
+  one logs in, cc_web won't start. Set System Settings → Users →
+  Auto-login if you want truly headless boot.
+- The first time launchd starts cc_web, iTerm2 will pop a "Allow this
+  script to control iTerm?" dialog. Click Allow ONCE, or uncheck
+  "Require 'Authenticate API requests'" in iTerm2 Settings → General
+  → Magic to skip the dialog forever.
+- macOS TCC blocks launchd-spawned processes from reading `~/Desktop`
+  / `~/Documents` / `~/Downloads`. Keep the project outside these
+  dirs (e.g. `~/claude-code-web`), or grant `/bin/bash` Full Disk
+  Access in System Settings → Privacy & Security.
+
 ## Install
 
 ```sh
@@ -54,7 +76,13 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/com.zmc.disablesleep-ac.p
 cp com.zmc.lock-on-lid.plist ~/Library/LaunchAgents/
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.zmc.lock-on-lid.plist
 
-# 5. Enable lock-on-sleep in System Settings → Lock Screen
+# 5. Install the cc_web auto-start LaunchAgent.
+$EDITOR com.zmc.cc-web.plist        # set /Users/YOUR_USERNAME/bin/cc-web-start.sh
+cp cc-web-start.sh ~/bin/cc-web-start.sh && chmod +x ~/bin/cc-web-start.sh
+cp com.zmc.cc-web.plist ~/Library/LaunchAgents/
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.zmc.cc-web.plist
+
+# 6. Enable lock-on-sleep in System Settings → Lock Screen
 #    "Require password" → "immediately"
 ```
 
@@ -68,6 +96,10 @@ pmset -g | grep disablesleep      # 1 on AC, 0 on battery
 # Agent (user) — check it's running
 launchctl list | grep com.zmc.lock-on-lid
 tail -f /tmp/lock-on-lid.log      # watch lid-close events
+
+# cc_web auto-start agent
+launchctl list | grep com.zmc.cc-web
+tail -f /tmp/cc-web.log           # uvicorn startup + access logs
 ```
 
 ## Uninstall
@@ -77,5 +109,7 @@ sudo launchctl bootout system /Library/LaunchDaemons/com.zmc.disablesleep-ac.pli
 sudo rm /Library/LaunchDaemons/com.zmc.disablesleep-ac.plist
 launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.zmc.lock-on-lid.plist
 rm ~/Library/LaunchAgents/com.zmc.lock-on-lid.plist
+launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.zmc.cc-web.plist
+rm ~/Library/LaunchAgents/com.zmc.cc-web.plist
 sudo pmset -a disablesleep 0      # restore default
 ```
