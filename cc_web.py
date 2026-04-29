@@ -389,17 +389,22 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> Optional[s
         return None
 
     ctx = extract_recent_context(jsonl_path, n_exchanges=5,
-                                 max_user_chars=300, max_response_chars=400)
-    excerpts = []
-    for ex in ctx.get("exchanges", []):
-        u = ex["user"]["text"]
-        r = ((ex.get("response") or {}).get("text") or "").strip()
-        excerpts.append(f"USER: {u}\nASSISTANT: {r}")
-    if excerpts:
-        # Mark the last (most recent) exchange explicitly so the model weights
-        # it heavier than the topical context built up in earlier turns.
-        excerpts[-1] = "[MOST RECENT]\n" + excerpts[-1]
-    history = "\n---\n".join(excerpts) or "(no history)"
+                                 max_user_chars=400, max_response_chars=500)
+    exchanges = ctx.get("exchanges") or []
+
+    latest_block = ""
+    older_block = ""
+    if exchanges:
+        latest = exchanges[-1]
+        u = latest["user"]["text"]
+        r = ((latest.get("response") or {}).get("text") or "").strip()
+        latest_block = f"USER (latest): {u}\nASSISTANT (latest): {r}"
+        older = exchanges[:-1]
+        if older:
+            older_block = "\n---\n".join(
+                f"USER: {ex['user']['text']}\nASSISTANT: {((ex.get('response') or {}).get('text') or '').strip()}"
+                for ex in older
+            )
 
     tabs = []
     for i, c in enumerate(scored, 1):
@@ -410,20 +415,25 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> Optional[s
 
     prompt = (
         "You match a Claude Code session to one of several iTerm2 tabs.\n"
-        "I show you the session's recent transcript and each tab's current screen.\n"
         "\n"
-        "RULES:\n"
-        "1. Weight the [MOST RECENT] exchange MUCH more than older ones. The\n"
-        "   user may have switched topic — the last user message is what's on\n"
-        "   the screen NOW.\n"
-        "2. Match on EXACT shared strings (file paths, identifiers, command\n"
-        "   names, distinctive phrases) — NOT on general topical similarity.\n"
-        "   Two tabs about 'renewal payments' don't necessarily match if the\n"
-        "   transcript names a specific file that only ONE tab's screen shows.\n"
-        "3. If no tab shares specific exact text with the recent transcript,\n"
-        "   return 0.\n"
-        f"4. Otherwise return the tab number 1..{len(scored)}.\n\n"
-        f"=== SESSION TRANSCRIPT (oldest → newest) ===\n{history}\n\n"
+        "DECISION PROCEDURE — follow it step by step:\n"
+        "1. Read the SESSION LATEST MESSAGE block carefully. Extract concrete\n"
+        "   tokens from it: file paths, file names, function names, URL paths,\n"
+        "   distinctive identifiers, distinctive Chinese phrases.\n"
+        "2. For each candidate tab, check whether ANY of those exact tokens\n"
+        "   appear literally in that tab's screen text.\n"
+        "3. The tab whose screen contains the most exact-token hits from the\n"
+        "   latest message is the answer.\n"
+        "4. Older context is for tie-breaking ONLY. Topical similarity (e.g.\n"
+        "   both tabs talk about 'payments') without any shared exact token\n"
+        "   is NOT a match — return 0 instead of guessing.\n"
+        "5. The user may have just switched topic; do not let the older\n"
+        "   exchanges' theme override the latest message's evidence.\n"
+        "\n"
+        f"Return one integer: 0 if no tab has clear exact-token overlap, else 1..{len(scored)}.\n"
+        "\n"
+        f"=== SESSION LATEST MESSAGE (decisive) ===\n{latest_block or '(none)'}\n\n"
+        f"=== SESSION OLDER CONTEXT (tiebreaker only) ===\n{older_block or '(none)'}\n\n"
         f"=== CANDIDATE TABS ===\n{tabs_text}\n\n"
         "Answer with just one number."
     )
