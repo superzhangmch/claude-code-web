@@ -493,12 +493,19 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
         "- Provide 1-3 strongest evidence pairs.\n"
         "- transcript snippet MUST be copied verbatim from SESSION blocks.\n"
         "- screen snippet MUST be copied verbatim from the picked tab's screen.\n"
-        "- The two snippets in EACH pair must refer to the SAME concrete\n"
-        "  thing — same file name, same identifier, same phrase. They must\n"
-        "  share substantial common text. Don't pair `foo.html` with\n"
-        "  `bar.py` even if both appear somewhere in their sources.\n"
-        "- If you can't find any pair where both sides share substantial\n"
-        "  common text, return tab=0 and matches=[].\n"
+        "- The two snippets in EACH pair must be the SAME content. They\n"
+        "  may differ only in rendering / formatting characters (markdown\n"
+        "  bold `**`, code-fence backticks `` ` ``, headings `#`, ANSI\n"
+        "  escape padding, surrounding whitespace). Their plain text body\n"
+        "  must be identical, or one must contain the other verbatim.\n"
+        "  CORRECT pair (same content, just different formatting):\n"
+        '      transcript: "Now regenerate `status_by_day.html`"\n'
+        '      screen:     "status_by_day.html"\n'
+        "  WRONG pair (different content even if topically related):\n"
+        '      transcript: "status_by_day.html"\n'
+        '      screen:     "renewal_rate_plot_by_day_from_payment_daily.py"\n'
+        "- If you cannot find any such same-content pair, return tab=0\n"
+        "  and matches=[]. Don't pair near-similar but different strings.\n"
         "- If tab=0, matches must be [].\n"
         "\n"
         f"=== SESSION LATEST MESSAGE (decisive) ===\n{latest_block or '(none)'}\n\n"
@@ -587,13 +594,17 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
         s_norm = _normalize_for_match(s_snip)
         t_in = bool(t_norm) and t_norm in norm_transcript
         s_in = bool(s_norm) and s_norm in norm_screen
-        # Pair-internal sanity: the two sides must SHARE a non-trivial common
-        # substring so we know they actually refer to the same thing. Else
-        # the LLM is pairing unrelated strings that each happen to exist in
-        # their source.
-        common_len = _longest_common_substring_len(t_norm, s_norm)
-        min_required = max(4, min(len(t_norm), len(s_norm)) // 3)
-        pair_related = common_len >= min_required and common_len > 0
+        # Pair-internal sanity: after normalization (which strips rendering
+        # chars like **, `, #, _, \x00, etc.) the two sides must be the
+        # SAME content. We allow one to fully contain the other — that's
+        # how short identifiers vs longer phrases pair up — but we don't
+        # accept "shares some characters" pairs.
+        if t_norm and s_norm:
+            pair_related = (t_norm == s_norm
+                            or t_norm in s_norm
+                            or s_norm in t_norm)
+        else:
+            pair_related = False
         if not (t_in and s_in):
             verdict = "TRANSCRIPT_FAKE" if not t_in else "SCREEN_FAKE"
         elif not pair_related:
