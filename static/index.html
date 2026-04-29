@@ -267,10 +267,13 @@ main {
 }
 
 footer {
-  flex-shrink: 0; padding: 8px 10px;
-  padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  flex-shrink: 0;
+  padding-bottom: env(safe-area-inset-bottom);
   background: #000; border-top: 1px solid var(--border);
-  display: flex; gap: 8px;
+  display: flex; flex-direction: column;
+}
+footer .input-row {
+  display: flex; gap: 8px; padding: 8px 10px;
 }
 footer.hidden { display: none; }
 footer textarea {
@@ -290,6 +293,25 @@ footer button:disabled { opacity: 0.4; cursor: not-allowed; }
 footer button.icon {
   background: var(--panel2); color: var(--muted);
   font-weight: normal; font-size: 15px; min-width: 28px; padding: 0;
+}
+.upload-row {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  padding: 4px 10px 0;
+}
+.upload-row .pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--panel2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 2px 6px 2px 8px;
+  font: 11px ui-monospace, Menlo, monospace;
+}
+.upload-row .pill .x {
+  cursor: pointer; padding: 0 4px;
+  color: var(--muted); border-radius: 50%;
+}
+.upload-row .pill .x:hover { color: #ff8b6a; }
+.upload-row .pill img {
+  width: 24px; height: 24px; object-fit: cover; border-radius: 3px;
 }
 
 /* loading overlay */
@@ -473,9 +495,14 @@ footer button.icon {
   </main>
 
   <footer id="footer" class="hidden">
-    <textarea id="input" placeholder="Reply to Claude…" rows="1"></textarea>
-    <button id="send">Send</button>
-    <button id="jump-bottom" class="icon" title="Jump to latest">↓</button>
+    <div id="upload-row" class="upload-row" style="display:none"></div>
+    <div class="input-row">
+      <input id="upload-input" type="file" accept="image/*" multiple style="display:none">
+      <button id="upload-btn" class="icon" title="Attach image">📎</button>
+      <textarea id="input" placeholder="Reply to Claude…" rows="1"></textarea>
+      <button id="send">Send</button>
+      <button id="jump-bottom" class="icon" title="Jump to latest">↓</button>
+    </div>
   </footer>
 
   <!-- attach loading overlay -->
@@ -1423,16 +1450,25 @@ footer button.icon {
   // ---------- send ----------
   async function send() {
     const text = inputEl.value;
-    if (!text.trim() || !attachedSid) return;
+    if (!attachedSid) return;
+    // Splice pending image attachments as `@<path>` tokens at the start of
+    // the body. claude-code's TUI parses `@<path>` as a file attachment;
+    // for image files this becomes inline image input.
+    const attachPrefix = pendingUploads.map(u => "@" + u.path).join(" ");
+    const body = attachPrefix
+      ? (text.trim() ? attachPrefix + " " + text : attachPrefix)
+      : text;
+    if (!body.trim()) return;
     sendBtn.disabled = true;
     try {
       const resp = await authedFetch("/api/input", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ claude_session_id: attachedSid, text }),
+        body: JSON.stringify({ claude_session_id: attachedSid, text: body }),
       });
       if (resp.ok) {
         inputEl.value = ""; inputEl.style.height = "auto";
+        pendingUploads = []; renderUploadRow();
         keepAlive(); schedulePoll(400);
       } else if (resp.status === 410) {
         alert("tab/pid is gone");
@@ -1452,6 +1488,125 @@ footer button.icon {
   inputEl.addEventListener("input", () => {
     inputEl.style.height = "auto";
     inputEl.style.height = Math.min(inputEl.scrollHeight, window.innerHeight * 0.3) + "px";
+  });
+
+  // ---------- image upload ----------
+  const uploadInput = document.getElementById("upload-input");
+  const uploadBtn = document.getElementById("upload-btn");
+  const uploadRow = document.getElementById("upload-row");
+  // Pending: {name, path, dataUrl} not yet sent. We splice their `@<path>`
+  // tokens into the message body when the user hits Send, then clear.
+  let pendingUploads = [];
+
+  function renderUploadRow() {
+    uploadRow.innerHTML = "";
+    if (!pendingUploads.length) {
+      uploadRow.style.display = "none";
+      return;
+    }
+    uploadRow.style.display = "flex";
+    pendingUploads.forEach((up, i) => {
+      const pill = document.createElement("span"); pill.className = "pill";
+      if (up.dataUrl) {
+        const img = document.createElement("img"); img.src = up.dataUrl;
+        pill.appendChild(img);
+      }
+      const nm = document.createElement("span");
+      nm.textContent = up.name + " ";
+      pill.appendChild(nm);
+      const x = document.createElement("span"); x.className = "x"; x.textContent = "✕";
+      x.addEventListener("click", () => {
+        pendingUploads.splice(i, 1);
+        renderUploadRow();
+      });
+      pill.appendChild(x);
+      uploadRow.appendChild(pill);
+    });
+  }
+
+  function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(r.error);
+      r.readAsDataURL(file);
+    });
+  }
+
+  async function uploadFiles(fileList) {
+    const files = Array.from(fileList).filter(f => f.type && f.type.startsWith("image/"));
+    if (!files.length) return;
+    showLoading("Uploading " + files.length + " image" + (files.length > 1 ? "s" : "") + "…");
+    const previews = [];
+    const payload = { files: [] };
+    for (const f of files) {
+      const dataUrl = await fileToDataUrl(f);
+      const i = dataUrl.indexOf(",");
+      const b64 = i >= 0 ? dataUrl.slice(i + 1) : dataUrl;
+      payload.files.push({ name: f.name || "image", content_type: f.type, b64 });
+      previews.push({ name: f.name || "image", dataUrl });
+    }
+    let resp;
+    try {
+      resp = await authedFetch("/api/upload", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (e) {
+      hideLoading();
+      alert("Upload failed: " + e);
+      return;
+    }
+    hideLoading();
+    if (!resp.ok) {
+      alert("Upload failed: " + await resp.text());
+      return;
+    }
+    const data = await resp.json();
+    (data.files || []).forEach((srv, idx) => {
+      pendingUploads.push({
+        name: srv.name || previews[idx].name,
+        path: srv.path,
+        dataUrl: previews[idx].dataUrl,
+      });
+    });
+    renderUploadRow();
+    inputEl.focus();
+  }
+
+  uploadBtn.addEventListener("click", () => uploadInput.click());
+  uploadInput.addEventListener("change", async (e) => {
+    if (e.target.files && e.target.files.length) {
+      await uploadFiles(e.target.files);
+      uploadInput.value = ""; // allow same file twice
+    }
+  });
+
+  // Drag-and-drop on the input area
+  ["dragover", "dragenter"].forEach(evt =>
+    inputEl.addEventListener(evt, (e) => { e.preventDefault(); }));
+  inputEl.addEventListener("drop", async (e) => {
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+      e.preventDefault();
+      await uploadFiles(e.dataTransfer.files);
+    }
+  });
+
+  // Paste (⌘V) image from clipboard
+  inputEl.addEventListener("paste", async (e) => {
+    if (!e.clipboardData || !e.clipboardData.items) return;
+    const files = [];
+    for (const it of e.clipboardData.items) {
+      if (it.kind === "file") {
+        const f = it.getAsFile();
+        if (f && f.type && f.type.startsWith("image/")) files.push(f);
+      }
+    }
+    if (files.length) {
+      e.preventDefault();
+      await uploadFiles(files);
+    }
   });
   document.getElementById("jump-bottom").addEventListener("click", () => {
     shouldAutoscroll = true; mainEl.scrollTop = mainEl.scrollHeight;

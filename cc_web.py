@@ -15,6 +15,7 @@ Architecture (after the session-id-first refactor):
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -43,6 +44,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 SESSION_INDEX_PATH = Path.home() / ".claude" / "session_index.json"
 PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 CONF_PATH = Path.home() / ".claude" / "cc_web.conf"
+UPLOAD_DIR = Path.home() / ".claude" / "cc_web_uploads"
+UPLOAD_MAX_BYTES = 15 * 1024 * 1024
+UPLOAD_RETENTION_SEC = 3 * 24 * 3600
 TOP_N_SESSIONS = 10
 SNAPSHOT_TAIL_ENTRIES = 200
 FINGERPRINT_COUNT = 8
@@ -1124,6 +1128,16 @@ class NewSessionPayload(BaseModel):
     cwd: str
 
 
+class UploadFileItem(BaseModel):
+    name: str = ""
+    content_type: str = ""
+    b64: str
+
+
+class UploadPayload(BaseModel):
+    files: list[UploadFileItem]
+
+
 # ---------- public endpoints ----------
 
 @app.get("/")
@@ -1526,6 +1540,71 @@ async def post_new_session(payload: NewSessionPayload):
             "iterm_session_id": iterm_id, "label": label, "cwd": cwd,
         }
     return {"ok": True, "iterm_session_id": iterm_id, "label": label, "cwd": cwd}
+
+
+_EXT_BY_CONTENT_TYPE = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+    "image/bmp": ".bmp",
+    "image/svg+xml": ".svg",
+}
+
+
+def _upload_gc() -> None:
+    """Lazy GC: remove upload files older than retention window."""
+    if not UPLOAD_DIR.exists():
+        return
+    cutoff = _time.time() - UPLOAD_RETENTION_SEC
+    for p in UPLOAD_DIR.iterdir():
+        try:
+            if p.is_file() and p.stat().st_mtime < cutoff:
+                p.unlink()
+        except OSError:
+            pass
+
+
+@app.post("/api/upload", dependencies=[Depends(require_token)])
+async def post_upload(payload: UploadPayload):
+    """Receive base64-encoded image files, save to UPLOAD_DIR. Returns the
+    server-side absolute paths so the browser can splice `@<path>` tokens
+    into the textarea — claude-code's TUI parses `@<path>` as a file
+    attachment, so for image files this becomes an inline image input."""
+    if not payload.files:
+        raise HTTPException(status_code=400, detail="no files")
+    if len(payload.files) > 8:
+        raise HTTPException(status_code=400, detail="too many files (max 8)")
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    _upload_gc()
+    out: list[dict] = []
+    for f in payload.files:
+        ct = (f.content_type or "").lower().strip()
+        if not ct.startswith("image/"):
+            raise HTTPException(status_code=400, detail=f"not an image: {ct!r}")
+        try:
+            data = base64.b64decode(f.b64, validate=False)
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid base64")
+        if len(data) > UPLOAD_MAX_BYTES:
+            raise HTTPException(status_code=413,
+                                detail=f"image > {UPLOAD_MAX_BYTES} bytes")
+        if not data:
+            raise HTTPException(status_code=400, detail="empty file")
+        ext = _EXT_BY_CONTENT_TYPE.get(ct, ".bin")
+        ts = int(_time.time())
+        rand = secrets.token_hex(4)
+        path = UPLOAD_DIR / f"{ts}_{rand}{ext}"
+        path.write_bytes(data)
+        out.append({
+            "name": f.name or path.name,
+            "path": str(path),
+            "size": len(data),
+        })
+    return {"files": out}
 
 
 # ---------- helpers used by endpoints ----------
