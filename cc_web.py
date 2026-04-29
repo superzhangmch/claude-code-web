@@ -365,6 +365,31 @@ def _load_llm_conf() -> dict:
     return _load_conf()
 
 
+def _longest_common_substring_len(a: str, b: str) -> int:
+    """Length of the longest contiguous substring shared by a and b.
+    Used to verify that an evidence pair's two sides actually refer to
+    the same thing, not just that each side appears somewhere in its
+    source. O(len(a) * len(b)) — both inputs are <= ~50 chars."""
+    if not a or not b:
+        return 0
+    n, m = len(a), len(b)
+    if n > m:
+        a, b = b, a
+        n, m = m, n
+    prev = [0] * (m + 1)
+    best = 0
+    for i in range(1, n + 1):
+        cur = [0] * (m + 1)
+        ai = a[i - 1]
+        for j in range(1, m + 1):
+            if ai == b[j - 1]:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > best:
+                    best = cur[j]
+        prev = cur
+    return best
+
+
 def _llm_http_post(url: str, headers: dict, body: dict, timeout: float) -> str:
     req = urllib.request.Request(
         url, data=json.dumps(body).encode("utf-8"),
@@ -433,18 +458,29 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
     prompt = (
         "You match a Claude Code session to one of several iTerm2 tabs.\n"
         "\n"
-        "DECISION PROCEDURE:\n"
-        "1. Read the SESSION LATEST MESSAGE. Extract concrete tokens —\n"
-        "   file paths, file names, identifiers, URL paths, distinctive\n"
-        "   Chinese/English phrases.\n"
-        "2. For each candidate tab, count how many of those exact tokens\n"
-        "   appear literally in that tab's screen text.\n"
-        "3. The tab with the most exact-token hits wins. Topical similarity\n"
-        "   without shared exact tokens means tab=0 (no match).\n"
-        "4. Older context is for tiebreaking only. Don't let older topic\n"
-        "   override the latest message's evidence.\n"
+        "BACKGROUND: The tab's screen and the session's transcript may be\n"
+        "out of sync — the user might have done more in the tab AFTER the\n"
+        "last transcript message we have. So the latest transcript message\n"
+        "may not literally appear on screen anymore. You must use the WHOLE\n"
+        "recent transcript (5 exchanges) to find evidence.\n"
         "\n"
-        "OUTPUT — return ONLY valid JSON, no prose, no code fence:\n"
+        "DECISION PROCEDURE:\n"
+        "1. From the WHOLE recent transcript (latest + older), extract\n"
+        "   concrete tokens — file paths, file names, directory names,\n"
+        "   function names, branch names, URL paths, distinctive identifiers,\n"
+        "   distinctive phrases.\n"
+        "2. For each candidate tab, count which of those tokens appear\n"
+        "   literally in that tab's screen text.\n"
+        "3. The tab with the strongest literal token overlap wins.\n"
+        "4. If you can find pairs where transcript and screen share\n"
+        "   substantial common text, that tab is the answer.\n"
+        "5. If NO tab has any concrete shared token with ANY transcript\n"
+        "   exchange, return tab=0. Topical similarity alone (e.g. both\n"
+        "   talk about 'renewal') without any literal common token is NOT\n"
+        "   enough — return 0 in that case.\n"
+        "\n"
+        "OUTPUT — return ONLY valid JSON, no prose, no code fence, no\n"
+        "thinking-out-loud — JUST the JSON object:\n"
         "{\n"
         f'  "tab": <integer 0..{len(scored)}>,\n'
         '  "matches": [\n'
@@ -457,7 +493,12 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
         "- Provide 1-3 strongest evidence pairs.\n"
         "- transcript snippet MUST be copied verbatim from SESSION blocks.\n"
         "- screen snippet MUST be copied verbatim from the picked tab's screen.\n"
-        "- Each pair should support that the snippets refer to the SAME thing.\n"
+        "- The two snippets in EACH pair must refer to the SAME concrete\n"
+        "  thing — same file name, same identifier, same phrase. They must\n"
+        "  share substantial common text. Don't pair `foo.html` with\n"
+        "  `bar.py` even if both appear somewhere in their sources.\n"
+        "- If you can't find any pair where both sides share substantial\n"
+        "  common text, return tab=0 and matches=[].\n"
         "- If tab=0, matches must be [].\n"
         "\n"
         f"=== SESSION LATEST MESSAGE (decisive) ===\n{latest_block or '(none)'}\n\n"
@@ -495,16 +536,36 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
         log.info("llm pick parse failed: %s; body=%s", e, raw[:500])
         return empty
 
-    # Extract JSON object from content (strip any code fence / surrounding text)
-    s = (content or "").strip()
-    m = re.search(r"\{.*\}", s, re.S)
-    if m:
-        s = m.group(0)
-    try:
-        parsed = json.loads(s)
-    except json.JSONDecodeError as e:
-        log.info("llm pick output not JSON: %s; content=%s", e, (content or "")[:300])
-        return {"pick": None, "matches": [], "all_verified": False, "raw": content}
+    # Extract the LAST balanced JSON object from content. Models sometimes
+    # emit a draft JSON, then prose ("Wait, let me reconsider…"), then a
+    # final JSON. We want the final one. Walk from end, find a "}" then a
+    # matching "{", widen until valid JSON parses.
+    parsed = None
+    raw_content = content or ""
+    s = raw_content.strip()
+    # Try greedy regex first — works for clean single-JSON output.
+    candidates = []
+    depth = 0
+    start = -1
+    for i, ch in enumerate(s):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                candidates.append(s[start:i + 1])
+                start = -1
+    for cand in reversed(candidates):
+        try:
+            parsed = json.loads(cand)
+            break
+        except json.JSONDecodeError:
+            continue
+    if parsed is None:
+        log.info("llm pick output not JSON; content=%s", raw_content[:300])
+        return {"pick": None, "matches": [], "all_verified": False, "raw": raw_content}
     tab = parsed.get("tab")
     if not isinstance(tab, int) or tab < 0 or tab > len(scored):
         return {"pick": None, "matches": [], "all_verified": False, "raw": content}
@@ -526,9 +587,19 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
         s_norm = _normalize_for_match(s_snip)
         t_in = bool(t_norm) and t_norm in norm_transcript
         s_in = bool(s_norm) and s_norm in norm_screen
-        verdict = "OK" if (t_in and s_in) else (
-            "TRANSCRIPT_FAKE" if not t_in else "SCREEN_FAKE"
-        )
+        # Pair-internal sanity: the two sides must SHARE a non-trivial common
+        # substring so we know they actually refer to the same thing. Else
+        # the LLM is pairing unrelated strings that each happen to exist in
+        # their source.
+        common_len = _longest_common_substring_len(t_norm, s_norm)
+        min_required = max(4, min(len(t_norm), len(s_norm)) // 3)
+        pair_related = common_len >= min_required and common_len > 0
+        if not (t_in and s_in):
+            verdict = "TRANSCRIPT_FAKE" if not t_in else "SCREEN_FAKE"
+        elif not pair_related:
+            verdict = "PAIR_MISMATCH"
+        else:
+            verdict = "OK"
         verified.append({
             "transcript": t_snip, "screen": s_snip, "verdict": verdict,
         })
