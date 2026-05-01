@@ -47,8 +47,14 @@ header > * { flex-shrink: 0; }
 header .dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; }
 header .dot.off { background: #888; }
 header .dot.err { background: #e04a4a; }
-header .title { font-weight: 600; font-size: 14px; }
-@media (max-width: 520px) { header .title { display: none; } }
+header .mode-group { display: inline-flex; gap: 2px; }
+header .mode-group .mode-pick {
+  font-weight: normal; padding: 4px 8px;
+}
+header .mode-group .mode-pick.active {
+  font-weight: 700; color: var(--accent);
+  border-color: var(--accent);
+}
 header .meta {
   color: var(--muted); font-size: 12px; margin-left: auto;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -223,6 +229,29 @@ main {
 }
 .msg .tool-call .tname { color: #4ec9b0; font-weight: 600; }
 .msg .tool-call .targs { color: #cbd0da; margin-top: 4px; max-height: 180px; overflow-y: auto; }
+.msg .tool-call .targs-table-wrap {
+  margin-top: 4px;
+  max-height: 300px; overflow: auto;
+}
+.msg .tool-call .targs-table {
+  border-collapse: collapse;
+  width: 100%; font-size: 12px;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.msg .tool-call .targs-table tr { border-bottom: 1px dashed var(--border); }
+.msg .tool-call .targs-table tr:last-child { border-bottom: 0; }
+.msg .tool-call .targs-table .targs-k {
+  vertical-align: top; padding: 4px 8px 4px 0;
+  color: #4ec9b0; white-space: nowrap; font-weight: 500;
+}
+.msg .tool-call .targs-table .targs-v {
+  vertical-align: top; padding: 4px 0;
+  color: #cbd0da; word-break: break-all;
+}
+.msg .tool-call .targs-table .targs-v pre {
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  font-family: inherit; font-size: inherit;
+}
 .msg .tool-result-box {
   font: 12.5px/1.4 ui-monospace, Menlo, monospace; white-space: pre-wrap;
   word-break: break-word; background: var(--code-bg);
@@ -412,6 +441,20 @@ footer button.icon {
   color: #ff8b6a; font-size: 11px; font-weight: 500;
   font-family: ui-monospace, Menlo, monospace;
 }
+.candidate .card-confirm-row {
+  margin: 6px 10px 0; display: flex; justify-content: flex-end;
+}
+.candidate .card-confirm {
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 5px 12px; font: 12px ui-monospace, Menlo, monospace;
+  cursor: pointer;
+}
+.candidate .card-confirm.primary {
+  background: var(--accent); color: #1b1b1b; border: 0;
+  font-weight: 600;
+}
+.candidate .card-confirm:hover { border-color: var(--accent); }
 .candidate .llm-badge {
   background: var(--accent); color: #1b1b1b;
   font: 600 9px/1 ui-monospace, Menlo, monospace;
@@ -466,13 +509,16 @@ footer button.icon {
 <body>
   <header>
     <span id="status-dot" class="dot off"></span>
-    <span class="title">Claude Code</span>
     <span id="meta" class="meta"></span>
     <span id="ready" class="ready" style="display:none"></span>
     <span id="traffic" class="traffic"></span>
-    <button id="mode-btn" class="btn" style="display:none">brief</button>
+    <span id="mode-group" class="mode-group" style="display:none">
+      <button class="btn mode-pick" data-mode="brief">brief</button>
+      <button class="btn mode-pick" data-mode="medium">M</button>
+      <button class="btn mode-pick" data-mode="all">all</button>
+    </span>
     <button id="back-btn" class="btn" style="display:none">←</button>
-    <button id="new-btn" class="btn">New +</button>
+    <button id="new-btn" class="btn">+</button>
   </header>
 
   <div id="warn" title="tap to re-verify"></div>
@@ -679,7 +725,8 @@ footer button.icon {
   const statusDot = document.getElementById("status-dot");
   const metaEl = document.getElementById("meta");
   const readyEl = document.getElementById("ready");
-  const modeBtn = document.getElementById("mode-btn");
+  const modeGroup = document.getElementById("mode-group");
+  const modePicks = Array.from(document.querySelectorAll(".mode-pick"));
   const backBtn = document.getElementById("back-btn");
   const newBtn = document.getElementById("new-btn");
   const warnEl = document.getElementById("warn");
@@ -739,7 +786,7 @@ footer button.icon {
     tvEl.classList.remove("show");
     footerEl.classList.add("hidden");
     backBtn.style.display = "none";
-    modeBtn.style.display = "none";
+    modeGroup.style.display = "none";
     setReady(null);
     metaEl.textContent = "";
     setStatus("off");
@@ -751,9 +798,16 @@ footer button.icon {
     tvEl.classList.add("show");
     footerEl.classList.remove("hidden");
     backBtn.style.display = "";
-    modeBtn.style.display = "";
-    modeBtn.textContent = renderMode;
+    modeGroup.style.display = "";
+    refreshModeButtons();
     setStatus("ok");
+  }
+
+  function refreshModeButtons() {
+    for (const b of modePicks) {
+      if (b.dataset.mode === renderMode) b.classList.add("active");
+      else b.classList.remove("active");
+    }
   }
 
   // ---------- picker ----------
@@ -1016,7 +1070,14 @@ footer button.icon {
     candiMsg.textContent = header;
     candiList.innerHTML = "";
     let pickedEl = null;
-    for (const c of (data.candidates || [])) {
+    // Sort: LLM-picked candidate first, rest by score desc.
+    const orderedCandidates = (data.candidates || []).slice().sort((a, b) => {
+      const aLLM = llmPick && llmPick === a.iterm_session_id ? 1 : 0;
+      const bLLM = llmPick && llmPick === b.iterm_session_id ? 1 : 0;
+      if (aLLM !== bLLM) return bLLM - aLLM;     // LLM pick on top
+      return (b.score || 0) - (a.score || 0);    // then by score desc
+    });
+    for (const c of orderedCandidates) {
       const el = document.createElement("div");
       el.className = "candidate";
       const isLLMPick = llmPick && llmPick === c.iterm_session_id;
@@ -1077,6 +1138,20 @@ footer button.icon {
       const tail = document.createElement("div"); tail.className = "screen-tail";
       tail.textContent = (c.screen_tail || "").replace(/ /g, " ");
       el.appendChild(tail);
+      const cardRow = document.createElement("div"); cardRow.className = "card-confirm-row";
+      const cardBtn = document.createElement("button");
+      cardBtn.className = "card-confirm" + (isLLMPick ? " primary" : "");
+      cardBtn.textContent = isLLMPick ? "★ Confirm this tab" : "Confirm this tab";
+      cardBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        candiList.querySelectorAll(".candidate.selected").forEach(x => x.classList.remove("selected"));
+        el.classList.add("selected");
+        candiState.picked = c.iterm_session_id;
+        candiOk.disabled = false;
+        candiOk.click();
+      });
+      cardRow.appendChild(cardBtn);
+      el.appendChild(cardRow);
       el.addEventListener("click", () => {
         candiList.querySelectorAll(".candidate.selected").forEach(x => x.classList.remove("selected"));
         el.classList.add("selected");
@@ -1188,12 +1263,56 @@ footer button.icon {
     for (const p of content) {
       if (!p) continue;
       if (p.type === "text" && p.text && p.text.trim()) yield { kind: "text", role, text: p.text, ...common };
-      else if (p.type === "tool_use") yield { kind: "tool_use", name: p.name || "?", input: p.input, ...common };
+      else if (p.type === "tool_use") yield { kind: "tool_use", id: p.id, name: p.name || "?", input: p.input, ...common };
       else if (p.type === "tool_result") {
         const c = typeof p.content === "string" ? p.content : JSON.stringify(p.content, null, 2);
-        yield { kind: "tool_result", content: c, is_error: !!p.is_error, ...common };
+        yield { kind: "tool_result", tool_use_id: p.tool_use_id, content: c, is_error: !!p.is_error, ...common };
       } else if (p.type === "thinking" && p.thinking) yield { kind: "thinking", text: p.thinking, ...common };
     }
+  }
+
+  // Build the .tool-call box (name + args table) for a tool_use block.
+  function buildToolCallBox(use) {
+    const box = document.createElement("div"); box.className = "tool-call";
+    const name = document.createElement("div"); name.className = "tname"; name.textContent = use.name;
+    box.appendChild(name);
+    if (use.input && typeof use.input === "object" && !Array.isArray(use.input)) {
+      // 2-col key/value table; values with newlines render in <pre>.
+      // Wrapper is height-capped + scrollable.
+      const wrap = document.createElement("div"); wrap.className = "targs-table-wrap";
+      const tbl = document.createElement("table"); tbl.className = "targs-table";
+      for (const [k, v] of Object.entries(use.input)) {
+        const row = document.createElement("tr");
+        const tk = document.createElement("td"); tk.className = "targs-k"; tk.textContent = k;
+        const tv = document.createElement("td"); tv.className = "targs-v";
+        let display;
+        if (typeof v === "string") display = v;
+        else { try { display = JSON.stringify(v, null, 2); } catch { display = String(v); } }
+        if (typeof display === "string" && display.indexOf("\n") >= 0) {
+          const pre = document.createElement("pre");
+          pre.textContent = display;
+          tv.appendChild(pre);
+        } else {
+          tv.textContent = display;
+        }
+        row.appendChild(tk); row.appendChild(tv);
+        tbl.appendChild(row);
+      }
+      wrap.appendChild(tbl); box.appendChild(wrap);
+    } else if (use.input !== undefined && use.input !== null) {
+      const args = document.createElement("div"); args.className = "targs";
+      args.textContent = JSON.stringify(use.input, null, 2);
+      box.appendChild(args);
+    }
+    return box;
+  }
+
+  // Build the .tool-result-box for a tool_result block.
+  function buildToolResultBox(res) {
+    const box = document.createElement("div");
+    box.className = "tool-result-box" + (res.is_error ? " is-error" : "");
+    box.textContent = res.content;
+    return box;
   }
 
   function renderBlock(b) {
@@ -1223,17 +1342,10 @@ footer button.icon {
       div.appendChild(role); div.appendChild(md);
     } else if (b.kind === "tool_use") {
       div.className = "msg tool"; label.textContent = "Tool call";
-      const box = document.createElement("div"); box.className = "tool-call";
-      const name = document.createElement("div"); name.className = "tname"; name.textContent = b.name;
-      const args = document.createElement("div"); args.className = "targs";
-      args.textContent = b.input ? JSON.stringify(b.input, null, 2) : "";
-      box.appendChild(name); if (args.textContent) box.appendChild(args);
-      div.appendChild(role); div.appendChild(box);
+      div.appendChild(role); div.appendChild(buildToolCallBox(b));
     } else if (b.kind === "tool_result") {
       div.className = "msg tool"; label.textContent = "Tool result" + (b.is_error ? " (error)" : "");
-      const box = document.createElement("div"); box.className = "tool-result-box" + (b.is_error ? " is-error" : "");
-      box.textContent = b.content;
-      div.appendChild(role); div.appendChild(box);
+      div.appendChild(role); div.appendChild(buildToolResultBox(b));
     } else if (b.kind === "thinking") {
       div.className = "msg thinking"; label.textContent = "Thinking";
       const md = document.createElement("div"); md.className = "markdown";
@@ -1337,15 +1449,19 @@ footer button.icon {
     await attachSession(attachedSid, metaEl.textContent);
   });
 
-  // ---------- mode toggle ----------
-  modeBtn.addEventListener("click", () => {
-    renderMode = renderMode === "brief" ? "all" : "brief";
-    localStorage.setItem("cc_mode", renderMode);
-    modeBtn.textContent = renderMode;
-    lastIdx = null; entryCache = []; earliestIdxLoaded = null; hasMoreHistory = false;
-    rebuild();
-    pollOnce();
-  });
+  // ---------- mode picker (3 inline buttons) ----------
+  for (const b of modePicks) {
+    b.addEventListener("click", () => {
+      const m = b.dataset.mode;
+      if (m === renderMode) return;
+      renderMode = m;
+      localStorage.setItem("cc_mode", renderMode);
+      refreshModeButtons();
+      lastIdx = null; entryCache = []; earliestIdxLoaded = null; hasMoreHistory = false;
+      rebuild();
+      pollOnce();
+    });
+  }
 
   // ---------- back / detach ----------
   backBtn.addEventListener("click", () => {

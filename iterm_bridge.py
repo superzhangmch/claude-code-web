@@ -128,7 +128,9 @@ class ItermBridge:
         return await self._open_claude_tab(cwd, label, resume_id=None)
 
     async def _open_claude_tab(self, cwd: str, label: str, resume_id: Optional[str]) -> Optional[str]:
-        """Create a new iTerm2 tab, label it, then run `cd <cwd> && claude [--resume id]`."""
+        """Create a new iTerm2 tab, label it, then run `cd <cwd> && claude [--resume id]`.
+        Also auto-confirms claude's "Trust this folder?" prompt — without that,
+        claude blocks before creating its JSONL, and we can't bind the session."""
         if not self.app:
             return None
         window = self.app.current_terminal_window
@@ -161,7 +163,44 @@ class ItermBridge:
         cd_part = f"cd {shlex.quote(cwd)} && " if cwd else ""
         claude_cmd = "claude" + (f" --resume {shlex.quote(resume_id)}" if resume_id else "")
         await session.async_send_text(f"{cd_part}{claude_cmd}\n")
+        # Auto-accept the "Trust this folder?" dialog if it appears.
+        await self._maybe_accept_trust_prompt(session.session_id)
         return session.session_id
+
+    async def _maybe_accept_trust_prompt(self, iterm_session_id: str,
+                                         max_wait_sec: float = 8.0) -> bool:
+        """Poll the new tab's screen; if claude's "Trust this folder?" dialog
+        is up, press 1 + Enter to accept. Returns True if we sent the keys.
+
+        We do nothing if the prompt never appears (claude already trusted
+        the dir from a previous run, or it shows the welcome banner directly).
+        """
+        deadline = asyncio.get_event_loop().time() + max_wait_sec
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.6)
+            screen = await self.get_screen_for(iterm_session_id, max_lines=80)
+            if not screen:
+                continue
+            low = screen.lower()
+            # Two signals that the trust dialog is currently up:
+            # - "trust this folder" appears in the body
+            # - "1. yes, i trust this folder" is the active option
+            if ("trust this folder" in low
+                    or "yes, i trust this folder" in low):
+                # Send "1" to highlight option 1, then Enter to confirm.
+                # The dialog uses arrow keys + Enter, but option 1 is the
+                # default selection so a bare Enter would also work — we
+                # send "1\r" defensively to be explicit.
+                await self.send_text_to(iterm_session_id, "1\r")
+                # Brief grace for claude to process and continue past the
+                # dialog into the welcome banner.
+                await asyncio.sleep(1.5)
+                return True
+            # Other signal: claude welcome banner already up → no trust
+            # prompt, nothing to do.
+            if "welcome back" in low or "claude code v" in low:
+                return False
+        return False
 
     async def get_screen_for(self, iterm_session_id: str, max_lines: int = 80) -> Optional[str]:
         if not self.app:

@@ -679,6 +679,13 @@ class BindingTable:
 
 bindings = BindingTable()
 
+# Format of markers we (or anyone) inject as `echo test_alive_marker=<hex>`.
+# Lives both in the JSONL (forever) and on the candidate iTerm tab's
+# screen (until it scrolls off). The intersection of markers found in
+# the target JSONL and a candidate's screen is a definitive identity
+# proof — that's our short-circuit before running LLM matching.
+MARKER_RE = re.compile(r"test_alive_marker=[a-f0-9]+")
+
 
 def _pid_alive_with_start(pid: int, expected_start: float, tolerance: float = 1.5) -> bool:
     """Verify pid is still alive AND its start time matches (catches pid reuse)."""
@@ -935,6 +942,115 @@ def _truncate_tool_result_content(content):
     return content
 
 
+def _head_tail_trunc(s: str, total: int) -> str:
+    """head + ' ... [N chars skipped] ... ' + tail; head/tail each ~total/2."""
+    if not isinstance(s, str) or len(s) <= total:
+        return s
+    half = total // 2
+    skipped = len(s) - 2 * half
+    return f"{s[:half]} ... [{skipped} chars skipped] ... {s[-half:]}"
+
+
+_BASE64_LIKE = re.compile(r"^[A-Za-z0-9+/=\s]+$")
+BASE64_AGGRESSIVE_KEEP = 16    # like _truncate_tool_result_content's BASE64_KEEP
+
+
+def _looks_like_base64(s) -> bool:
+    if not isinstance(s, str):
+        return False
+    if len(s) < 200:
+        return False
+    return bool(_BASE64_LIKE.match(s))
+
+
+def _trim_base64_value(s: str) -> str:
+    """Always-aggressive truncation for base64-looking strings — same shape
+    as the existing tool_result base64 trim (keep first 16 chars + '...')."""
+    return s[:BASE64_AGGRESSIVE_KEEP] + f"... ({len(s)} base64 chars hidden)"
+
+
+def _trim_args_base64_only(input_):
+    """For 'all' mode: walk the dict, only trim values that LOOK LIKE
+    base64 (long, alphanumeric+/=). Other strings stay full."""
+    if not isinstance(input_, dict):
+        return input_
+    out = {}
+    for k, v in input_.items():
+        if _looks_like_base64(v):
+            out[k] = _trim_base64_value(v)
+        else:
+            out[k] = v
+    return out
+
+
+def _trim_medium_args(input_):
+    """Truncate each top-level arg value to 128 chars head/tail. Base64-
+    looking values get even more aggressive trim (first 16 chars + size).
+    Non-string values get JSON-stringified first, then truncated."""
+    if not isinstance(input_, dict):
+        return input_
+    out = {}
+    for k, v in input_.items():
+        if _looks_like_base64(v):
+            out[k] = _trim_base64_value(v)
+            continue
+        if isinstance(v, str):
+            out[k] = _head_tail_trunc(v, 128)
+        else:
+            try:
+                s = json.dumps(v, ensure_ascii=False)
+            except Exception:
+                s = str(v)
+            out[k] = _head_tail_trunc(s, 128)
+    return out
+
+
+def _trim_medium_result_content(content):
+    """Return a single string truncated to 256 total (head 128 + skip-marker
+    + tail 128). For list content, concatenate text-bearing parts first."""
+    if isinstance(content, str):
+        return _head_tail_trunc(content, 256)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for p in content:
+            if isinstance(p, dict):
+                if isinstance(p.get("text"), str):
+                    parts.append(p["text"])
+                elif isinstance(p.get("content"), str):
+                    parts.append(p["content"])
+                else:
+                    try:
+                        parts.append(json.dumps(p, ensure_ascii=False))
+                    except Exception:
+                        parts.append(str(p))
+            elif isinstance(p, str):
+                parts.append(p)
+        return _head_tail_trunc("\n".join(parts), 256)
+    return content
+
+
+def _trim_medium(e: dict) -> Optional[dict]:
+    """Same shape as _trim_all but tool_use args + tool_result content
+    are aggressively truncated."""
+    out = _trim_all(e)
+    if not out:
+        return out
+    msg = out.get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, list):
+        new_content = []
+        for p in content:
+            if isinstance(p, dict):
+                t = p.get("type")
+                if t == "tool_use":
+                    p = {**p, "input": _trim_medium_args(p.get("input"))}
+                elif t == "tool_result":
+                    p = {**p, "content": _trim_medium_result_content(p.get("content"))}
+            new_content.append(p)
+        out["message"] = {"content": new_content}
+    return out
+
+
 def _trim_all(e: dict) -> Optional[dict]:
     msg = e.get("message") or {}
     content = msg.get("content")
@@ -951,10 +1067,16 @@ def _trim_all(e: dict) -> Optional[dict]:
             if t == "text" and p.get("text"):
                 kept.append({"type": "text", "text": p["text"]})
             elif t == "tool_use":
-                kept.append({"type": "tool_use", "name": p.get("name"), "input": p.get("input")})
+                kept.append({
+                    "type": "tool_use",
+                    "name": p.get("name"),
+                    "id": p.get("id"),
+                    "input": _trim_args_base64_only(p.get("input")),
+                })
             elif t == "tool_result":
                 kept.append({
                     "type": "tool_result",
+                    "tool_use_id": p.get("tool_use_id"),
                     "content": _truncate_tool_result_content(p.get("content")),
                     "is_error": bool(p.get("is_error")),
                 })
@@ -1005,6 +1127,8 @@ def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
             if e.get("isMeta") or e.get("toolUseResult"):
                 continue
             trimmed = _trim_brief(e)
+        elif mode == "medium":
+            trimmed = _trim_medium(e)
         else:
             trimmed = _trim_all(e)
         if trimmed:
@@ -1199,6 +1323,50 @@ async def post_attach(payload: AttachPayload):
     if not candidates_refs:
         return {"result": "not_running", "session_id": sid, "cwd": target_cwd}
 
+    # Marker short-circuit:
+    #   1. For each candidate iTerm tab, read its current screen and extract
+    #      any test_alive_marker=<hex> tokens.
+    #   2. Look up each marker in the JSONL files under that candidate's
+    #      cwd dir — whichever JSONL contains the marker is the session_id
+    #      this candidate is CURRENTLY running.
+    #   3. If that mapped session_id == the requested target sid, bind.
+    # No new marker is sent here. Candidate selection stays unchanged.
+    for r in candidates_refs:
+        try:
+            screen = await bridge.get_screen_for(r.iterm_session_id, max_lines=400)
+        except Exception:
+            screen = None
+        if not screen:
+            continue
+        screen_markers = set(MARKER_RE.findall(screen))
+        if not screen_markers:
+            continue
+        encoded = (r.cwd or "").replace("/", "-").replace("_", "-")
+        proj = PROJECTS_ROOT / encoded
+        if not proj.exists():
+            continue
+        # For each JSONL in candidate's cwd, see which marker(s) it owns.
+        # The candidate's iterm tab IS running the session whose JSONL
+        # contains the marker visible on its screen.
+        mapped_sid = None
+        for jl in proj.glob("*.jsonl"):
+            try:
+                jt = jl.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if any(m in jt for m in screen_markers):
+                mapped_sid = jl.stem
+                break
+        if mapped_sid == sid:
+            b = _build_binding(sid, r, jsonl)
+            if b:
+                bindings.insert(b)
+                return {
+                    "result": "bound",
+                    "binding": _serialize_binding(b),
+                    "auto_bind_reason": "marker_screen_match",
+                }
+
     scored = []
     for r in candidates_refs:
         try:
@@ -1222,12 +1390,15 @@ async def post_attach(payload: AttachPayload):
     #   - that tab is the top scorer (heuristic agrees with LLM)
     #   - the top score is decisively non-trivial (> 5%)
     # Anything weaker pops the candidate dialog so the user can verify
-    # by reading the screen content of each candidate.
+    # by reading the screen content of each candidate. We do NOT auto-
+    # inject a marker here — that would pollute the user's chat with
+    # an `echo` line every attach. Marker probing only happens for
+    # /api/new-session (no JSONL yet → marker is the only way) or via
+    # an explicit user action (manual probe button, see /api/probe).
     if (llm_pick and llm_verified and top
             and top["score"] > AUTO_BIND_MIN_SCORE
             and top["ref"].iterm_session_id == llm_pick):
         chosen = top
-        # Conflict check: same pid already bound to a DIFFERENT live session.
         existing = bindings.get_by_pid(chosen["ref"].pid)
         if (existing and existing.claude_session_id != sid
                 and verify_binding(existing)):
@@ -1496,13 +1667,21 @@ async def post_new_session(payload: NewSessionPayload):
     if not iterm_id:
         raise HTTPException(status_code=500, detail="failed to open new tab")
 
-    # Poll: wait for the new claude pid to show up on this iterm tab AND for
-    # claude to create its JSONL under ~/.claude/projects/<encoded cwd>/.
-    # claude generates a fresh session_id on start, so we discover it by
-    # picking the newest JSONL born after our request started.
+    # Send a unique marker to claude as a probe message. Claude writes user
+    # messages straight into JSONL, so once we see the marker in any JSONL
+    # under the encoded-cwd dir, that file is OUR session. This is more
+    # reliable than birthtime-based matching (no race with concurrent fresh
+    # tabs in same cwd) and gives definitive identification.
+    marker = f"test_alive_marker={secrets.token_hex(6)}"
+    probe = f"echo {marker}"
+    try:
+        await bridge.send_text_to(iterm_id, probe + "\r")
+    except Exception as e:
+        log.info("probe send failed: %s", e)
+
     encoded = cwd.replace("/", "-").replace("_", "-")
     proj_dir = PROJECTS_ROOT / encoded
-    deadline = _time.time() + 12.0
+    deadline = _time.time() + 30.0
     bound: Optional[Binding] = None
     while _time.time() < deadline:
         await asyncio.sleep(0.6)
@@ -1513,21 +1692,19 @@ async def post_new_session(payload: NewSessionPayload):
         match = next((r for r in refs if r.iterm_session_id == iterm_id), None)
         if match is None or not proj_dir.exists():
             continue
-        fresh: list[tuple[float, Path]] = []
+        # Find the JSONL whose contents include our marker.
+        marker_jsonl: Optional[Path] = None
         for jsonl in proj_dir.glob("*.jsonl"):
             try:
-                st = jsonl.stat()
+                if marker in jsonl.read_text(encoding="utf-8", errors="replace"):
+                    marker_jsonl = jsonl
+                    break
             except OSError:
                 continue
-            birth = getattr(st, "st_birthtime", st.st_ctime)
-            if birth >= request_started - 1.0:
-                fresh.append((birth, jsonl))
-        if not fresh:
+        if marker_jsonl is None:
             continue
-        fresh.sort(reverse=True)
-        jsonl_path = fresh[0][1]
-        sid = jsonl_path.stem
-        b = _build_binding(sid, match, jsonl_path)
+        sid = marker_jsonl.stem
+        b = _build_binding(sid, match, marker_jsonl)
         if b:
             bindings.insert(b)
             bound = b
