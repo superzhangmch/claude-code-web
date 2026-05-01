@@ -64,11 +64,26 @@ header .traffic {
   color: #6b7280; font: 11px ui-monospace, Menlo, monospace;
 }
 header .ready {
-  font-size: 10px; padding: 2px 6px; border-radius: 3px;
-  letter-spacing: 0.05em; text-transform: uppercase;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px;
 }
-header .ready.idle { background: #1f3a26; color: #6ee884; }
-header .ready.busy { background: #3a2c1f; color: #e0a070; }
+header .ready.idle::before {
+  content: ""; width: 8px; height: 8px;
+  border-radius: 50%; background: #6ee884;
+}
+header .ready.busy::before {
+  content: ""; width: 12px; height: 12px;
+  border-radius: 50%;
+  border: 2px solid #3a2c1f; border-top-color: #e0a070;
+  animation: spin 0.8s linear infinite;
+}
+header button.icon {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  font-size: 14px; line-height: 1; padding: 4px 8px;
+  cursor: pointer;
+}
+header button.icon:hover { border-color: var(--accent); }
 header button.btn {
   background: var(--panel2); color: var(--muted);
   border: 1px solid var(--border);
@@ -190,6 +205,15 @@ main {
   color: #5a5f6c; font-size: 10px; font-weight: normal;
   letter-spacing: 0; text-transform: none; margin-left: auto;
 }
+.msg .role .copy-btn {
+  background: transparent; color: var(--muted);
+  border: 0; cursor: pointer; padding: 0 2px 0 6px;
+  line-height: 0;
+  display: inline-flex; align-items: center;
+}
+.msg .role .copy-btn:hover { color: var(--text); }
+.msg .role .copy-btn svg { display: block; }
+.msg .role .copy-btn.done { color: #6ee884; }
 .msg .markdown { word-break: break-word; }
 .msg .markdown p { margin: 0 0 .7em 0; }
 .msg .markdown p:last-child { margin-bottom: 0; }
@@ -319,6 +343,35 @@ footer button {
   cursor: pointer; flex-shrink: 0;
 }
 footer button:disabled { opacity: 0.4; cursor: not-allowed; }
+footer .prompt-row {
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: #1c1f0e;
+  padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+footer .prompt-row .pq {
+  font-size: 12px; color: #f0d050; font-weight: 600;
+  white-space: pre-wrap; word-break: break-word;
+}
+footer .prompt-row .pchoices {
+  display: flex; flex-wrap: wrap; gap: 6px;
+}
+footer .prompt-row .pchoice {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 10px; font-size: 13px; cursor: pointer;
+  text-align: left; max-width: 100%;
+}
+footer .prompt-row .pchoice .pdigit {
+  display: inline-block; min-width: 18px;
+  color: var(--accent); font-weight: 700; margin-right: 6px;
+}
+footer .prompt-row .pchoice.default {
+  border-color: var(--accent);
+  background: #28311a;
+}
+footer .prompt-row .pchoice:hover { background: var(--code-bg); }
 footer button.icon {
   background: var(--panel2); color: var(--muted);
   font-weight: normal; font-size: 15px; min-width: 28px; padding: 0;
@@ -472,11 +525,61 @@ footer button.icon {
   font: 11px ui-monospace, Menlo, monospace; color: var(--text);
   background: #000;
   margin: 0; padding: 6px 4px;
-  max-height: 150px; overflow-y: auto;
-  white-space: pre-wrap; word-break: break-all;
+  max-height: 150px; overflow: auto;
+  /* No wrap — let long lines scroll horizontally instead.
+     The user explicitly wants to see lines as-they-are in the iTerm tab. */
+  white-space: pre;
+}
+.candidate .evidence .pair .text {
+  /* Same intent for evidence rows: no wrap, horizontal scroll. */
+  white-space: pre; overflow-x: auto;
 }
 #candidlg.modal { padding: 4px; }
 #candidlg .modal-card { padding: 10px; }
+
+#screen-modal .modal-card.screen-card {
+  width: 95vw; max-width: 1100px; max-height: 85vh;
+  display: flex; flex-direction: column; gap: 8px;
+}
+#screen-modal .modal-row {
+  display: flex; align-items: center; gap: 8px;
+}
+#screen-modal .modal-row h3 { margin: 0; flex: 1; font-size: 14px; }
+#screen-modal .screen-body {
+  flex: 1; min-height: 0;
+  background: #000; color: var(--text);
+  font: 12px ui-monospace, Menlo, monospace;
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 8px 10px; margin: 0;
+  overflow: auto; white-space: pre;
+}
+#screen-modal .screen-actions {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  justify-content: flex-end;
+}
+#info-modal .modal-card.info-card {
+  width: 95vw; max-width: 720px; max-height: 85vh;
+  display: flex; flex-direction: column; gap: 8px;
+  overflow: auto;
+}
+#info-modal .info-table {
+  width: 100%; border-collapse: collapse;
+  font: 12px ui-monospace, Menlo, monospace;
+}
+#info-modal .info-table tr { border-bottom: 1px dashed var(--border); }
+#info-modal .info-table tr:last-child { border-bottom: 0; }
+#info-modal .info-table td {
+  padding: 5px 8px; vertical-align: top;
+  word-break: break-all;
+}
+#info-modal .info-table td.k {
+  color: var(--accent); white-space: nowrap;
+  font-weight: 500; min-width: 110px;
+}
+#info-modal .info-table td.v { color: var(--text); }
+#info-modal .info-table td.v pre {
+  margin: 0; white-space: pre-wrap; font: inherit;
+}
 
 #login {
   position: fixed; inset: 0; background: var(--bg);
@@ -513,13 +616,42 @@ footer button.icon {
     <span id="ready" class="ready" style="display:none"></span>
     <span id="traffic" class="traffic"></span>
     <span id="mode-group" class="mode-group" style="display:none">
-      <button class="btn mode-pick" data-mode="brief">brief</button>
-      <button class="btn mode-pick" data-mode="medium">M</button>
-      <button class="btn mode-pick" data-mode="all">all</button>
+      <button class="btn mode-pick" data-mode="brief" title="brief">▁</button>
+      <button class="btn mode-pick" data-mode="medium" title="medium">▄</button>
+      <button class="btn mode-pick" data-mode="all" title="all">█</button>
     </span>
+    <button id="info-btn" class="btn icon" style="display:none" title="Session info">ⓘ</button>
+    <button id="screen-btn" class="btn icon" style="display:none" title="Show iTerm screen">🖥</button>
     <button id="back-btn" class="btn" style="display:none">←</button>
     <button id="new-btn" class="btn">+</button>
   </header>
+
+  <div id="info-modal" class="modal">
+    <div class="modal-card info-card">
+      <div class="modal-row">
+        <h3>Session info</h3>
+        <button id="info-close" class="btn">close</button>
+      </div>
+      <table id="info-body" class="info-table"></table>
+    </div>
+  </div>
+
+  <div id="screen-modal" class="modal">
+    <div class="modal-card screen-card">
+      <div class="modal-row">
+        <h3>iTerm screen</h3>
+        <button id="screen-refresh" class="btn">↻</button>
+        <button id="screen-close" class="btn">close</button>
+      </div>
+      <pre id="screen-body" class="screen-body">…</pre>
+      <div class="modal-row screen-actions">
+        <button id="key-esc" class="btn" title="Send ESC">ESC</button>
+        <button id="key-opt1" class="btn" title="Send Enter (selects option 1 / current)">ENTER (opt1)</button>
+        <button id="key-opt2" class="btn" title="Down + Enter (option 2)">OPT2</button>
+        <button id="key-opt3" class="btn" title="Down ×2 + Enter (option 3)">OPT3</button>
+      </div>
+    </div>
+  </div>
 
   <div id="warn" title="tap to re-verify"></div>
 
@@ -541,6 +673,10 @@ footer button.icon {
   </main>
 
   <footer id="footer" class="hidden">
+    <div id="prompt-row" class="prompt-row" style="display:none">
+      <div id="prompt-question" class="pq"></div>
+      <div id="prompt-choices" class="pchoices"></div>
+    </div>
     <div id="upload-row" class="upload-row" style="display:none"></div>
     <div class="input-row">
       <input id="upload-input" type="file" accept="image/*" multiple style="display:none">
@@ -742,6 +878,18 @@ footer button.icon {
   const inputEl = document.getElementById("input");
   const sendBtn = document.getElementById("send");
   const mainEl = document.getElementById("main");
+  const promptRowEl = document.getElementById("prompt-row");
+  const promptQuestionEl = document.getElementById("prompt-question");
+  const promptChoicesEl = document.getElementById("prompt-choices");
+  const screenBtn = document.getElementById("screen-btn");
+  const screenModal = document.getElementById("screen-modal");
+  const screenBody = document.getElementById("screen-body");
+  const screenRefresh = document.getElementById("screen-refresh");
+  const screenClose = document.getElementById("screen-close");
+  const infoBtn = document.getElementById("info-btn");
+  const infoModal = document.getElementById("info-modal");
+  const infoBody = document.getElementById("info-body");
+  const infoClose = document.getElementById("info-close");
 
   // ---------- state ----------
   let attachedSid = null;        // currently-viewing claude_session_id
@@ -773,11 +921,64 @@ footer button.icon {
     if (idle === null || idle === undefined) { readyEl.style.display = "none"; return; }
     readyEl.style.display = "";
     readyEl.className = "ready " + (idle ? "idle" : "busy");
-    readyEl.textContent = idle ? "ready" : "busy";
+    readyEl.textContent = "";
+    readyEl.title = idle ? "ready" : "busy";
   }
 
   function setStatus(s) {
     statusDot.className = "dot " + (s === "ok" ? "" : s === "err" ? "err" : "off");
+  }
+
+  // Server tells us when to show a confirmation menu via m.pending_confirm.
+  // Each option N maps to: (N-1) DownArrows + Enter — works regardless of
+  // whether the menu is digit-shortcutted or arrow-key driven, because
+  // option 1 is the default selection in claude's prompts.
+  let lastPromptKey = "";
+  async function postQuickReply(idx) {
+    if (!attachedSid) return;
+    const downs = "\x1b[B".repeat(Math.max(0, idx - 1));
+    try {
+      await authedFetch("/api/input", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          claude_session_id: attachedSid,
+          text: downs,
+          press_enter: true,
+        }),
+      });
+    } catch {}
+    // Hide immediately for snappy feel; next poll will re-show if claude
+    // still expects input (e.g., a follow-up prompt appears).
+    promptRowEl.style.display = "none";
+    lastPromptKey = "";
+    keepAlive();
+    schedulePoll(300);
+  }
+
+  function updatePromptRow(pending) {
+    if (!pending || !pending.choices || pending.choices.length < 2) {
+      promptRowEl.style.display = "none";
+      lastPromptKey = "";
+      return;
+    }
+    // Avoid re-rendering buttons every poll if the menu is unchanged.
+    const key = pending.choices.map(c => c.idx + "·" + c.text).join("|")
+              + "?" + (pending.question || "");
+    if (key === lastPromptKey && promptRowEl.style.display !== "none") return;
+    lastPromptKey = key;
+    promptQuestionEl.textContent = pending.question || "Claude is waiting for a choice:";
+    promptChoicesEl.innerHTML = "";
+    for (const c of pending.choices) {
+      const btn = document.createElement("button");
+      btn.className = "pchoice" + (c.idx === 1 ? " default" : "");
+      const d = document.createElement("span"); d.className = "pdigit"; d.textContent = c.idx;
+      const t = document.createElement("span"); t.textContent = c.text;
+      btn.appendChild(d); btn.appendChild(t);
+      btn.addEventListener("click", () => postQuickReply(c.idx));
+      promptChoicesEl.appendChild(btn);
+    }
+    promptRowEl.style.display = "";
   }
 
   // ---------- views ----------
@@ -787,9 +988,14 @@ footer button.icon {
     footerEl.classList.add("hidden");
     backBtn.style.display = "none";
     modeGroup.style.display = "none";
+    screenBtn.style.display = "none";
+    infoBtn.style.display = "none";
+    newBtn.style.display = "";
     setReady(null);
     metaEl.textContent = "";
     setStatus("off");
+    promptRowEl.style.display = "none";
+    lastPromptKey = "";
     refreshPicker();
   }
 
@@ -799,9 +1005,135 @@ footer button.icon {
     footerEl.classList.remove("hidden");
     backBtn.style.display = "";
     modeGroup.style.display = "";
+    screenBtn.style.display = "";
+    infoBtn.style.display = "";
+    newBtn.style.display = "none";
     refreshModeButtons();
     setStatus("ok");
   }
+
+  async function loadScreen() {
+    if (!attachedSid) return;
+    screenBody.textContent = "Loading…";
+    try {
+      const resp = await authedFetch("/api/screen?claude_session_id=" + encodeURIComponent(attachedSid));
+      if (!resp.ok) {
+        screenBody.textContent = "Error: " + resp.status + " " + resp.statusText;
+        return;
+      }
+      const j = await resp.json();
+      screenBody.textContent = j.screen || "(empty)";
+      // Scroll to bottom — most recent output is what the user usually wants.
+      screenBody.scrollTop = screenBody.scrollHeight;
+    } catch (e) {
+      screenBody.textContent = "Error: " + e;
+    }
+  }
+  screenBtn.addEventListener("click", () => {
+    screenModal.classList.add("show");
+    loadScreen();
+  });
+  screenRefresh.addEventListener("click", loadScreen);
+  screenClose.addEventListener("click", () => screenModal.classList.remove("show"));
+  screenModal.addEventListener("click", (e) => {
+    if (e.target === screenModal) screenModal.classList.remove("show");
+  });
+
+  // Send raw bytes (escape seqs allowed) to the bound iTerm tab, then
+  // refresh the screen view so the user can see what happened.
+  // press_enter:false because we encode \r ourselves when needed — that
+  // way we can send a bare ESC without an extra Enter sneaking in.
+  async function sendRaw(text) {
+    if (!attachedSid) return;
+    try {
+      await authedFetch("/api/input", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          claude_session_id: attachedSid,
+          text,
+          press_enter: false,
+        }),
+      });
+    } catch {}
+    // Brief grace so claude can process and redraw, then refresh.
+    setTimeout(loadScreen, 300);
+  }
+  document.getElementById("key-esc").addEventListener("click", () => sendRaw("\x1b"));
+  document.getElementById("key-opt1").addEventListener("click", () => sendRaw("\r"));
+  document.getElementById("key-opt2").addEventListener("click", () => sendRaw("\x1b[B\r"));
+  document.getElementById("key-opt3").addEventListener("click", () => sendRaw("\x1b[B\x1b[B\r"));
+
+  function fmtBytes(n) {
+    if (typeof n !== "number" || n < 0) return String(n);
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
+    return (n / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+  }
+  function appendInfoRow(table, k, v, opts) {
+    if (v === undefined || v === null || v === "") return;
+    const tr = document.createElement("tr");
+    const tk = document.createElement("td"); tk.className = "k"; tk.textContent = k;
+    const tv = document.createElement("td"); tv.className = "v";
+    if (opts && opts.pre) {
+      const pre = document.createElement("pre"); pre.textContent = String(v);
+      tv.appendChild(pre);
+    } else {
+      tv.textContent = String(v);
+    }
+    tr.appendChild(tk); tr.appendChild(tv);
+    table.appendChild(tr);
+  }
+  async function loadInfo() {
+    if (!attachedSid) return;
+    infoBody.innerHTML = "";
+    const tr = document.createElement("tr");
+    const td = document.createElement("td"); td.colSpan = 2; td.textContent = "Loading…";
+    tr.appendChild(td); infoBody.appendChild(tr);
+    try {
+      const resp = await authedFetch("/api/session-info?claude_session_id=" + encodeURIComponent(attachedSid));
+      if (!resp.ok) {
+        infoBody.innerHTML = "";
+        appendInfoRow(infoBody, "error", resp.status + " " + resp.statusText);
+        return;
+      }
+      const j = await resp.json();
+      infoBody.innerHTML = "";
+      appendInfoRow(infoBody, "title", j.title || "(unnamed)");
+      appendInfoRow(infoBody, "session_id", j.session_id);
+      appendInfoRow(infoBody, "cwd", j.cwd);
+      appendInfoRow(infoBody, "named", j.named ? "yes" : "no");
+      if (j.binding) {
+        appendInfoRow(infoBody, "pid", j.binding.pid);
+        appendInfoRow(infoBody, "iterm tab", "win " + j.binding.window_index + " · tab " + j.binding.tab_index);
+        appendInfoRow(infoBody, "iterm sid", j.binding.iterm_session_id);
+        if (j.binding.bound_at) {
+          const d = new Date(j.binding.bound_at * 1000);
+          appendInfoRow(infoBody, "bound at", d.toLocaleString());
+        }
+      } else {
+        appendInfoRow(infoBody, "binding", "(not bound)");
+      }
+      appendInfoRow(infoBody, "jsonl path", j.jsonl_path, { pre: true });
+      appendInfoRow(infoBody, "jsonl size", fmtBytes(j.jsonl_size) + " (" + j.jsonl_size + " bytes)");
+      appendInfoRow(infoBody, "jsonl mtime", j.jsonl_mtime);
+      appendInfoRow(infoBody, "entries", j.entry_count);
+      appendInfoRow(infoBody, "first msg ts", j.first_ts);
+      appendInfoRow(infoBody, "first msg", j.first_user_msg, { pre: true });
+    } catch (e) {
+      infoBody.innerHTML = "";
+      appendInfoRow(infoBody, "error", String(e));
+    }
+  }
+  infoBtn.addEventListener("click", () => {
+    infoModal.classList.add("show");
+    loadInfo();
+  });
+  infoClose.addEventListener("click", () => infoModal.classList.remove("show"));
+  infoModal.addEventListener("click", (e) => {
+    if (e.target === infoModal) infoModal.classList.remove("show");
+  });
 
   function refreshModeButtons() {
     for (const b of modePicks) {
@@ -1315,6 +1647,18 @@ footer button.icon {
     return box;
   }
 
+  // Raw text used by the per-block copy button.
+  function rawTextFor(b) {
+    if (b.kind === "text" || b.kind === "thinking") return b.text || "";
+    if (b.kind === "tool_use") {
+      const args = (b.input && typeof b.input === "object")
+        ? JSON.stringify(b.input, null, 2) : (b.input != null ? String(b.input) : "");
+      return (b.name || "") + (args ? "\n" + args : "");
+    }
+    if (b.kind === "tool_result") return b.content || "";
+    return "";
+  }
+
   function renderBlock(b) {
     const div = document.createElement("div");
     const role = document.createElement("div");
@@ -1332,7 +1676,35 @@ footer button.icon {
     const sidTag = b.sid ? ` · ${String(b.sid).slice(0, 4)}` : "";
     const queuedTag = b.queued ? " · queued" : "";
     idx.textContent = r + "#" + (b.idx ?? "?") + sidTag + queuedTag + when;
-    role.appendChild(label); role.appendChild(idx);
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "copy-btn"; copyBtn.title = "Copy raw text";
+    // Two offset rounded squares — the classic "copy" / "duplicate" icon.
+    const COPY_SVG = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8.5" height="8.5" rx="1.6"/><path d="M11 5.5V3.6A1.6 1.6 0 0 0 9.4 2H3.6A1.6 1.6 0 0 0 2 3.6v5.8A1.6 1.6 0 0 0 3.6 11H5.5"/></svg>';
+    const DONE_SVG = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3.5,8.5 7,12 13,4.5"/></svg>';
+    copyBtn.innerHTML = COPY_SVG;
+    copyBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const raw = rawTextFor(b);
+      const done = () => {
+        copyBtn.innerHTML = DONE_SVG;
+        copyBtn.classList.add("done");
+        setTimeout(() => {
+          copyBtn.innerHTML = COPY_SVG;
+          copyBtn.classList.remove("done");
+        }, 1000);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(raw).then(done, () => copyBtn.title = "Copy failed");
+      } else {
+        // Fallback for older browsers / non-https contexts.
+        const ta = document.createElement("textarea");
+        ta.value = raw; document.body.appendChild(ta);
+        ta.select(); try { document.execCommand("copy"); done(); }
+        catch { copyBtn.title = "Copy failed"; }
+        ta.remove();
+      }
+    });
+    role.appendChild(label); role.appendChild(idx); role.appendChild(copyBtn);
 
     if (b.kind === "text") {
       div.className = "msg " + b.role;
@@ -1546,6 +1918,7 @@ footer button.icon {
         ingest(entries, "append");
       }
       if (typeof m.since_idx === "number") lastIdx = m.since_idx;
+      updatePromptRow(m.pending_confirm);
     } catch (e) {
       setStatus("err");
     } finally {

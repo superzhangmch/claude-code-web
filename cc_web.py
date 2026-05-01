@@ -686,6 +686,89 @@ bindings = BindingTable()
 # proof — that's our short-circuit before running LLM matching.
 MARKER_RE = re.compile(r"test_alive_marker=[a-f0-9]+")
 
+# Regex for a numbered-menu line in claude's tool-permission/trust dialogs.
+#   "❯ 1. Yes"
+#   "  2. Yes, and don't ask again"
+#   "  3. No, and tell Claude what to do (esc)"
+# Group 1: cursor (❯ / >) marking the current selection — may be absent.
+# Group 2: digit. Group 3: option text.
+_PROMPT_OPT_RE = re.compile(r"^\s*([❯>])?\s*(\d)\.\s+(.+?)\s*$")
+_ESC_HINT_RE = re.compile(r"\s*\(esc\)\s*$", re.I)
+
+# Per-session last-input timestamp. Used to gate confirmation-prompt
+# detection: we only scan the screen when claude has been quiet AND the
+# user hasn't typed anything recently (so a prompt is plausible).
+_last_input_ts: dict[str, float] = {}
+PENDING_CONFIRM_IDLE_SEC = 15.0
+
+
+def _detect_pending_confirm_from_screen(screen: str) -> Optional[dict]:
+    """Look at the iTerm screen tail for a numbered-choice menu (claude's
+    permission / trust dialogs). Returns
+        {"question": str, "choices": [{"idx": 1, "text": "..."}, ...]}
+    or None if no menu is detected.
+
+    "Simple case" only: a contiguous block of `N. text` lines at the bottom
+    with at least 2 entries. Doesn't handle [y/N] single-letter prompts or
+    arrow-key lists with no digits — those need a different detector.
+    """
+    if not screen:
+        return None
+    lines = screen.split("\n")
+    tail = lines[-12:]
+    tail_start = len(lines) - len(tail)
+    choices: list[dict] = []
+    first_abs_idx = -1
+    last_i = -1
+    for i, ln in enumerate(tail):
+        m = _PROMPT_OPT_RE.match(ln)
+        if m:
+            text = _ESC_HINT_RE.sub("", m.group(3)).strip()
+            if last_i >= 0 and i != last_i + 1:
+                # gap between matches → restart (this isn't a contiguous menu)
+                choices = []
+                first_abs_idx = -1
+            if first_abs_idx < 0:
+                first_abs_idx = tail_start + i
+            choices.append({"idx": len(choices) + 1, "text": text})
+            last_i = i
+        elif (last_i >= 0 and i == last_i + 1
+              and ln.strip() != "" and ln[:1] in (" ", "\t")):
+            # indented continuation — fold into the previous option's text
+            choices[-1]["text"] += " " + ln.strip()
+            last_i = i
+    if len(choices) < 2:
+        return None
+    question = ""
+    look_from = max(0, first_abs_idx - 12)
+    for j in range(first_abs_idx - 1, look_from - 1, -1):
+        ln = lines[j].strip()
+        if not ln:
+            continue
+        if ln.endswith("?"):
+            question = ln
+            break
+    return {"question": question, "choices": choices}
+
+
+async def _detect_pending_confirm(b: Binding, screen: Optional[str]) -> Optional[dict]:
+    """Gate + detect. Returns the prompt dict only if BOTH:
+      - JSONL hasn't been written for ≥ PENDING_CONFIRM_IDLE_SEC
+      - last user /api/input on this sid was ≥ PENDING_CONFIRM_IDLE_SEC ago
+    Either condition false → return None without touching the screen.
+    """
+    now = _time.time()
+    last_in = _last_input_ts.get(b.claude_session_id, 0.0)
+    if now - last_in < PENDING_CONFIRM_IDLE_SEC:
+        return None
+    try:
+        jsonl_mtime = b.jsonl_path.stat().st_mtime if b.jsonl_path else 0.0
+    except OSError:
+        jsonl_mtime = 0.0
+    if now - jsonl_mtime < PENDING_CONFIRM_IDLE_SEC:
+        return None
+    return _detect_pending_confirm_from_screen(screen or "")
+
 
 def _pid_alive_with_start(pid: int, expected_start: float, tolerance: float = 1.5) -> bool:
     """Verify pid is still alive AND its start time matches (catches pid reuse)."""
@@ -1550,6 +1633,8 @@ async def get_state(
     except Exception:
         screen = None
 
+    pending_confirm = await _detect_pending_confirm(b, screen)
+
     return {
         "binding": _serialize_binding(b),
         "transcript": transcript,
@@ -1558,6 +1643,7 @@ async def get_state(
         "gap_before_idx": gap_before_idx,
         "claude_idle": _is_claude_idle(all_entries),
         "screen": screen,
+        "pending_confirm": pending_confirm,
     }
 
 
@@ -1584,7 +1670,63 @@ async def post_input(payload: InputPayload):
     ok = await bridge.send_text_to(b.iterm_session_id, final)
     if not ok:
         raise HTTPException(status_code=404, detail="iterm session vanished")
+    _last_input_ts[b.claude_session_id] = _time.time()
     return {"ok": True}
+
+
+@app.get("/api/session-info", dependencies=[Depends(require_token)])
+async def get_session_info(claude_session_id: str):
+    """Snapshot for the info popup: title, cwd, jsonl size, first/last user
+    message, PID + binding details. Resolves the JSONL by sid even if the
+    session isn't currently bound (so info still works after detach)."""
+    import datetime as _dt
+    sid = claude_session_id
+    titles = {e["session_id"]: e for e in load_session_index()}
+    named = titles.get(sid)
+    jsonl_path = find_jsonl_for_session(sid)
+    if jsonl_path is None:
+        raise HTTPException(status_code=404, detail="unknown session_id")
+    try:
+        st = jsonl_path.stat()
+        jsonl_size = st.st_size
+        jsonl_mtime = _dt.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    except OSError:
+        jsonl_size = 0
+        jsonl_mtime = ""
+    ctx = extract_recent_context(jsonl_path, n_exchanges=1, max_user_chars=200, max_response_chars=200)
+    cwd = (named.get("project_path") if named else "") or _project_path_from_jsonl(jsonl_path) or ""
+    entries = jsonl_cache.entries(jsonl_path)
+    b = bindings.get_by_session(sid)
+    return {
+        "session_id": sid,
+        "title": (named.get("title") if named else ""),
+        "named": named is not None,
+        "cwd": cwd,
+        "jsonl_path": str(jsonl_path),
+        "jsonl_size": jsonl_size,
+        "jsonl_mtime": jsonl_mtime,
+        "entry_count": len(entries),
+        "first_user_msg": ctx.get("first_user_msg", ""),
+        "first_ts": ctx.get("first_ts", ""),
+        "binding": _serialize_binding(b) if b else None,
+    }
+
+
+@app.get("/api/screen", dependencies=[Depends(require_token)])
+async def get_screen(claude_session_id: str):
+    """Return the current iTerm screen tail for a bound session. Used by
+    the 'Load screen' button so the user can peek at the live tab any time."""
+    b = bindings.get_by_session(claude_session_id)
+    if b is None:
+        raise HTTPException(status_code=409, detail="session not bound")
+    if not verify_binding(b):
+        bindings.remove_session(claude_session_id)
+        raise HTTPException(status_code=410, detail="tab/pid is gone")
+    try:
+        screen = await bridge.get_screen_for(b.iterm_session_id, max_lines=200)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
+    return {"screen": screen or ""}
 
 
 class ResumePayload(BaseModel):
