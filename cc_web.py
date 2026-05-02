@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -334,13 +335,24 @@ def _slice_middle(s: str, n: int) -> str:
 def _normalize_for_match(s: str) -> str:
     """Strip the markdown rendering chars so JSONL ↔ screen comparison survives
     Ink-rendered bold/italic/code/headers. Also collapse iTerm2's wide-char
-    padding (NULL bytes between glyphs) into whitespace."""
+    padding (NULL bytes between glyphs) into whitespace.
+
+    Box-drawing folding: claude renders markdown tables with U+2500..U+257F
+    box-drawing glyphs (│ ─ ┬ ├ etc.), but the JSONL stores the source
+    `|`, `-` etc. We fold the most common pipe/dash glyphs to their ASCII
+    counterparts and drop the rest, otherwise table-row evidence pairs
+    look identical on both sides yet fail the substring check against
+    the real JSONL."""
     s = s.strip()
-    # iTerm2 packs cell padding around wide chars (CJK, emoji) as \x00 — these
-    # would block substring matches between JSONL text and screen content. Fold
-    # them into spaces so the \s+ collapse below merges them away.
     s = s.replace("\x00", " ")
-    # remove common markdown punctuation that Ink will hide
+    # Pipe/dash glyphs appear inline with text — fold to ASCII so a
+    # table cell like "mac-air │ OpenSSL" still matches the JSONL's
+    # "mac-air | OpenSSL".
+    s = (s.replace("│", "|").replace("┃", "|")
+           .replace("─", "-").replace("━", "-"))
+    # Other box-drawing chars (corners, junctions, light/heavy variants)
+    # are pure rendering noise — strip them so they don't block matches.
+    s = re.sub(r"[─-╿]", "", s)
     for ch in ("**", "__", "`", "#", ">", "*", "_"):
         s = s.replace(ch, "")
     s = re.sub(r"\s+", " ", s)
@@ -403,6 +415,47 @@ def _llm_http_post(url: str, headers: dict, body: dict, timeout: float) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
+# Result cache for llm_pick_candidate. Same JSONL state + same candidate
+# screens → same answer; we save the LLM round-trip on repeated attaches.
+# Key fingerprints (jsonl path/mtime/size) and (iterm sid + sha256 of its
+# screen tail) so the cache invalidates automatically when anything that
+# influences the answer changes.
+_LLM_PICK_CACHE: dict[tuple, tuple[float, dict]] = {}
+LLM_PICK_CACHE_TTL_SEC = 3600.0  # 1 hour
+LLM_PICK_CACHE_MAX_ENTRIES = 256
+
+
+def _llm_pick_cache_key(jsonl_path: Path, scored: list[dict]) -> tuple:
+    try:
+        st = jsonl_path.stat()
+        jpart = (str(jsonl_path), st.st_mtime, st.st_size)
+    except OSError:
+        jpart = (str(jsonl_path), 0, 0)
+    parts = []
+    for c in scored:
+        ref = c["ref"]
+        screen = (c.get("screen") or "")
+        h = hashlib.sha256(screen.encode("utf-8", errors="replace")).hexdigest()
+        parts.append((ref.iterm_session_id, h))
+    parts.sort()
+    return jpart + tuple(parts)
+
+
+def _llm_pick_cache_evict_expired(now: float) -> None:
+    if len(_LLM_PICK_CACHE) <= LLM_PICK_CACHE_MAX_ENTRIES:
+        return
+    # Drop everything older than TTL; if still over the cap, drop the
+    # oldest by timestamp until under.
+    stale = [k for k, (ts, _) in _LLM_PICK_CACHE.items()
+             if now - ts >= LLM_PICK_CACHE_TTL_SEC]
+    for k in stale:
+        _LLM_PICK_CACHE.pop(k, None)
+    if len(_LLM_PICK_CACHE) > LLM_PICK_CACHE_MAX_ENTRIES:
+        ordered = sorted(_LLM_PICK_CACHE.items(), key=lambda kv: kv[1][0])
+        for k, _ in ordered[: len(_LLM_PICK_CACHE) - LLM_PICK_CACHE_MAX_ENTRIES]:
+            _LLM_PICK_CACHE.pop(k, None)
+
+
 async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
     """Ask the configured LLM which iterm tab matches this session AND
     return the evidence pairs it used as proof. Each evidence pair gets
@@ -430,6 +483,16 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
     model = cfg.get("model", "")
     if not api_base or not model:
         return empty
+
+    # Cache check: same JSONL state + same candidate screens → reuse the
+    # previous answer for up to LLM_PICK_CACHE_TTL_SEC. Avoids burning
+    # tokens when the user pops the dialog several times in a row.
+    cache_key = _llm_pick_cache_key(jsonl_path, scored)
+    now = _time.time()
+    cached = _LLM_PICK_CACHE.get(cache_key)
+    if cached and now - cached[0] < LLM_PICK_CACHE_TTL_SEC:
+        log.info("llm_pick: cache hit (age=%.1fs)", now - cached[0])
+        return cached[1]
 
     ctx = extract_recent_context(jsonl_path, n_exchanges=5,
                                  max_user_chars=400, max_response_chars=500)
@@ -619,12 +682,16 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
             "transcript": t_snip, "screen": s_snip, "verdict": verdict,
         })
     all_ok = bool(verified) and all(v["verdict"] == "OK" for v in verified)
-    return {
+    result = {
         "pick": pick_iterm_id,
         "matches": verified,
         "all_verified": all_ok,
         "raw": content,
     }
+    # Cache only successful answers — failed/empty results re-try on next call.
+    _LLM_PICK_CACHE[cache_key] = (now, result)
+    _llm_pick_cache_evict_expired(now)
+    return result
 
 
 # ---------- the binding cache ----------
@@ -708,9 +775,11 @@ def _detect_pending_confirm_from_screen(screen: str) -> Optional[dict]:
         {"question": str, "choices": [{"idx": 1, "text": "..."}, ...]}
     or None if no menu is detected.
 
-    "Simple case" only: a contiguous block of `N. text` lines at the bottom
-    with at least 2 entries. Doesn't handle [y/N] single-letter prompts or
-    arrow-key lists with no digits — those need a different detector.
+    Required signal: at least ONE numbered option must carry the `❯`
+    (or `>`) cursor mark — claude's prompt UI always highlights the
+    current selection that way. Plain markdown numbered lists in
+    assistant prose ("1. Seed... 2. Walk...") never have it, so the
+    cursor-required rule cleanly distinguishes a real menu from text.
     """
     if not screen:
         return None
@@ -720,16 +789,20 @@ def _detect_pending_confirm_from_screen(screen: str) -> Optional[dict]:
     choices: list[dict] = []
     first_abs_idx = -1
     last_i = -1
+    has_cursor = False
     for i, ln in enumerate(tail):
         m = _PROMPT_OPT_RE.match(ln)
         if m:
             text = _ESC_HINT_RE.sub("", m.group(3)).strip()
             if last_i >= 0 and i != last_i + 1:
-                # gap between matches → restart (this isn't a contiguous menu)
+                # gap between matches → restart (not a contiguous menu)
                 choices = []
                 first_abs_idx = -1
+                has_cursor = False
             if first_abs_idx < 0:
                 first_abs_idx = tail_start + i
+            if m.group(1):  # `❯` or `>` cursor
+                has_cursor = True
             choices.append({"idx": len(choices) + 1, "text": text})
             last_i = i
         elif (last_i >= 0 and i == last_i + 1
@@ -737,7 +810,7 @@ def _detect_pending_confirm_from_screen(screen: str) -> Optional[dict]:
             # indented continuation — fold into the previous option's text
             choices[-1]["text"] += " " + ln.strip()
             last_i = i
-    if len(choices) < 2:
+    if len(choices) < 2 or not has_cursor:
         return None
     question = ""
     look_from = max(0, first_abs_idx - 12)

@@ -205,15 +205,15 @@ main {
   color: #5a5f6c; font-size: 10px; font-weight: normal;
   letter-spacing: 0; text-transform: none; margin-left: auto;
 }
-.msg .role .copy-btn {
+.msg .copy-btn {
   background: transparent; color: var(--muted);
   border: 0; cursor: pointer; padding: 0 2px 0 6px;
   line-height: 0;
   display: inline-flex; align-items: center;
 }
-.msg .role .copy-btn:hover { color: var(--text); }
-.msg .role .copy-btn svg { display: block; }
-.msg .role .copy-btn.done { color: #6ee884; }
+.msg .copy-btn:hover { color: var(--text); }
+.msg .copy-btn svg { display: block; }
+.msg .copy-btn.done { color: #6ee884; }
 .msg .markdown { word-break: break-word; }
 .msg .markdown p { margin: 0 0 .7em 0; }
 .msg .markdown p:last-child { margin-bottom: 0; }
@@ -280,6 +280,39 @@ main {
   font: 12.5px/1.4 ui-monospace, Menlo, monospace; white-space: pre;
   background: var(--code-bg);
   border-radius: 4px; padding: 8px 10px; max-height: 300px; overflow: auto;
+}
+/* Inline result inside the tool-call box (merged adjacent pair). */
+.msg .tool-call .tool-result-inline {
+  margin-top: 10px; padding-top: 6px;
+  border-top: 1px dashed var(--border);
+}
+.msg .tool-call .tool-result-inline .rlabel {
+  font-size: 10px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+.msg .tool-call .tool-result-inline.is-error .rlabel { color: #ff8b8b; }
+.msg .tool-call .tool-result-inline .rlabel-row {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 4px;
+}
+.msg .tool-call .tool-result-inline .rlabel-row .rlabel { margin-bottom: 0; }
+.msg .tool-call .tool-result-inline .rlabel-row .copy-btn { margin-left: auto; }
+/* Wrap-toggle: when active, long lines re-wrap inside the block. */
+.msg .wrap-btn {
+  background: transparent; color: var(--muted);
+  border: 0; cursor: pointer; padding: 0 4px;
+  font-size: 13px; line-height: 1;
+}
+.msg .wrap-btn:hover { color: var(--text); }
+.msg .wrap-btn.active { color: var(--accent); }
+/* Card-level wrap toggle now scopes to args only — merged result keeps
+   its own independent toggle inside .tool-result-inline. */
+.msg .tool-call.wrap-on .targs-v,
+.msg .tool-call.wrap-on .targs-v pre {
+  white-space: pre-wrap; word-break: break-word;
+}
+.msg .tool-result-box.wrap-on {
+  white-space: pre-wrap; word-break: break-word;
 }
 .msg .tool-result-box.is-error { color: #ff8b8b; }
 
@@ -468,7 +501,7 @@ footer button.icon {
   font: 11px/1.4 ui-monospace, Menlo, monospace;
 }
 .candidate .evidence .pair {
-  display: grid; grid-template-columns: 38px 1fr; gap: 0 6px;
+  display: grid; grid-template-columns: 60px 1fr; gap: 0 12px;
   padding: 3px 0; border-top: 1px dashed var(--border);
 }
 .candidate .evidence .pair:first-child { border-top: 0; }
@@ -478,6 +511,12 @@ footer button.icon {
 .candidate .evidence .pair .text { color: var(--text); word-break: break-all; }
 .candidate .evidence .pair.transcript .label { color: var(--accent); }
 .candidate .evidence .pair.screen .label { color: var(--assistant); }
+.candidate .evidence .pair.screen .label .vmark { margin-right: 3px; font-weight: 700; }
+.candidate .evidence .pair.screen .label .vmark.ok { color: #6ee884; }
+.candidate .evidence .pair.screen .label .vmark.fake { color: #ff6a6a; }
+.candidate .screen-tail .match-hl {
+  color: #ff6a6a; font-weight: 700;
+}
 .candidate .evidence .verdict {
   display: inline-block; font-size: 9px; font-weight: 600;
   padding: 1px 5px; border-radius: 3px; letter-spacing: 0.05em;
@@ -902,6 +941,12 @@ footer button.icon {
   let isPaused = false;
   let polling = false;
   let pollTimer = null;
+  // Tracks the most-recent block currently at the bottom of the transcript
+  // *if* that block is a tool_use. A tool_result that comes next can then
+  // be folded into the same card. Reset whenever the bottom is no longer
+  // a tool_use (text/thinking/standalone tool_result rendered, transcript
+  // rebuilt, or user navigated away).
+  let _lastBottomToolUse = null;
   let activityDeadline = 0;
   let renderMode = localStorage.getItem("cc_mode") || "brief";
   let shouldAutoscroll = true;
@@ -996,6 +1041,7 @@ footer button.icon {
     setStatus("off");
     promptRowEl.style.display = "none";
     lastPromptKey = "";
+    _lastBottomToolUse = null;
     refreshPicker();
   }
 
@@ -1375,6 +1421,162 @@ footer button.icon {
   const candiCancel = document.getElementById("candidlg-cancel");
   let candiState = { sid: null, label: "", picked: null };
 
+  // Length cutoff for highlighting: too short and we'd light up common
+  // English fragments (the, and, to). Six chars is roughly 1-2 words,
+  // enough to be meaningful but tolerant of small token differences.
+  const MATCH_HL_MIN = 6;
+
+  // Longest common substring (LCS in the contiguous sense). Returns the
+  // {start,length} of the LCS as positioned within `b`. O(|a|*|b|) DP
+  // with two rolling rows. Empty result → length 0.
+  function longestCommonSubstring(a, b) {
+    const n = a.length, m = b.length;
+    if (!n || !m) return { start: 0, length: 0 };
+    let prev = new Int32Array(m + 1);
+    let curr = new Int32Array(m + 1);
+    let bestLen = 0, bestEndInB = 0;
+    for (let i = 1; i <= n; i++) {
+      for (let j = 1; j <= m; j++) {
+        if (a[i-1] === b[j-1]) {
+          curr[j] = prev[j-1] + 1;
+          if (curr[j] > bestLen) { bestLen = curr[j]; bestEndInB = j; }
+        } else {
+          curr[j] = 0;
+        }
+      }
+      const tmp = prev; prev = curr; curr = tmp; curr.fill(0);
+    }
+    return { start: bestEndInB - bestLen, length: bestLen };
+  }
+
+  // Build a DocumentFragment for `target`, with the longest substring
+  // shared with `against` wrapped in <span class="match-hl">. Falls back
+  // to plain text if the overlap is too short to be useful.
+  function highlightOverlap(target, against) {
+    const frag = document.createDocumentFragment();
+    if (!target) return frag;
+    if (!against) { frag.appendChild(document.createTextNode(target)); return frag; }
+    const m = longestCommonSubstring(against, target);
+    if (m.length < MATCH_HL_MIN) {
+      frag.appendChild(document.createTextNode(target));
+      return frag;
+    }
+    if (m.start > 0) frag.appendChild(document.createTextNode(target.slice(0, m.start)));
+    const span = document.createElement("span");
+    span.className = "match-hl";
+    span.textContent = target.slice(m.start, m.start + m.length);
+    frag.appendChild(span);
+    if (m.start + m.length < target.length) {
+      frag.appendChild(document.createTextNode(target.slice(m.start + m.length)));
+    }
+    return frag;
+  }
+
+  // LCS with masked positions — masked-out positions in either string
+  // can't participate in any match. Used by multi-pass LCS below.
+  function lcsWithMasks(a, b, aMask, bMask) {
+    const n = a.length, m = b.length;
+    let prev = new Int32Array(m + 1);
+    let curr = new Int32Array(m + 1);
+    let bestLen = 0, bestEndA = 0, bestEndB = 0;
+    for (let i = 1; i <= n; i++) {
+      const ma = aMask[i-1];
+      for (let j = 1; j <= m; j++) {
+        if (ma || bMask[j-1] || a[i-1] !== b[j-1]) {
+          curr[j] = 0;
+        } else {
+          curr[j] = prev[j-1] + 1;
+          if (curr[j] > bestLen) {
+            bestLen = curr[j]; bestEndA = i; bestEndB = j;
+          }
+        }
+      }
+      const tmp = prev; prev = curr; curr = tmp; curr.fill(0);
+    }
+    return { aStart: bestEndA - bestLen, bStart: bestEndB - bestLen, length: bestLen };
+  }
+
+  // Find ALL non-overlapping common substrings of length >= MIN_LEN
+  // between `screen` and `tailText`. Returns ranges (within tailText)
+  // sorted ascending. Greedy multi-pass: each pass takes the longest
+  // remaining LCS, then masks both regions and repeats.
+  function findAllCommonRanges(tailText, screen, MIN_LEN) {
+    const ranges = [];
+    const tMask = new Uint8Array(tailText.length);
+    const sMask = new Uint8Array(screen.length);
+    while (true) {
+      const m = lcsWithMasks(tailText, screen, tMask, sMask);
+      if (m.length < MIN_LEN) break;
+      ranges.push({ start: m.aStart, end: m.aStart + m.length });
+      for (let k = m.aStart; k < m.aStart + m.length; k++) tMask[k] = 1;
+      for (let k = m.bStart; k < m.bStart + m.length; k++) sMask[k] = 1;
+    }
+    ranges.sort((a, b) => a.start - b.start);
+    return ranges;
+  }
+
+  // Build a fragment for the iTerm screen-tail with every OK-verified
+  // mp.screen highlighted. Strategy:
+  //   1. exact substring (covers the common verbatim case)
+  //   2. multi-pass LCS to catch slightly-different formatting where the
+  //      snippet matches in several disjoint pieces
+  // Then merge any two ranges separated only by whitespace so the
+  // highlight reads as one continuous block instead of breaking at
+  // every space difference.
+  function highlightScreenTail(tailText, matches) {
+    const frag = document.createDocumentFragment();
+    if (!tailText) return frag;
+    let ranges = [];
+    for (const mp of matches) {
+      if (!mp || mp.verdict !== "OK" || !mp.screen) continue;
+      const idx = tailText.indexOf(mp.screen);
+      if (idx >= 0) {
+        ranges.push({ start: idx, end: idx + mp.screen.length });
+        continue;
+      }
+      const sub = findAllCommonRanges(tailText, mp.screen, MATCH_HL_MIN);
+      for (const r of sub) ranges.push(r);
+    }
+    if (!ranges.length) {
+      frag.appendChild(document.createTextNode(tailText));
+      return frag;
+    }
+    ranges.sort((a, b) => a.start - b.start);
+    // First merge: overlap or adjacency.
+    const merged = [ranges[0]];
+    for (let i = 1; i < ranges.length; i++) {
+      const last = merged[merged.length - 1];
+      if (ranges[i].start <= last.end) {
+        last.end = Math.max(last.end, ranges[i].end);
+      } else {
+        merged.push({ ...ranges[i] });
+      }
+    }
+    // Second merge: gap is purely whitespace → fold the gap into the
+    // highlighted block so spaces don't visually disappear from the match.
+    const finalRanges = [merged[0]];
+    for (let i = 1; i < merged.length; i++) {
+      const last = finalRanges[finalRanges.length - 1];
+      const gap = tailText.slice(last.end, merged[i].start);
+      if (gap.length > 0 && /^\s+$/.test(gap)) {
+        last.end = merged[i].end;
+      } else {
+        finalRanges.push({ ...merged[i] });
+      }
+    }
+    let pos = 0;
+    for (const r of finalRanges) {
+      if (r.start > pos) frag.appendChild(document.createTextNode(tailText.slice(pos, r.start)));
+      const span = document.createElement("span");
+      span.className = "match-hl";
+      span.textContent = tailText.slice(r.start, r.end);
+      frag.appendChild(span);
+      pos = r.end;
+    }
+    if (pos < tailText.length) frag.appendChild(document.createTextNode(tailText.slice(pos)));
+    return frag;
+  }
+
   function openCandidateDialog(sid, label, data) {
     const conflict = data.conflict || null;
     candiState = { sid, label, picked: null, conflict };
@@ -1455,12 +1657,16 @@ footer button.icon {
           const tLbl = document.createElement("div"); tLbl.className = "label"; tLbl.textContent = "session";
           const tText = document.createElement("div"); tText.className = "text";
           tText.textContent = mp.transcript || "";
-          const v = document.createElement("span"); v.className = "verdict " + verdictCls;
-          v.textContent = mp.verdict || "";
-          tText.appendChild(v);
           tRow.appendChild(tLbl); tRow.appendChild(tText); ev.appendChild(tRow);
           const sRow = document.createElement("div"); sRow.className = "pair screen";
-          const sLbl = document.createElement("div"); sLbl.className = "label"; sLbl.textContent = "screen";
+          const sLbl = document.createElement("div"); sLbl.className = "label";
+          // Verdict mark sits at the start of the screen-row label so each
+          // pair shows "✓ screen" / "✗ screen" at a glance.
+          const vMark = document.createElement("span");
+          vMark.className = "vmark " + verdictCls;
+          vMark.textContent = mp.verdict === "OK" ? "✓" : "✗";
+          sLbl.appendChild(vMark);
+          sLbl.appendChild(document.createTextNode("screen"));
           const sText = document.createElement("div"); sText.className = "text";
           sText.textContent = mp.screen || "";
           sRow.appendChild(sLbl); sRow.appendChild(sText); ev.appendChild(sRow);
@@ -1468,7 +1674,14 @@ footer button.icon {
         el.appendChild(ev);
       }
       const tail = document.createElement("div"); tail.className = "screen-tail";
-      tail.textContent = (c.screen_tail || "").replace(/ /g, " ");
+      const tailText = (c.screen_tail || "").replace(/[\x00\u00a0]/g, " ");
+      if (isLLMPick && Array.isArray(data.llm_matches) && data.llm_matches.length) {
+        // Highlight the OK-verified screen snippets where they actually
+        // appear in the live screen tail.
+        tail.appendChild(highlightScreenTail(tailText, data.llm_matches));
+      } else {
+        tail.textContent = tailText;
+      }
       el.appendChild(tail);
       const cardRow = document.createElement("div"); cardRow.className = "card-confirm-row";
       const cardBtn = document.createElement("button");
@@ -1659,6 +1872,50 @@ footer button.icon {
     return "";
   }
 
+  // Two offset rounded squares — the classic "copy" / "duplicate" icon.
+  const COPY_SVG = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8.5" height="8.5" rx="1.6"/><path d="M11 5.5V3.6A1.6 1.6 0 0 0 9.4 2H3.6A1.6 1.6 0 0 0 2 3.6v5.8A1.6 1.6 0 0 0 3.6 11H5.5"/></svg>';
+  const DONE_SVG = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3.5,8.5 7,12 13,4.5"/></svg>';
+
+  // `getRaw` is a function so callers can produce the text lazily — useful
+  // when the source object isn't fully materialized at construction time.
+  function makeCopyBtn(getRaw) {
+    const btn = document.createElement("button");
+    btn.className = "copy-btn"; btn.title = "Copy raw text";
+    btn.innerHTML = COPY_SVG;
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const raw = (typeof getRaw === "function") ? getRaw() : (getRaw || "");
+      const done = () => {
+        btn.innerHTML = DONE_SVG; btn.classList.add("done");
+        setTimeout(() => { btn.innerHTML = COPY_SVG; btn.classList.remove("done"); }, 1000);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(raw).then(done, () => btn.title = "Copy failed");
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = raw; document.body.appendChild(ta);
+        ta.select(); try { document.execCommand("copy"); done(); }
+        catch { btn.title = "Copy failed"; }
+        ta.remove();
+      }
+    });
+    return btn;
+  }
+
+  // Toggle line-wrap on a target box. Adds/removes `.wrap-on` so CSS can
+  // flip white-space pre ↔ pre-wrap. Self-styled to match the row icons.
+  function makeWrapBtn(target) {
+    const btn = document.createElement("button");
+    btn.className = "wrap-btn"; btn.title = "Toggle line wrap";
+    btn.textContent = "↵";
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const on = target.classList.toggle("wrap-on");
+      btn.classList.toggle("active", on);
+    });
+    return btn;
+  }
+
   function renderBlock(b) {
     const div = document.createElement("div");
     const role = document.createElement("div");
@@ -1676,53 +1933,67 @@ footer button.icon {
     const sidTag = b.sid ? ` · ${String(b.sid).slice(0, 4)}` : "";
     const queuedTag = b.queued ? " · queued" : "";
     idx.textContent = r + "#" + (b.idx ?? "?") + sidTag + queuedTag + when;
-    const copyBtn = document.createElement("button");
-    copyBtn.className = "copy-btn"; copyBtn.title = "Copy raw text";
-    // Two offset rounded squares — the classic "copy" / "duplicate" icon.
-    const COPY_SVG = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8.5" height="8.5" rx="1.6"/><path d="M11 5.5V3.6A1.6 1.6 0 0 0 9.4 2H3.6A1.6 1.6 0 0 0 2 3.6v5.8A1.6 1.6 0 0 0 3.6 11H5.5"/></svg>';
-    const DONE_SVG = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3.5,8.5 7,12 13,4.5"/></svg>';
-    copyBtn.innerHTML = COPY_SVG;
-    copyBtn.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      const raw = rawTextFor(b);
-      const done = () => {
-        copyBtn.innerHTML = DONE_SVG;
-        copyBtn.classList.add("done");
-        setTimeout(() => {
-          copyBtn.innerHTML = COPY_SVG;
-          copyBtn.classList.remove("done");
-        }, 1000);
-      };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(raw).then(done, () => copyBtn.title = "Copy failed");
-      } else {
-        // Fallback for older browsers / non-https contexts.
-        const ta = document.createElement("textarea");
-        ta.value = raw; document.body.appendChild(ta);
-        ta.select(); try { document.execCommand("copy"); done(); }
-        catch { copyBtn.title = "Copy failed"; }
-        ta.remove();
-      }
-    });
-    role.appendChild(label); role.appendChild(idx); role.appendChild(copyBtn);
+    role.appendChild(label); role.appendChild(idx);
+    // Per-kind buttons (wrap toggle, copy) get appended below — the wrap
+    // button needs the content box to point at, so we build the box first
+    // and add buttons afterwards.
 
     if (b.kind === "text") {
       div.className = "msg " + b.role;
       label.textContent = b.role === "user" ? "You" : "Claude";
       const md = document.createElement("div"); md.className = "markdown";
       md.innerHTML = renderMarkdown(b.text);
+      role.appendChild(makeCopyBtn(() => rawTextFor(b)));
       div.appendChild(role); div.appendChild(md);
+      _lastBottomToolUse = null;
     } else if (b.kind === "tool_use") {
       div.className = "msg tool"; label.textContent = "Tool call";
-      div.appendChild(role); div.appendChild(buildToolCallBox(b));
+      const callBox = buildToolCallBox(b);
+      // Wrap toggle on the call box (also flips an inline result if
+      // one gets merged in later — CSS rule cascades into .tool-result-box).
+      role.appendChild(makeWrapBtn(callBox));
+      role.appendChild(makeCopyBtn(() => rawTextFor(b)));
+      div.appendChild(role); div.appendChild(callBox);
+      // Track this tool_use as the bottom-most rendered block, so a
+      // tool_result that arrives next (same batch or a later poll batch)
+      // can merge into the same card instead of starting a new one.
+      _lastBottomToolUse = b.id ? { id: b.id, box: callBox } : null;
     } else if (b.kind === "tool_result") {
+      // Merge into the previous tool_use's card iff it's the most-recent
+      // bottom block AND the ids match. Anything else (different id, an
+      // unrelated text block in between) → render as a separate card.
+      if (_lastBottomToolUse && _lastBottomToolUse.id
+          && _lastBottomToolUse.id === b.tool_use_id) {
+        const wrap = document.createElement("div");
+        wrap.className = "tool-result-inline" + (b.is_error ? " is-error" : "");
+        const labRow = document.createElement("div"); labRow.className = "rlabel-row";
+        const lab = document.createElement("span"); lab.className = "rlabel";
+        lab.textContent = b.is_error ? "result (error)" : "result";
+        labRow.appendChild(lab);
+        const resBox = buildToolResultBox(b);
+        // Dedicated wrap + copy buttons for the merged result. The card's
+        // top wrap toggles only the args; this one toggles only the result.
+        labRow.appendChild(makeWrapBtn(resBox));
+        labRow.appendChild(makeCopyBtn(() => b.content || ""));
+        wrap.appendChild(labRow);
+        wrap.appendChild(resBox);
+        _lastBottomToolUse.box.appendChild(wrap);
+        _lastBottomToolUse = null;
+        return null;  // already merged; renderEntriesInto skips a null
+      }
       div.className = "msg tool"; label.textContent = "Tool result" + (b.is_error ? " (error)" : "");
-      div.appendChild(role); div.appendChild(buildToolResultBox(b));
+      const resBox = buildToolResultBox(b);
+      role.appendChild(makeWrapBtn(resBox));
+      role.appendChild(makeCopyBtn(() => rawTextFor(b)));
+      div.appendChild(role); div.appendChild(resBox);
+      _lastBottomToolUse = null;
     } else if (b.kind === "thinking") {
       div.className = "msg thinking"; label.textContent = "Thinking";
       const md = document.createElement("div"); md.className = "markdown";
       md.innerHTML = renderMarkdown(b.text);
+      role.appendChild(makeCopyBtn(() => rawTextFor(b)));
       div.appendChild(role); div.appendChild(md);
+      _lastBottomToolUse = null;
     } else return null;
 
     // mismatch warning trigger
@@ -1732,17 +2003,24 @@ footer button.icon {
     return div;
   }
 
-  function renderEntriesInto(container, entries) {
+  function renderEntriesInto(container, entries, atTop) {
+    // For prepend (atTop=true): the historical batch is rendered at the
+    // top of the transcript, so it must NOT update the "bottom block"
+    // tracker — save the current state and restore after rendering.
+    let saved = null;
+    if (atTop) saved = _lastBottomToolUse;
     for (const e of entries) {
       for (const b of blocksFor(e)) {
         const el = renderBlock(b);
         if (el) container.appendChild(el);
       }
     }
+    if (atTop) _lastBottomToolUse = saved;
   }
 
   function rebuild() {
     transcriptEl.innerHTML = "";
+    _lastBottomToolUse = null;
     renderEntriesInto(transcriptEl, entryCache);
     updateLoadEarlier();
     scrollToBottom();
@@ -1768,7 +2046,7 @@ footer button.icon {
       entryCache = fresh.concat(entryCache);
       earliestIdxLoaded = fresh[0]?._idx ?? earliestIdxLoaded;
       const frag = document.createDocumentFragment();
-      renderEntriesInto(frag, fresh);
+      renderEntriesInto(frag, fresh, /*atTop=*/true);
       const prevH = mainEl.scrollHeight, prevS = mainEl.scrollTop;
       transcriptEl.insertBefore(frag, transcriptEl.firstChild);
       mainEl.scrollTop = prevS + (mainEl.scrollHeight - prevH);
