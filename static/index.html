@@ -2138,25 +2138,29 @@ footer button.icon {
   });
 
   // ---------- autoload indicator ----------
-  // Unified stopped-state behavior (covers both `isPaused` and `claudeIdle`):
-  //   tap → force a one-shot fetch
-  //     ↳ new entries arrived (lastIdx advanced)?  resume normal polling
-  //     ↳ nothing new?                              stay in tap-to-continue
-  // This matters when the user types directly into the terminal: the web
-  // UI was sleeping, a tap should check for fresh JSONL and either show
-  // it or quietly go back to red "tap to continue".
+  // Three states; both stopped variants render red so the user notices.
+  //   - polling      → "auto-refreshing · tap to stop"
+  //   - isPaused     → "paused · tap to continue"           (red, after timeout)
+  //   - claudeIdle   → "claude waiting · tap to refresh"    (red, claude done)
+  // Tap behavior:
+  //   - polling      → manual pause
+  //   - either red   → force a one-shot fetch:
+  //       new content + claude generating → polling auto-resumes
+  //       no new content                  → stay in WHATEVER red state
+  //                                          we were in (don't conflate
+  //                                          claude-idle into paused)
   autoloadEl.addEventListener("click", async (e) => {
     e.stopPropagation();
     if (!isPaused && !claudeIdle) {
       setPaused(true);
       return;
     }
+    const wasPaused = isPaused;
     const before = lastIdx;
     isPaused = false;     // temp unpause so pollOnce() actually fetches
     keepAlive();
-    // Brief "checking…" state — gives the user immediate feedback that
-    // their tap registered, instead of the indicator looking dead during
-    // the fetch round-trip.
+    // Brief "checking…" state so the tap feels alive instead of dead
+    // during the fetch round-trip.
     autoloadEl.classList.remove("paused");
     autoloadEl.classList.add("checking");
     autoloadLabel.textContent = "checking…";
@@ -2165,22 +2169,24 @@ footer button.icon {
     } finally {
       autoloadEl.classList.remove("checking");
     }
-    // pollOnce updates lastIdx + claudeIdle from the response.
     if (lastIdx !== before) {
       // New content. If claude is generating again, polling auto-resumes
       // via pollOnce's finally block — nothing to do here.
       return;
     }
-    // Nothing new — go back to red "tap to continue".
-    setPaused(true);
+    // Nothing new — restore the prior stopped state. If we were paused
+    // due to inactivity, set isPaused back; if we were just claudeIdle
+    // (no manual pause), claudeIdle is still true and polling naturally
+    // stays stopped, no action needed.
+    if (wasPaused) setPaused(true);
+    else updateAutoload();
   });
   function updateAutoload() {
     autoloadEl.classList.toggle("show", !!attachedSid);
-    const stopped = isPaused || claudeIdle;
-    autoloadEl.classList.toggle("paused", stopped);
-    autoloadLabel.textContent = stopped
-      ? "tap to continue"
-      : "auto-refreshing · tap to stop";
+    autoloadEl.classList.toggle("paused", isPaused || claudeIdle);
+    autoloadLabel.textContent = isPaused ? "paused · tap to continue"
+      : (claudeIdle ? "claude idle · tap to refresh"
+      : "auto-refreshing · tap to stop");
   }
   function setPaused(p) {
     isPaused = p;
