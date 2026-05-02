@@ -212,7 +212,13 @@ class ItermBridge:
         lines = []
         for y in range(contents.number_of_lines):
             line = contents.line(y)
-            lines.append(line.string.rstrip())
+            # iTerm pads wide chars (CJK, emoji) and some rendered text
+            # with NULL bytes between glyphs. They render as nothing, so
+            # screen text appears with words mashed together. Fold NULLs
+            # to space here so every caller of this method gets readable
+            # output without each having to remember the workaround.
+            s = line.string.replace("\x00", " ").rstrip()
+            lines.append(s)
         lines = _strip_input_area(lines)
         while lines and not lines[-1]:
             lines.pop()
@@ -275,7 +281,8 @@ async def _read_screen_lines(session) -> list[str]:
     out = []
     for y in range(contents.number_of_lines):
         try:
-            s = contents.line(y).string.strip()
+            # NULL → space (see get_screen_for for rationale).
+            s = contents.line(y).string.replace("\x00", " ").strip()
         except Exception:
             continue
         if s:
