@@ -103,6 +103,17 @@ main {
 }
 
 #picker { display: none; }
+#picker .picker-head {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 0 14px; margin-top: 14px;
+}
+#picker .picker-head h2 { margin: 0; flex: 1; }
+#picker .battery {
+  font: 12px ui-monospace, Menlo, monospace;
+  color: var(--muted);
+}
+#picker .battery.low { color: #ff8b6a; font-weight: 600; }
+#picker .battery .b-icon { margin-right: 3px; }
 #picker.show { display: block; }
 #picker h2 {
   font-size: 12px; color: var(--muted); margin: 0 0 10px 0;
@@ -712,7 +723,10 @@ footer button.icon {
 
   <main id="main">
     <div id="picker">
-      <h2 id="picker-title">Recent sessions</h2>
+      <div class="picker-head">
+        <h2 id="picker-title">Recent sessions</h2>
+        <span id="battery" class="battery" style="display:none"></span>
+      </div>
       <div id="picker-list"></div>
     </div>
     <div id="transcript-view">
@@ -1212,6 +1226,27 @@ footer button.icon {
   }
 
   // ---------- picker ----------
+  const batteryEl = document.getElementById("battery");
+  function renderBattery(b) {
+    if (!b || typeof b.pct !== "number") {
+      batteryEl.style.display = "none";
+      return;
+    }
+    // Plug icon when on AC, otherwise show charge level. Low (<20%) is
+    // highlighted so the user notices their host is about to die.
+    const icon = b.charging ? "🔌" : (b.pct >= 80 ? "🔋"
+                  : b.pct >= 40 ? "🔋"
+                  : "🪫");
+    batteryEl.textContent = "";
+    const ic = document.createElement("span");
+    ic.className = "b-icon"; ic.textContent = icon;
+    batteryEl.appendChild(ic);
+    batteryEl.appendChild(document.createTextNode(b.pct + "%"));
+    batteryEl.classList.toggle("low", !b.charging && b.pct < 20);
+    batteryEl.style.display = "";
+    batteryEl.title = b.on_ac ? `on AC · ${b.state}` : b.state;
+  }
+
   async function refreshPicker() {
     pickerListEl.innerHTML = "<div style='color:var(--muted);font-size:12px;padding:20px;text-align:center'>loading…</div>";
     const resp = await authedFetch("/api/sessions");
@@ -1220,6 +1255,7 @@ footer button.icon {
       return;
     }
     const data = await resp.json();
+    renderBattery(data.battery);
     const sessions = data.sessions || [];
     if (!sessions.length) {
       pickerListEl.innerHTML = "<div style='color:var(--muted);font-size:12px;padding:20px;text-align:center'>No sessions yet. Start <code>claude</code> in iTerm2 and use the <em>session-name</em> skill to name it.</div>";

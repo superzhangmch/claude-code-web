@@ -1434,11 +1434,53 @@ async def login(request: Request):
     return {"ok": True}
 
 
+# Battery readout — cached briefly so repeated picker loads don't fork
+# a `pmset` subprocess every time.
+_BATTERY_RE = re.compile(r"(\d{1,3})%;\s*([\w-]+)")
+_battery_cache: dict = {"ts": 0.0, "value": None}
+BATTERY_CACHE_TTL_SEC = 20.0
+
+
+def _read_battery_macos() -> Optional[dict]:
+    try:
+        out = subprocess.run(
+            ["pmset", "-g", "batt"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout
+    except Exception:
+        return None
+    m = _BATTERY_RE.search(out)
+    if not m:
+        return None
+    pct = int(m.group(1))
+    state = m.group(2).lower()
+    on_ac = "AC Power" in out
+    return {
+        "pct": pct,
+        "state": state,             # "charging" / "discharging" / "charged"
+        "on_ac": on_ac,
+        "charging": state in ("charging", "charged"),
+    }
+
+
+def _get_battery() -> Optional[dict]:
+    now = _time.time()
+    if now - _battery_cache["ts"] < BATTERY_CACHE_TTL_SEC:
+        return _battery_cache["value"]
+    val = _read_battery_macos()
+    _battery_cache["ts"] = now
+    _battery_cache["value"] = val
+    return val
+
+
 @app.get("/api/sessions", dependencies=[Depends(require_token)])
 async def get_sessions():
     """Picker list — pure filesystem. Each entry has 'bound' = True iff there's
     an active pid binding for that session_id."""
-    return {"sessions": build_picker_sessions()}
+    return {
+        "sessions": build_picker_sessions(),
+        "battery": _get_battery(),
+    }
 
 
 @app.post("/api/attach", dependencies=[Depends(require_token)])
