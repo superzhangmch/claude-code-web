@@ -955,6 +955,13 @@ footer button.icon {
   let hasMoreHistory = false;
   let claudeIdle = false;
   let isPaused = false;
+  // Why polling stopped, when isPaused is true:
+  //   "manual"  → user tapped while polling was active. Tap-to-resume
+  //                should restart auto-polling for the full window.
+  //   "timeout" → no new content within ACTIVITY_TIMEOUT_MS. Tap-to-
+  //                resume does a one-shot fetch and stays stopped if
+  //                nothing new came in.
+  let pauseReason = null;
   let polling = false;
   let pollTimer = null;
   // Tracks the most-recent block currently at the bottom of the transcript
@@ -2138,29 +2145,34 @@ footer button.icon {
   });
 
   // ---------- autoload indicator ----------
-  // Three states; both stopped variants render red so the user notices.
-  //   - polling      → "auto-refreshing · tap to stop"
-  //   - isPaused     → "paused · tap to continue"           (red, after timeout)
-  //   - claudeIdle   → "claude waiting · tap to refresh"    (red, claude done)
-  // Tap behavior:
-  //   - polling      → manual pause
-  //   - either red   → force a one-shot fetch:
-  //       new content + claude generating → polling auto-resumes
-  //       no new content                  → stay in WHATEVER red state
-  //                                          we were in (don't conflate
-  //                                          claude-idle into paused)
+  // States and tap behavior:
+  //   polling      → "auto-refreshing · tap to stop"
+  //                  tap → manual pause
+  //   manual pause → "paused · tap to continue"           (red)
+  //                  tap → resume normal auto-refresh for a full
+  //                  ACTIVITY_TIMEOUT_MS window, as if newly submitted
+  //   timeout pause → "paused · tap to continue"          (red)
+  //                  tap → one-shot fetch; stay paused if nothing new
+  //   claudeIdle   → "claude idle · tap to refresh"       (red)
+  //                  tap → one-shot fetch; stay idle if nothing new
   autoloadEl.addEventListener("click", async (e) => {
     e.stopPropagation();
     if (!isPaused && !claudeIdle) {
-      setPaused(true);
+      setPaused(true, "manual");
       return;
     }
-    const wasPaused = isPaused;
+    // Manual-pause tap: full resume, no one-shot. The user explicitly
+    // paused while polling was active and now wants it back.
+    if (isPaused && pauseReason === "manual") {
+      setPaused(false);
+      return;
+    }
+    // Timeout-pause OR claude-idle: one-shot fetch.
+    const wasTimeoutPause = isPaused && pauseReason === "timeout";
     const before = lastIdx;
     isPaused = false;     // temp unpause so pollOnce() actually fetches
     keepAlive();
-    // Brief "checking…" state so the tap feels alive instead of dead
-    // during the fetch round-trip.
+    // Brief "checking…" state — feedback that the tap registered.
     autoloadEl.classList.remove("paused");
     autoloadEl.classList.add("checking");
     autoloadLabel.textContent = "checking…";
@@ -2170,16 +2182,13 @@ footer button.icon {
       autoloadEl.classList.remove("checking");
     }
     if (lastIdx !== before) {
-      // New content. If claude is generating again, polling auto-resumes
-      // via pollOnce's finally block — nothing to do here.
+      // New content. If claude is generating, polling auto-resumes via
+      // pollOnce's finally block. Nothing to do.
       return;
     }
-    // Nothing new — restore the prior stopped state. If we were paused
-    // due to inactivity, set isPaused back; if we were just claudeIdle
-    // (no manual pause), claudeIdle is still true and polling naturally
-    // stays stopped, no action needed.
-    if (wasPaused) setPaused(true);
-    else updateAutoload();
+    // Nothing new — restore the prior red state.
+    if (wasTimeoutPause) setPaused(true, "timeout");
+    else updateAutoload();  // claudeIdle stays true; polling is naturally stopped
   });
   function updateAutoload() {
     autoloadEl.classList.toggle("show", !!attachedSid);
@@ -2188,8 +2197,9 @@ footer button.icon {
       : (claudeIdle ? "claude idle · tap to refresh"
       : "auto-refreshing · tap to stop");
   }
-  function setPaused(p) {
+  function setPaused(p, reason) {
     isPaused = p;
+    pauseReason = p ? (reason || pauseReason || "manual") : null;
     if (!p) { activityDeadline = Date.now() + ACTIVITY_TIMEOUT_MS; if (!pollTimer) schedulePoll(0); }
     else { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
     updateAutoload();
@@ -2206,7 +2216,7 @@ footer button.icon {
     if (!attachedSid) return;
     if (isPaused) return;
     if (document.hidden) { schedulePoll(POLL_INTERVAL_MS); return; }
-    if (Date.now() > activityDeadline) { setPaused(true); return; }
+    if (Date.now() > activityDeadline) { setPaused(true, "timeout"); return; }
     if (polling) { schedulePoll(POLL_INTERVAL_MS); return; }
     polling = true;
     try {
@@ -2255,7 +2265,7 @@ footer button.icon {
     } finally {
       polling = false;
       if (isPaused) {}
-      else if (Date.now() > activityDeadline) setPaused(true);
+      else if (Date.now() > activityDeadline) setPaused(true, "timeout");
       else if (attachedSid && !claudeIdle) schedulePoll(POLL_INTERVAL_MS);
     }
   }
