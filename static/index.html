@@ -103,17 +103,12 @@ main {
 }
 
 #picker { display: none; }
-#picker .picker-head {
-  display: flex; align-items: baseline; gap: 12px;
-  padding: 0 14px; margin-top: 14px;
-}
-#picker .picker-head h2 { margin: 0; flex: 1; }
-#picker .battery {
+header .battery {
   font: 12px ui-monospace, Menlo, monospace;
   color: var(--muted);
 }
-#picker .battery.low { color: #ff8b6a; font-weight: 600; }
-#picker .battery .b-icon { margin-right: 3px; }
+header .battery.low { color: #ff8b6a; font-weight: 600; }
+header .battery .b-icon { margin-right: 3px; }
 #picker.show { display: block; }
 #picker h2 {
   font-size: 12px; color: var(--muted); margin: 0 0 10px 0;
@@ -688,6 +683,8 @@ footer button.icon {
     </span>
     <button id="info-btn" class="btn icon" style="display:none" title="Session info">ⓘ</button>
     <button id="screen-btn" class="btn icon" style="display:none" title="Show iTerm screen">🖥</button>
+    <span id="battery" class="battery" style="display:none"></span>
+    <button id="refresh-btn" class="btn icon" style="display:none" title="Refresh list">↻</button>
     <button id="back-btn" class="btn" style="display:none">←</button>
     <button id="new-btn" class="btn">+</button>
   </header>
@@ -723,10 +720,7 @@ footer button.icon {
 
   <main id="main">
     <div id="picker">
-      <div class="picker-head">
-        <h2 id="picker-title">Recent sessions</h2>
-        <span id="battery" class="battery" style="display:none"></span>
-      </div>
+      <h2 id="picker-title">Recent sessions</h2>
       <div id="picker-list"></div>
     </div>
     <div id="transcript-view">
@@ -955,6 +949,7 @@ footer button.icon {
   const screenBody = document.getElementById("screen-body");
   const screenRefresh = document.getElementById("screen-refresh");
   const screenClose = document.getElementById("screen-close");
+  const refreshBtn = document.getElementById("refresh-btn");
   const infoBtn = document.getElementById("info-btn");
   const infoModal = document.getElementById("info-modal");
   const infoBody = document.getElementById("info-body");
@@ -1073,6 +1068,7 @@ footer button.icon {
     screenBtn.style.display = "none";
     infoBtn.style.display = "none";
     newBtn.style.display = "";
+    refreshBtn.style.display = "";
     setReady(null);
     metaEl.textContent = "";
     setStatus("off");
@@ -1091,6 +1087,8 @@ footer button.icon {
     screenBtn.style.display = "";
     infoBtn.style.display = "";
     newBtn.style.display = "none";
+    refreshBtn.style.display = "none";
+    batteryEl.style.display = "none";  // header version is picker-only
     refreshModeButtons();
     setStatus("ok");
   }
@@ -2484,6 +2482,10 @@ footer button.icon {
   const newDlgCancel = document.getElementById("newdlg-cancel");
   const newDlgOk = document.getElementById("newdlg-ok");
   let selectedCwd = null;
+
+  refreshBtn.addEventListener("click", () => {
+    refreshPicker();
+  });
 
   newBtn.addEventListener("click", async () => {
     selectedCwd = null; newDlgOk.disabled = true; newDlgOk.textContent = "Confirm";
