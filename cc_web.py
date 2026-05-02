@@ -1796,7 +1796,12 @@ async def get_screen(claude_session_id: str):
         bindings.remove_session(claude_session_id)
         raise HTTPException(status_code=410, detail="tab/pid is gone")
     try:
-        screen = await bridge.get_screen_for(b.iterm_session_id, max_lines=200)
+        # Send Ctrl+L before reading so claude's TUI redraws and we get
+        # a clean capture (no leftover box-drawing chars from earlier
+        # frames). Only safe for user-initiated reads — not the polling
+        # path, which would flicker every 5 seconds.
+        screen = await bridge.get_screen_for(b.iterm_session_id, max_lines=200,
+                                             refresh=True)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
     return {"screen": screen or ""}

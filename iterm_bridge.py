@@ -202,12 +202,27 @@ class ItermBridge:
                 return False
         return False
 
-    async def get_screen_for(self, iterm_session_id: str, max_lines: int = 80) -> Optional[str]:
+    async def get_screen_for(self, iterm_session_id: str, max_lines: int = 80,
+                             refresh: bool = False) -> Optional[str]:
+        """Read the current screen tail from `iterm_session_id`.
+
+        When `refresh=True`, send Ctrl+L (form feed) first and wait
+        briefly so claude's TUI redraws — that strips out the box-drawing
+        / styling artifacts left in iTerm's grid from previous frames,
+        giving a cleaner capture. Don't use refresh on the auto-poll
+        path: every 5s of Ctrl+L would be visible flicker for the user.
+        """
         if not self.app:
             return None
         session = self.app.get_session_by_id(iterm_session_id)
         if session is None:
             return None
+        if refresh:
+            try:
+                await session.async_send_text("\x0c")  # Ctrl+L
+                await asyncio.sleep(0.1)
+            except Exception:
+                pass
         contents = await session.async_get_screen_contents()
         lines = []
         for y in range(contents.number_of_lines):
