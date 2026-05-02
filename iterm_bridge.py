@@ -220,7 +220,7 @@ class ItermBridge:
         if refresh:
             try:
                 await session.async_send_text("\x0c")  # Ctrl+L
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.25)
             except Exception:
                 pass
         contents = await session.async_get_screen_contents()
