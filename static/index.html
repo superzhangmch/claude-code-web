@@ -270,16 +270,16 @@ main {
 }
 .msg .tool-call .targs-table .targs-v {
   vertical-align: top; padding: 4px 0;
-  color: #cbd0da; word-break: break-all;
+  color: #cbd0da; white-space: pre;
 }
 .msg .tool-call .targs-table .targs-v pre {
-  margin: 0; white-space: pre-wrap; word-break: break-word;
+  margin: 0; white-space: pre;
   font-family: inherit; font-size: inherit;
 }
 .msg .tool-result-box {
-  font: 12.5px/1.4 ui-monospace, Menlo, monospace; white-space: pre-wrap;
-  word-break: break-word; background: var(--code-bg);
-  border-radius: 4px; padding: 8px 10px; max-height: 300px; overflow-y: auto;
+  font: 12.5px/1.4 ui-monospace, Menlo, monospace; white-space: pre;
+  background: var(--code-bg);
+  border-radius: 4px; padding: 8px 10px; max-height: 300px; overflow: auto;
 }
 .msg .tool-result-box.is-error { color: #ff8b8b; }
 
