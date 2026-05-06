@@ -1230,21 +1230,16 @@ footer button.icon {
       if (s.peak > maxV) maxV = s.peak;
     }
     maxV = Math.ceil(maxV / 50) * 50;
-    // X axis: real timestamps (so a Mac sleep gap is visible).
+    // X axis: sample indices (uniform spacing). Sleep gaps are already
+    // absent from the buffer — both processes and the sampler freeze
+    // during sleep — so 300 samples = 5 hours of awake observation,
+    // and treating consecutive samples as adjacent is correct.
     const N = data.samples_at.length;
     if (!N) return;
     const W = 880, H = 240, padL = 38, padR = 10, padT = 10, padB = 22;
     const innerW = W - padL - padR, innerH = H - padT - padB;
-    const tMin = data.samples_at[0], tMax = data.samples_at[N - 1];
-    const tSpan = Math.max(1, tMax - tMin);
-    const xAt = i => padL + (N === 1 ? innerW / 2
-                              : ((data.samples_at[i] - tMin) / tSpan) * innerW);
+    const xAt = i => padL + (N === 1 ? innerW / 2 : (i / (N - 1)) * innerW);
     const yAt = v => padT + innerH - (v / maxV) * innerH;
-    // A "sleep gap" is any inter-sample delta noticeably larger than
-    // the configured sampling interval. Break the line there so the
-    // user can see the discontinuity.
-    const interval = data.interval_sec || 60;
-    const gapThreshold = interval * 3;
     const svg = ['<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none">'];
     // Grid + Y labels (0, 25%, 50%, 75%, 100% of maxV)
     for (let i = 0; i <= 4; i++) {
@@ -1253,27 +1248,14 @@ footer button.icon {
       svg.push(`<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="#2a2d36" stroke-width="1"/>`);
       svg.push(`<text x="${padL - 4}" y="${y + 3}" fill="#8a8f9c" font-size="9" text-anchor="end">${v.toFixed(0)}%</text>`);
     }
-    // X axis end labels — relative time.
-    const oldest = data.samples_at[0], newest = data.samples_at[N - 1];
-    const fmtAgo = ts => {
-      const m = Math.round((newest - ts) / 60);
-      return m === 0 ? "now" : `-${m}m`;
-    };
-    svg.push(`<text x="${padL}" y="${H - 6}" fill="#8a8f9c" font-size="9" text-anchor="start">${fmtAgo(oldest)}</text>`);
+    // X axis labels: leftmost = "<N samples ago", rightmost = "now".
+    // N is awake-time samples; sleep gaps are already absent from the buffer.
+    const interval = data.interval_sec || 60;
+    const oldestMin = Math.round(((N - 1) * interval) / 60);
+    svg.push(`<text x="${padL}" y="${H - 6}" fill="#8a8f9c" font-size="9" text-anchor="start">-${oldestMin}m awake</text>`);
     svg.push(`<text x="${W - padR}" y="${H - 6}" fill="#8a8f9c" font-size="9" text-anchor="end">now</text>`);
-    // Mark sleep gaps with a faint vertical strip so the discontinuity
-    // is obvious even if all visible series happened to drop out.
-    for (let j = 1; j < N; j++) {
-      const dt = data.samples_at[j] - data.samples_at[j - 1];
-      if (dt > gapThreshold) {
-        const x1 = xAt(j - 1), x2 = xAt(j);
-        svg.push(`<rect x="${x1.toFixed(1)}" y="${padT}" width="${(x2 - x1).toFixed(1)}" height="${innerH}" fill="#3a2c1f" opacity="0.6"/>`);
-        const mid = (x1 + x2) / 2;
-        const mins = Math.round(dt / 60);
-        svg.push(`<text x="${mid.toFixed(1)}" y="${padT + 10}" fill="#e0a070" font-size="9" text-anchor="middle">sleep ${mins}m</text>`);
-      }
-    }
-    // Each series as a polyline with gaps for null values + sleep gaps.
+    // Each series as a polyline. Treat consecutive samples as adjacent —
+    // sleep is already collapsed out of the buffer.
     for (let i = 0; i < data.series.length; i++) {
       const s = data.series[i];
       if (_cpuHidden.has(s.pid)) continue;
@@ -1281,11 +1263,9 @@ footer button.icon {
       let segs = [], cur = [];
       for (let j = 0; j < s.cpu.length; j++) {
         const v = s.cpu[j];
-        const breakHere = (j > 0 && (data.samples_at[j] - data.samples_at[j - 1]) > gapThreshold);
-        if (v === null || v === undefined || breakHere) {
+        if (v === null || v === undefined) {
           if (cur.length) { segs.push(cur); cur = []; }
-        }
-        if (v !== null && v !== undefined) {
+        } else {
           cur.push(`${xAt(j).toFixed(1)},${yAt(v).toFixed(1)}`);
         }
       }

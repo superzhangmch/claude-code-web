@@ -1446,7 +1446,6 @@ import collections as _collections
 CPU_SAMPLE_INTERVAL_SEC = 60.0
 CPU_HISTORY_MAX = 300
 CPU_HISTORY_TOP_N = 5
-CPU_HISTORY_ACTIVE_WINDOW_SEC = 600.0   # 10 min
 
 # Each entry: {"ts": float, "top": [{"pid": int, "cpu": float, "command": str}, ...]}
 _cpu_history: _collections.deque = _collections.deque(maxlen=CPU_HISTORY_MAX)
@@ -1564,13 +1563,13 @@ async def get_cpu_history():
     snapshots = list(_cpu_history)
     if not snapshots:
         return {"samples_at": [], "series": [], "interval_sec": CPU_SAMPLE_INTERVAL_SEC}
-    now = _time.time()
-    cutoff = now - CPU_HISTORY_ACTIVE_WINDOW_SEC
-    # Find pids that have at least one sample within the active window.
+    # Sleep gaps are implicitly absent: when the Mac sleeps both
+    # processes AND the sampler are frozen, so the buffer only ever
+    # contains awake-time samples. We therefore use the full buffer
+    # (no wall-clock window filter) — "5 hours" means 5 hours of
+    # cumulative awake observation, possibly spanning many days.
     active_pids: dict[int, str] = {}  # pid → most-recent command
     for snap in snapshots:
-        if snap["ts"] < cutoff:
-            continue
         for r in snap["top"]:
             active_pids[r["pid"]] = r["command"]
     # Only keep pids whose process is still alive — focus on what's
