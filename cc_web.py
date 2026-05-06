@@ -1818,7 +1818,9 @@ def _ps_descendants(root_pid: int) -> list[dict]:
         # Fetch elapsed (in seconds) + command in a single ps call.
         # -o etime= → "[[DD-]HH:]MM:SS"
         out = subprocess.run(
-            ["ps", "-o", "pid=,ppid=,etime=,command=", "-p", ",".join(map(str, all_pids))],
+            # -ww: wide output, no command truncation at terminal width
+            ["ps", "-ww", "-o", "pid=,ppid=,etime=,command=",
+             "-p", ",".join(map(str, all_pids))],
             capture_output=True, text=True, timeout=3,
         ).stdout
     except Exception:

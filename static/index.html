@@ -1145,11 +1145,10 @@ footer button.icon {
   document.getElementById("key-opt2").addEventListener("click", () => sendRaw("\x1b[B\r"));
   document.getElementById("key-opt3").addEventListener("click", () => sendRaw("\x1b[B\x1b[B\r"));
 
-  // Render the descendant process list as a small tree, like:
-  //   58147 [02:14:33] node /opt/.../claude
+  // Render the descendant process list as a small tree:
+  //   58147 [02:14:33] /opt/homebrew/.../node /opt/.../claude --resume xxx
   //     58200 [02:14:30] sh -c …
-  //     58201 [01:05:00] python …
-  // Truncates each command to keep one line readable.
+  // Full command kept as-is — info modal's pre cell wraps long lines.
   function fmtProcesses(procs, rootPid) {
     if (!procs || !procs.length) return "(none)";
     const childrenByParent = {};
@@ -1160,8 +1159,7 @@ footer button.icon {
     const lines = [];
     function walk(p, depth) {
       const indent = "  ".repeat(depth);
-      const cmd = p.command.length > 100 ? p.command.slice(0, 97) + "…" : p.command;
-      lines.push(`${indent}${p.pid} [${p.etime}] ${cmd}`);
+      lines.push(`${indent}${p.pid} [${p.etime}] ${p.command}`);
       const kids = childrenByParent[p.pid] || [];
       kids.sort((a, b) => a.pid - b.pid);
       for (const k of kids) walk(k, depth + 1);
