@@ -109,6 +109,42 @@ header .battery {
 }
 header .battery.low { color: #ff8b6a; font-weight: 600; }
 header .battery .b-icon { margin-right: 3px; }
+header .battery { cursor: pointer; }
+header .battery:hover { color: var(--text); }
+#cpu-modal .modal-card.cpu-card {
+  width: 95vw; max-width: 900px; max-height: 85vh;
+  display: flex; flex-direction: column; gap: 8px;
+}
+#cpu-modal .cpu-chart {
+  flex: 1; min-height: 240px;
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: 4px; overflow: hidden;
+}
+#cpu-modal .cpu-chart svg { width: 100%; height: 100%; display: block; }
+#cpu-modal .cpu-legend {
+  font: 11px ui-monospace, Menlo, monospace;
+  color: var(--text);
+  display: flex; flex-direction: column; gap: 3px;
+  max-height: 35vh; overflow-y: auto;
+}
+#cpu-modal .cpu-legend .row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 2px 4px; cursor: pointer;
+}
+#cpu-modal .cpu-legend .row:hover { background: var(--panel2); }
+#cpu-modal .cpu-legend .row.dim { opacity: 0.35; }
+#cpu-modal .cpu-legend .swatch {
+  width: 14px; height: 3px; border-radius: 2px; flex-shrink: 0;
+}
+#cpu-modal .cpu-legend .pid {
+  min-width: 56px; color: var(--accent); font-weight: 600;
+}
+#cpu-modal .cpu-legend .peak {
+  min-width: 70px; color: var(--muted);
+}
+#cpu-modal .cpu-legend .cmd {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 #picker.show { display: block; }
 #picker h2 {
   font-size: 12px; color: var(--muted); margin: 0 0 10px 0;
@@ -639,7 +675,8 @@ footer button.icon {
 }
 #info-modal .info-table td.v { color: var(--text); }
 #info-modal .info-table td.v pre {
-  margin: 0; white-space: pre-wrap; font: inherit;
+  margin: 0; white-space: pre; font: inherit;
+  overflow-x: auto; max-width: 100%;
 }
 
 #login {
@@ -683,11 +720,23 @@ footer button.icon {
     </span>
     <button id="info-btn" class="btn icon" style="display:none" title="Session info">ⓘ</button>
     <button id="screen-btn" class="btn icon" style="display:none" title="Show iTerm screen">🖥</button>
-    <span id="battery" class="battery" style="display:none"></span>
+    <span id="battery" class="battery" style="display:none" title="Click for CPU history"></span>
     <button id="refresh-btn" class="btn icon" style="display:none" title="Refresh list">↻</button>
     <button id="back-btn" class="btn" style="display:none">←</button>
     <button id="new-btn" class="btn">+</button>
   </header>
+
+  <div id="cpu-modal" class="modal">
+    <div class="modal-card cpu-card">
+      <div class="modal-row">
+        <h3>CPU history (top 5, last 5h)</h3>
+        <button id="cpu-refresh" class="btn">↻</button>
+        <button id="cpu-close" class="btn">close</button>
+      </div>
+      <div id="cpu-chart" class="cpu-chart"></div>
+      <div id="cpu-legend" class="cpu-legend"></div>
+    </div>
+  </div>
 
   <div id="info-modal" class="modal">
     <div class="modal-card info-card">
@@ -951,6 +1000,12 @@ footer button.icon {
   const screenClose = document.getElementById("screen-close");
   const refreshBtn = document.getElementById("refresh-btn");
   const infoBtn = document.getElementById("info-btn");
+  const cpuModal = document.getElementById("cpu-modal");
+  const cpuChartEl = document.getElementById("cpu-chart");
+  const cpuLegendEl = document.getElementById("cpu-legend");
+  const cpuRefresh = document.getElementById("cpu-refresh");
+  const cpuClose = document.getElementById("cpu-close");
+  const batteryEl = document.getElementById("battery");
   const infoModal = document.getElementById("info-modal");
   const infoBody = document.getElementById("info-body");
   const infoClose = document.getElementById("info-close");
@@ -1145,6 +1200,152 @@ footer button.icon {
   document.getElementById("key-opt2").addEventListener("click", () => sendRaw("\x1b[B\r"));
   document.getElementById("key-opt3").addEventListener("click", () => sendRaw("\x1b[B\x1b[B\r"));
 
+  // CPU history modal — opened by clicking the battery in the picker.
+  // Renders a simple line chart (no chart library) of each active pid's
+  // CPU% over the last few hours.
+  const CPU_PALETTE = [
+    "#ff6a6a", "#6ee884", "#4ec9b0", "#e0a070", "#a07ce0",
+    "#7cc7ff", "#ff8bd4", "#cccc66", "#ffb37b", "#9bd57a",
+  ];
+  function colorFor(idx) { return CPU_PALETTE[idx % CPU_PALETTE.length]; }
+  // Last fetched data, cached so legend toggles can re-draw without a
+  // new fetch.
+  let _cpuData = null;
+  // Visibility flags keyed by pid.
+  const _cpuHidden = new Set();
+
+  function renderCpuChart() {
+    const data = _cpuData;
+    cpuChartEl.innerHTML = "";
+    cpuLegendEl.innerHTML = "";
+    if (!data || !data.series || !data.series.length) {
+      cpuChartEl.innerHTML = "<div style='padding:20px;color:var(--muted);font-size:12px;text-align:center'>"
+        + "no samples yet — wait ~1 minute after server start</div>";
+      return;
+    }
+    const visibleSeries = data.series.filter(s => !_cpuHidden.has(s.pid));
+    // Y axis: 0 to ceil(maxPeak / 50) * 50, min 100.
+    let maxV = 100;
+    for (const s of visibleSeries) {
+      if (s.peak > maxV) maxV = s.peak;
+    }
+    maxV = Math.ceil(maxV / 50) * 50;
+    // X axis: real timestamps (so a Mac sleep gap is visible).
+    const N = data.samples_at.length;
+    if (!N) return;
+    const W = 880, H = 240, padL = 38, padR = 10, padT = 10, padB = 22;
+    const innerW = W - padL - padR, innerH = H - padT - padB;
+    const tMin = data.samples_at[0], tMax = data.samples_at[N - 1];
+    const tSpan = Math.max(1, tMax - tMin);
+    const xAt = i => padL + (N === 1 ? innerW / 2
+                              : ((data.samples_at[i] - tMin) / tSpan) * innerW);
+    const yAt = v => padT + innerH - (v / maxV) * innerH;
+    // A "sleep gap" is any inter-sample delta noticeably larger than
+    // the configured sampling interval. Break the line there so the
+    // user can see the discontinuity.
+    const interval = data.interval_sec || 60;
+    const gapThreshold = interval * 3;
+    const svg = ['<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none">'];
+    // Grid + Y labels (0, 25%, 50%, 75%, 100% of maxV)
+    for (let i = 0; i <= 4; i++) {
+      const v = (maxV * i) / 4;
+      const y = yAt(v);
+      svg.push(`<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="#2a2d36" stroke-width="1"/>`);
+      svg.push(`<text x="${padL - 4}" y="${y + 3}" fill="#8a8f9c" font-size="9" text-anchor="end">${v.toFixed(0)}%</text>`);
+    }
+    // X axis end labels — relative time.
+    const oldest = data.samples_at[0], newest = data.samples_at[N - 1];
+    const fmtAgo = ts => {
+      const m = Math.round((newest - ts) / 60);
+      return m === 0 ? "now" : `-${m}m`;
+    };
+    svg.push(`<text x="${padL}" y="${H - 6}" fill="#8a8f9c" font-size="9" text-anchor="start">${fmtAgo(oldest)}</text>`);
+    svg.push(`<text x="${W - padR}" y="${H - 6}" fill="#8a8f9c" font-size="9" text-anchor="end">now</text>`);
+    // Mark sleep gaps with a faint vertical strip so the discontinuity
+    // is obvious even if all visible series happened to drop out.
+    for (let j = 1; j < N; j++) {
+      const dt = data.samples_at[j] - data.samples_at[j - 1];
+      if (dt > gapThreshold) {
+        const x1 = xAt(j - 1), x2 = xAt(j);
+        svg.push(`<rect x="${x1.toFixed(1)}" y="${padT}" width="${(x2 - x1).toFixed(1)}" height="${innerH}" fill="#3a2c1f" opacity="0.6"/>`);
+        const mid = (x1 + x2) / 2;
+        const mins = Math.round(dt / 60);
+        svg.push(`<text x="${mid.toFixed(1)}" y="${padT + 10}" fill="#e0a070" font-size="9" text-anchor="middle">sleep ${mins}m</text>`);
+      }
+    }
+    // Each series as a polyline with gaps for null values + sleep gaps.
+    for (let i = 0; i < data.series.length; i++) {
+      const s = data.series[i];
+      if (_cpuHidden.has(s.pid)) continue;
+      const color = colorFor(i);
+      let segs = [], cur = [];
+      for (let j = 0; j < s.cpu.length; j++) {
+        const v = s.cpu[j];
+        const breakHere = (j > 0 && (data.samples_at[j] - data.samples_at[j - 1]) > gapThreshold);
+        if (v === null || v === undefined || breakHere) {
+          if (cur.length) { segs.push(cur); cur = []; }
+        }
+        if (v !== null && v !== undefined) {
+          cur.push(`${xAt(j).toFixed(1)},${yAt(v).toFixed(1)}`);
+        }
+      }
+      if (cur.length) segs.push(cur);
+      for (const seg of segs) {
+        if (seg.length === 1) {
+          const [x, y] = seg[0].split(",");
+          svg.push(`<circle cx="${x}" cy="${y}" r="2" fill="${color}"/>`);
+        } else {
+          svg.push(`<polyline points="${seg.join(" ")}" fill="none" stroke="${color}" stroke-width="1.5"/>`);
+        }
+      }
+    }
+    svg.push("</svg>");
+    cpuChartEl.innerHTML = svg.join("");
+    // Legend.
+    for (let i = 0; i < data.series.length; i++) {
+      const s = data.series[i];
+      const row = document.createElement("div");
+      row.className = "row" + (_cpuHidden.has(s.pid) ? " dim" : "");
+      const sw = document.createElement("span"); sw.className = "swatch";
+      sw.style.background = colorFor(i);
+      const pid = document.createElement("span"); pid.className = "pid"; pid.textContent = s.pid;
+      const peak = document.createElement("span"); peak.className = "peak"; peak.textContent = "peak " + s.peak.toFixed(1) + "%";
+      const cmd = document.createElement("span"); cmd.className = "cmd"; cmd.textContent = s.command;
+      row.appendChild(sw); row.appendChild(pid); row.appendChild(peak); row.appendChild(cmd);
+      row.addEventListener("click", () => {
+        if (_cpuHidden.has(s.pid)) _cpuHidden.delete(s.pid);
+        else _cpuHidden.add(s.pid);
+        renderCpuChart();
+      });
+      cpuLegendEl.appendChild(row);
+    }
+  }
+
+  async function loadCpuHistory() {
+    cpuChartEl.innerHTML = "<div style='padding:20px;color:var(--muted);font-size:12px;text-align:center'>loading…</div>";
+    cpuLegendEl.innerHTML = "";
+    try {
+      const r = await authedFetch("/api/cpu-history");
+      if (!r.ok) {
+        cpuChartEl.innerHTML = "<div style='padding:20px;color:#ff6a6a;font-size:12px'>error: " + r.status + "</div>";
+        return;
+      }
+      _cpuData = await r.json();
+      renderCpuChart();
+    } catch (e) {
+      cpuChartEl.innerHTML = "<div style='padding:20px;color:#ff6a6a;font-size:12px'>error: " + e + "</div>";
+    }
+  }
+  batteryEl.addEventListener("click", () => {
+    cpuModal.classList.add("show");
+    loadCpuHistory();
+  });
+  cpuRefresh.addEventListener("click", loadCpuHistory);
+  cpuClose.addEventListener("click", () => cpuModal.classList.remove("show"));
+  cpuModal.addEventListener("click", (e) => {
+    if (e.target === cpuModal) cpuModal.classList.remove("show");
+  });
+
   // Render the descendant process list as a small tree:
   //   58147 [02:14:33] /opt/homebrew/.../node /opt/.../claude --resume xxx
   //     58200 [02:14:30] sh -c …
@@ -1252,7 +1453,6 @@ footer button.icon {
   }
 
   // ---------- picker ----------
-  const batteryEl = document.getElementById("battery");
   function renderBattery(b) {
     if (!b || typeof b.pct !== "number") {
       batteryEl.style.display = "none";

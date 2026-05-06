@@ -1369,14 +1369,16 @@ async def lifespan(app: FastAPI):
     # ensure_connected will retry lazily on the first real request.
     asyncio.create_task(_bg_initial_connect())
     reaper_task = asyncio.create_task(_binding_reaper(30.0))
+    cpu_task = asyncio.create_task(_cpu_sampler_loop())
     try:
         yield
     finally:
-        reaper_task.cancel()
-        try:
-            await reaper_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        for t in (reaper_task, cpu_task):
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 app = FastAPI(lifespan=lifespan)
@@ -1434,6 +1436,67 @@ async def login(request: Request):
     return {"ok": True}
 
 
+# ---------- CPU sampler ----------
+# Every CPU_SAMPLE_INTERVAL_SEC, snapshot the top-N CPU offenders. Keep up
+# to CPU_HISTORY_MAX samples (5 hours @ 60s = 300). On read, surface only
+# pids that appeared within the last CPU_HISTORY_ACTIVE_WINDOW_SEC, so
+# the chart isn't cluttered by long-gone processes from earlier sessions.
+import collections as _collections
+
+CPU_SAMPLE_INTERVAL_SEC = 60.0
+CPU_HISTORY_MAX = 300
+CPU_HISTORY_TOP_N = 5
+CPU_HISTORY_ACTIVE_WINDOW_SEC = 600.0   # 10 min
+
+# Each entry: {"ts": float, "top": [{"pid": int, "cpu": float, "command": str}, ...]}
+_cpu_history: _collections.deque = _collections.deque(maxlen=CPU_HISTORY_MAX)
+
+
+def _sample_top_cpu_processes(n: int) -> list[dict]:
+    """Top N processes by CPU% via `ps -r` (sort by CPU desc on macOS).
+    Returns [{pid, cpu, command}, ...] in descending CPU order. Excludes
+    cc_web's own pid (it always shows up at the top because of the very
+    sampler that's reading it — useless noise)."""
+    try:
+        out = subprocess.run(
+            ["ps", "-Arwwo", "pid=,pcpu=,comm="],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+    except Exception:
+        return []
+    self_pid = os.getpid()
+    rows: list[dict] = []
+    for ln in out.splitlines():
+        parts = ln.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0]); cpu = float(parts[1])
+        except ValueError:
+            continue
+        if pid == self_pid:
+            continue
+        rows.append({"pid": pid, "cpu": cpu, "command": parts[2]})
+        if len(rows) >= n:
+            # ps -r outputs in CPU-desc order, no need to read further
+            break
+    return rows
+
+
+async def _cpu_sampler_loop() -> None:
+    while True:
+        try:
+            top = _sample_top_cpu_processes(CPU_HISTORY_TOP_N)
+            if top:
+                _cpu_history.append({"ts": _time.time(), "top": top})
+        except Exception as e:
+            log.info("cpu sampler error: %s", e)
+        try:
+            await asyncio.sleep(CPU_SAMPLE_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            return
+
+
 # Battery readout — cached briefly so repeated picker loads don't fork
 # a `pmset` subprocess every time.
 _BATTERY_RE = re.compile(r"(\d{1,3})%;\s*([\w-]+)")
@@ -1480,6 +1543,86 @@ async def get_sessions():
     return {
         "sessions": build_picker_sessions(),
         "battery": _get_battery(),
+    }
+
+
+@app.get("/api/cpu-history", dependencies=[Depends(require_token)])
+async def get_cpu_history():
+    """CPU-usage history of the top offenders. Trims to pids active within
+    CPU_HISTORY_ACTIVE_WINDOW_SEC. Returns:
+      {
+        "samples_at": [ts1, ts2, ...],          # x-axis
+        "series": [
+          {"pid": int, "command": str, "cpu": [v1|None, v2|None, ...]},
+          ...
+        ],
+        "interval_sec": 60,
+      }
+    where each series's cpu[] aligns with samples_at[]; None means the
+    pid wasn't in top-N at that timestamp.
+    """
+    snapshots = list(_cpu_history)
+    if not snapshots:
+        return {"samples_at": [], "series": [], "interval_sec": CPU_SAMPLE_INTERVAL_SEC}
+    now = _time.time()
+    cutoff = now - CPU_HISTORY_ACTIVE_WINDOW_SEC
+    # Find pids that have at least one sample within the active window.
+    active_pids: dict[int, str] = {}  # pid → most-recent command
+    for snap in snapshots:
+        if snap["ts"] < cutoff:
+            continue
+        for r in snap["top"]:
+            active_pids[r["pid"]] = r["command"]
+    # Only keep pids whose process is still alive — focus on what's
+    # running NOW, not historical offenders that have already exited.
+    # signal 0 = "does this pid exist?". ProcessLookupError → dead.
+    # PermissionError → alive but owned by another user, keep it.
+    alive_pids: dict[int, str] = {}
+    for pid, cmd in active_pids.items():
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            pass
+        except OSError:
+            continue
+        alive_pids[pid] = cmd
+    # Drop transient noise: pids that only appear in <=5 samples are
+    # short-lived top-N visitors (e.g. one-shot subprocesses) and don't
+    # deserve a chart series.
+    sample_count: dict[int, int] = {p: 0 for p in alive_pids}
+    for snap in snapshots:
+        for r in snap["top"]:
+            if r["pid"] in sample_count:
+                sample_count[r["pid"]] += 1
+    active_pids = {p: alive_pids[p] for p in alive_pids if sample_count[p] > 5}
+    if not active_pids:
+        return {"samples_at": [], "series": [], "interval_sec": CPU_SAMPLE_INTERVAL_SEC}
+    samples_at = [s["ts"] for s in snapshots]
+    series = []
+    # Stable order: highest peak CPU first
+    pid_peak: dict[int, float] = {p: 0.0 for p in active_pids}
+    for snap in snapshots:
+        for r in snap["top"]:
+            if r["pid"] in pid_peak and r["cpu"] > pid_peak[r["pid"]]:
+                pid_peak[r["pid"]] = r["cpu"]
+    pid_order = sorted(active_pids.keys(), key=lambda p: pid_peak[p], reverse=True)
+    for pid in pid_order:
+        cpus: list[Optional[float]] = []
+        for snap in snapshots:
+            hit = next((r for r in snap["top"] if r["pid"] == pid), None)
+            cpus.append(hit["cpu"] if hit else None)
+        series.append({
+            "pid": pid,
+            "command": active_pids[pid],
+            "cpu": cpus,
+            "peak": pid_peak[pid],
+        })
+    return {
+        "samples_at": samples_at,
+        "series": series,
+        "interval_sec": CPU_SAMPLE_INTERVAL_SEC,
     }
 
 
