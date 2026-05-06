@@ -1145,6 +1145,31 @@ footer button.icon {
   document.getElementById("key-opt2").addEventListener("click", () => sendRaw("\x1b[B\r"));
   document.getElementById("key-opt3").addEventListener("click", () => sendRaw("\x1b[B\x1b[B\r"));
 
+  // Render the descendant process list as a small tree, like:
+  //   58147 [02:14:33] node /opt/.../claude
+  //     58200 [02:14:30] sh -c …
+  //     58201 [01:05:00] python …
+  // Truncates each command to keep one line readable.
+  function fmtProcesses(procs, rootPid) {
+    if (!procs || !procs.length) return "(none)";
+    const childrenByParent = {};
+    for (const p of procs) {
+      (childrenByParent[p.ppid] = childrenByParent[p.ppid] || []).push(p);
+    }
+    const root = procs.find(p => p.pid === rootPid) || procs[0];
+    const lines = [];
+    function walk(p, depth) {
+      const indent = "  ".repeat(depth);
+      const cmd = p.command.length > 100 ? p.command.slice(0, 97) + "…" : p.command;
+      lines.push(`${indent}${p.pid} [${p.etime}] ${cmd}`);
+      const kids = childrenByParent[p.pid] || [];
+      kids.sort((a, b) => a.pid - b.pid);
+      for (const k of kids) walk(k, depth + 1);
+    }
+    walk(root, 0);
+    return lines.join("\n");
+  }
+
   function fmtBytes(n) {
     if (typeof n !== "number" || n < 0) return String(n);
     if (n < 1024) return n + " B";
@@ -1202,6 +1227,11 @@ footer button.icon {
       appendInfoRow(infoBody, "entries", j.entry_count);
       appendInfoRow(infoBody, "first msg ts", j.first_ts);
       appendInfoRow(infoBody, "first msg", j.first_user_msg, { pre: true });
+      if (Array.isArray(j.processes) && j.processes.length) {
+        appendInfoRow(infoBody, "processes",
+          fmtProcesses(j.processes, j.binding && j.binding.pid),
+          { pre: true });
+      }
     } catch (e) {
       infoBody.innerHTML = "";
       appendInfoRow(infoBody, "error", String(e));

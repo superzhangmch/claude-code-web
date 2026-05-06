@@ -1789,6 +1789,79 @@ async def post_input(payload: InputPayload):
     return {"ok": True}
 
 
+def _ps_descendants(root_pid: int) -> list[dict]:
+    """All descendants (children, grandchildren, ...) of `root_pid` plus
+    `root_pid` itself, with elapsed time and command. macOS-only (uses
+    pgrep -P + ps); good enough for the info popup."""
+    try:
+        # BFS the tree, one level at a time, until no new children.
+        all_pids: list[int] = [root_pid]
+        frontier: list[int] = [root_pid]
+        while frontier:
+            next_level: list[int] = []
+            for p in frontier:
+                try:
+                    out = subprocess.run(
+                        ["pgrep", "-P", str(p)],
+                        capture_output=True, text=True, timeout=2,
+                    ).stdout
+                except Exception:
+                    continue
+                for ln in out.splitlines():
+                    ln = ln.strip()
+                    if ln.isdigit():
+                        next_level.append(int(ln))
+            all_pids.extend(next_level)
+            frontier = next_level
+        if not all_pids:
+            return []
+        # Fetch elapsed (in seconds) + command in a single ps call.
+        # -o etime= → "[[DD-]HH:]MM:SS"
+        out = subprocess.run(
+            ["ps", "-o", "pid=,ppid=,etime=,command=", "-p", ",".join(map(str, all_pids))],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+    except Exception:
+        return []
+    rows: list[dict] = []
+    for ln in out.splitlines():
+        # split: pid ppid etime command...   (command can have spaces)
+        parts = ln.strip().split(None, 3)
+        if len(parts) < 4:
+            continue
+        try:
+            pid = int(parts[0]); ppid = int(parts[1])
+        except ValueError:
+            continue
+        etime_str = parts[2]
+        cmd = parts[3]
+        # Parse "[[DD-]HH:]MM:SS" into seconds.
+        days = 0
+        rest = etime_str
+        if "-" in rest:
+            d, rest = rest.split("-", 1)
+            days = int(d)
+        bits = rest.split(":")
+        try:
+            if len(bits) == 3:
+                h, m, s = int(bits[0]), int(bits[1]), int(bits[2])
+            elif len(bits) == 2:
+                h, m, s = 0, int(bits[0]), int(bits[1])
+            else:
+                h, m, s = 0, 0, int(bits[0])
+        except ValueError:
+            h = m = s = 0
+        elapsed_sec = ((days * 24) + h) * 3600 + m * 60 + s
+        rows.append({
+            "pid": pid, "ppid": ppid,
+            "etime": etime_str, "elapsed_sec": elapsed_sec,
+            "command": cmd,
+        })
+    # Sort: claude root first, then by parent chain; within same ppid by pid.
+    rows.sort(key=lambda r: (0 if r["pid"] == root_pid else 1, r["ppid"], r["pid"]))
+    return rows
+
+
 @app.get("/api/session-info", dependencies=[Depends(require_token)])
 async def get_session_info(claude_session_id: str):
     """Snapshot for the info popup: title, cwd, jsonl size, first/last user
@@ -1812,6 +1885,7 @@ async def get_session_info(claude_session_id: str):
     cwd = (named.get("project_path") if named else "") or _project_path_from_jsonl(jsonl_path) or ""
     entries = jsonl_cache.entries(jsonl_path)
     b = bindings.get_by_session(sid)
+    processes = _ps_descendants(b.pid) if b else []
     return {
         "session_id": sid,
         "title": (named.get("title") if named else ""),
@@ -1824,6 +1898,7 @@ async def get_session_info(claude_session_id: str):
         "first_user_msg": ctx.get("first_user_msg", ""),
         "first_ts": ctx.get("first_ts", ""),
         "binding": _serialize_binding(b) if b else None,
+        "processes": processes,
     }
 
 
