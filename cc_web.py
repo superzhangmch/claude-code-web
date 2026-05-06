@@ -1482,6 +1482,48 @@ def _sample_top_cpu_processes(n: int) -> list[dict]:
     return rows
 
 
+def _sample_top_mem_groups(n: int = 10) -> list[dict]:
+    """Top N process groups by aggregate RSS, grouped by command basename.
+    Each group rolls up RSS + instance count for processes sharing the
+    same binary (e.g. dozens of "Chrome Helper" → one row). Returns rows
+    sorted by rss_kb desc with a `cum_kb` running-total column."""
+    try:
+        out = subprocess.run(
+            ["ps", "-Awwo", "rss=,comm="],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+    except Exception:
+        return []
+    groups: dict[str, dict] = {}
+    for ln in out.splitlines():
+        parts = ln.strip().split(None, 1)
+        if len(parts) < 2:
+            continue
+        try:
+            rss = int(parts[0])
+        except ValueError:
+            continue
+        comm_path = parts[1]
+        # Group key = basename, so "/usr/bin/python3" + "/opt/.../python3"
+        # both fold into "python3". The full path of the highest-RSS
+        # representative is kept for the tooltip.
+        key = comm_path.rsplit("/", 1)[-1]
+        g = groups.setdefault(key, {"name": key, "rss_kb": 0, "count": 0,
+                                     "sample_path": comm_path})
+        g["rss_kb"] += rss
+        g["count"] += 1
+        # Replace sample_path if this instance is bigger — gives a more
+        # representative full path in the tooltip.
+        if rss > 0 and len(comm_path) > len(g["sample_path"]):
+            g["sample_path"] = comm_path
+    rows = sorted(groups.values(), key=lambda g: g["rss_kb"], reverse=True)[:n]
+    cum = 0
+    for r in rows:
+        cum += r["rss_kb"]
+        r["cum_kb"] = cum
+    return rows
+
+
 async def _cpu_sampler_loop() -> None:
     while True:
         try:
@@ -1562,7 +1604,7 @@ async def get_cpu_history():
     """
     snapshots = list(_cpu_history)
     if not snapshots:
-        return {"samples_at": [], "series": [], "interval_sec": CPU_SAMPLE_INTERVAL_SEC}
+        return {"samples_at": [], "series": [], "interval_sec": CPU_SAMPLE_INTERVAL_SEC, "mem_top": _sample_top_mem_groups(10)}
     # Sleep gaps are implicitly absent: when the Mac sleeps both
     # processes AND the sampler are frozen, so the buffer only ever
     # contains awake-time samples. We therefore use the full buffer
@@ -1589,15 +1631,20 @@ async def get_cpu_history():
         alive_pids[pid] = cmd
     # Drop transient noise: pids that only appear in <=5 samples are
     # short-lived top-N visitors (e.g. one-shot subprocesses) and don't
-    # deserve a chart series.
+    # deserve a chart series. EXCEPTION: when the total alive-pid set
+    # is small (<=5), skip the filter — every pid is interesting in a
+    # quiet system, and otherwise the chart could end up empty.
     sample_count: dict[int, int] = {p: 0 for p in alive_pids}
     for snap in snapshots:
         for r in snap["top"]:
             if r["pid"] in sample_count:
                 sample_count[r["pid"]] += 1
-    active_pids = {p: alive_pids[p] for p in alive_pids if sample_count[p] > 5}
+    if len(alive_pids) <= 5:
+        active_pids = alive_pids
+    else:
+        active_pids = {p: alive_pids[p] for p in alive_pids if sample_count[p] > 5}
     if not active_pids:
-        return {"samples_at": [], "series": [], "interval_sec": CPU_SAMPLE_INTERVAL_SEC}
+        return {"samples_at": [], "series": [], "interval_sec": CPU_SAMPLE_INTERVAL_SEC, "mem_top": _sample_top_mem_groups(10)}
     samples_at = [s["ts"] for s in snapshots]
     series = []
     # Stable order: highest peak CPU first
@@ -1622,6 +1669,7 @@ async def get_cpu_history():
         "samples_at": samples_at,
         "series": series,
         "interval_sec": CPU_SAMPLE_INTERVAL_SEC,
+        "mem_top": _sample_top_mem_groups(10),
     }
 
 

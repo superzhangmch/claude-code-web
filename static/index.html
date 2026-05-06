@@ -114,9 +114,13 @@ header .battery:hover { color: var(--text); }
 #cpu-modal .modal-card.cpu-card {
   width: 95vw; max-width: 900px; max-height: 85vh;
   display: flex; flex-direction: column; gap: 8px;
+  /* scroll the whole card on small viewports — the legend + mem table
+     would otherwise be clipped below the chart on iPhone */
+  overflow: auto;
 }
+#cpu-modal .modal-row { flex-shrink: 0; }
 #cpu-modal .cpu-chart {
-  flex: 1; min-height: 240px;
+  flex-shrink: 0; height: 240px;
   background: var(--code-bg); border: 1px solid var(--border);
   border-radius: 4px; overflow: hidden;
 }
@@ -125,7 +129,7 @@ header .battery:hover { color: var(--text); }
   font: 11px ui-monospace, Menlo, monospace;
   color: var(--text);
   display: flex; flex-direction: column; gap: 3px;
-  max-height: 35vh; overflow-y: auto;
+  flex-shrink: 0;
 }
 #cpu-modal .cpu-legend .row {
   display: flex; align-items: center; gap: 8px;
@@ -143,8 +147,29 @@ header .battery:hover { color: var(--text); }
   min-width: 70px; color: var(--muted);
 }
 #cpu-modal .cpu-legend .cmd {
-  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1; word-break: break-all; white-space: normal;
 }
+#cpu-modal .cpu-legend .row { align-items: flex-start; }
+#cpu-modal .cpu-mem-head {
+  margin: 8px 0 4px 0; font-size: 12px; color: var(--muted);
+  font-weight: 500; text-transform: uppercase; letter-spacing: .05em;
+}
+#cpu-modal .cpu-mem-table {
+  width: 100%; border-collapse: collapse;
+  font: 11px ui-monospace, Menlo, monospace;
+}
+#cpu-modal .cpu-mem-table th, #cpu-modal .cpu-mem-table td {
+  padding: 3px 6px; vertical-align: top; text-align: left;
+}
+#cpu-modal .cpu-mem-table th {
+  color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border);
+}
+#cpu-modal .cpu-mem-table td.num {
+  text-align: right; font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+#cpu-modal .cpu-mem-table tr td:first-child { color: var(--accent); font-weight: 600; }
+#cpu-modal .cpu-mem-table tr:nth-child(even) td { background: rgba(255,255,255,0.025); }
 #picker.show { display: block; }
 #picker h2 {
   font-size: 12px; color: var(--muted); margin: 0 0 10px 0;
@@ -735,6 +760,8 @@ footer button.icon {
       </div>
       <div id="cpu-chart" class="cpu-chart"></div>
       <div id="cpu-legend" class="cpu-legend"></div>
+      <h3 class="cpu-mem-head">Top 10 memory (grouped by binary)</h3>
+      <table id="cpu-mem-table" class="cpu-mem-table"></table>
     </div>
   </div>
 
@@ -1214,10 +1241,37 @@ footer button.icon {
   // Visibility flags keyed by pid.
   const _cpuHidden = new Set();
 
+  function fmtKB(kb) {
+    if (typeof kb !== "number") return "";
+    if (kb < 1024) return kb + " KB";
+    if (kb < 1024 * 1024) return (kb / 1024).toFixed(1) + " MB";
+    return (kb / (1024 * 1024)).toFixed(2) + " GB";
+  }
+  function renderMemTable(rows) {
+    const tbl = document.getElementById("cpu-mem-table");
+    tbl.innerHTML = "";
+    if (!rows || !rows.length) return;
+    const head = document.createElement("tr");
+    for (const h of ["NAME", "#", "RSS", "CUM"]) {
+      const th = document.createElement("th"); th.textContent = h; head.appendChild(th);
+    }
+    tbl.appendChild(head);
+    for (const r of rows) {
+      const tr = document.createElement("tr");
+      const tdN = document.createElement("td"); tdN.textContent = r.name;
+      tdN.title = r.sample_path || r.name;
+      const tdI = document.createElement("td"); tdI.className = "num"; tdI.textContent = r.count;
+      const tdR = document.createElement("td"); tdR.className = "num"; tdR.textContent = fmtKB(r.rss_kb);
+      const tdC = document.createElement("td"); tdC.className = "num"; tdC.textContent = fmtKB(r.cum_kb);
+      tr.appendChild(tdN); tr.appendChild(tdI); tr.appendChild(tdR); tr.appendChild(tdC);
+      tbl.appendChild(tr);
+    }
+  }
   function renderCpuChart() {
     const data = _cpuData;
     cpuChartEl.innerHTML = "";
     cpuLegendEl.innerHTML = "";
+    renderMemTable(data && data.mem_top);
     if (!data || !data.series || !data.series.length) {
       cpuChartEl.innerHTML = "<div style='padding:20px;color:var(--muted);font-size:12px;text-align:center'>"
         + "no samples yet — wait ~1 minute after server start</div>";
@@ -1248,12 +1302,20 @@ footer button.icon {
       svg.push(`<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="#2a2d36" stroke-width="1"/>`);
       svg.push(`<text x="${padL - 4}" y="${y + 3}" fill="#8a8f9c" font-size="9" text-anchor="end">${v.toFixed(0)}%</text>`);
     }
-    // X axis labels: leftmost = "<N samples ago", rightmost = "now".
-    // N is awake-time samples; sleep gaps are already absent from the buffer.
+    // X axis labels: tick marks every ~innerW/6 with "-Nm" labels.
+    // N is awake-minutes back from now; sleep gaps already collapsed.
     const interval = data.interval_sec || 60;
-    const oldestMin = Math.round(((N - 1) * interval) / 60);
-    svg.push(`<text x="${padL}" y="${H - 6}" fill="#8a8f9c" font-size="9" text-anchor="start">-${oldestMin}m awake</text>`);
-    svg.push(`<text x="${W - padR}" y="${H - 6}" fill="#8a8f9c" font-size="9" text-anchor="end">now</text>`);
+    const tickCount = 6;
+    for (let t = 0; t <= tickCount; t++) {
+      const i = Math.round(((tickCount - t) / tickCount) * (N - 1));
+      const x = xAt(i);
+      const minsBack = Math.round(((N - 1 - i) * interval) / 60);
+      // small tick mark just above the label
+      svg.push(`<line x1="${x.toFixed(1)}" y1="${(padT + innerH).toFixed(1)}" x2="${x.toFixed(1)}" y2="${(padT + innerH + 3).toFixed(1)}" stroke="#5a5f6c" stroke-width="1"/>`);
+      const anchor = (t === 0) ? "start" : (t === tickCount ? "end" : "middle");
+      const label = (t === tickCount) ? "now" : `-${minsBack}m`;
+      svg.push(`<text x="${x.toFixed(1)}" y="${H - 6}" fill="#8a8f9c" font-size="9" text-anchor="${anchor}">${label}</text>`);
+    }
     // Each series as a polyline. Treat consecutive samples as adjacent —
     // sleep is already collapsed out of the buffer.
     for (let i = 0; i < data.series.length; i++) {
