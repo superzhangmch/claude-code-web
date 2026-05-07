@@ -786,6 +786,7 @@ footer button.icon {
       <div class="cpu-chart-actions">
         <button id="cpu-hide-all" class="btn">clear</button>
         <button id="cpu-show-all" class="btn">show all</button>
+        <button id="cpu-toggle-sys" class="btn">hide system</button>
       </div>
       <div id="cpu-legend" class="cpu-legend"></div>
       <h3 class="cpu-mem-head">Top 10 memory (grouped by binary)</h3>
@@ -1270,6 +1271,11 @@ footer button.icon {
   let _cpuData = null;
   // Visibility flags keyed by pid.
   const _cpuHidden = new Set();
+  // System-process filter — when true, real-pid series and mem rows
+  // marked is_system are hidden from the chart and table. Synthetic
+  // top1 / sum-top5 curves are NEVER affected so they always reflect
+  // total system CPU pressure.
+  let _cpuHideSystem = true;
 
   function fmtKB(kb) {
     if (typeof kb !== "number") return "";
@@ -1281,6 +1287,14 @@ footer button.icon {
     const tbl = document.getElementById("cpu-mem-table");
     tbl.innerHTML = "";
     if (!rows || !rows.length) return;
+    if (_cpuHideSystem) {
+      rows = rows.filter(r => !r.is_system);
+      // Recompute running total over the visible rows only — the
+      // server's cum_kb counted system processes too.
+      let c = 0;
+      rows = rows.map(r => { c += r.rss_kb; return { ...r, cum_kb: c }; });
+    }
+    if (!rows.length) return;
     const head = document.createElement("tr");
     for (const h of ["RSS", "CUM", "#", "NAME"]) {
       const th = document.createElement("th"); th.textContent = h; head.appendChild(th);
@@ -1307,7 +1321,10 @@ footer button.icon {
         + "no samples yet — wait ~1 minute after server start</div>";
       return;
     }
-    const visibleSeries = data.series.filter(s => !_cpuHidden.has(s.pid));
+    const visibleSeries = data.series.filter(s =>
+      !_cpuHidden.has(s.pid)
+      && !(_cpuHideSystem && s.is_system && !s.synthetic)
+    );
     // Y axis: 0 to ceil(maxPeak / 50) * 50, min 100.
     let maxV = 100;
     for (const s of visibleSeries) {
@@ -1353,6 +1370,10 @@ footer button.icon {
     for (let i = 0; i < data.series.length; i++) {
       const s = data.series[i];
       if (_cpuHidden.has(s.pid)) continue;
+      // System filter: only applies to real-pid series. Synthetic
+      // top1/sum-top5 are deliberately exempt so they always show
+      // total CPU pressure regardless of the toggle.
+      if (_cpuHideSystem && s.is_system && !s.synthetic) continue;
       const color = colorFor(i);
       const isSyn = !!s.synthetic;
       const stroke = isSyn ? 2.2 : 1.5;
@@ -1381,6 +1402,7 @@ footer button.icon {
     // Legend.
     for (let i = 0; i < data.series.length; i++) {
       const s = data.series[i];
+      if (_cpuHideSystem && s.is_system && !s.synthetic) continue;
       const row = document.createElement("div");
       row.className = "row" + (_cpuHidden.has(s.pid) ? " dim" : "");
       const sw = document.createElement("span"); sw.className = "swatch";
@@ -1428,6 +1450,17 @@ footer button.icon {
   });
   document.getElementById("cpu-show-all").addEventListener("click", () => {
     _cpuHidden.clear();
+    renderCpuChart();
+  });
+  const cpuToggleSysBtn = document.getElementById("cpu-toggle-sys");
+  function refreshSysToggleLabel() {
+    cpuToggleSysBtn.textContent = _cpuHideSystem ? "show system" : "hide system";
+    cpuToggleSysBtn.classList.toggle("active", !_cpuHideSystem);
+  }
+  refreshSysToggleLabel();
+  cpuToggleSysBtn.addEventListener("click", () => {
+    _cpuHideSystem = !_cpuHideSystem;
+    refreshSysToggleLabel();
     renderCpuChart();
   });
   cpuRefresh.addEventListener("click", loadCpuHistory);

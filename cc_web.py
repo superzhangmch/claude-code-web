@@ -1451,14 +1451,27 @@ CPU_HISTORY_TOP_N = 5
 _cpu_history: _collections.deque = _collections.deque(maxlen=CPU_HISTORY_MAX)
 
 
+# macOS system-process heuristic: hybrid (uid + path prefix).
+# UID < 500 catches everything launchd spawns under _hidd, _coreaudiod,
+# _windowserver, root, etc. Path prefix catches Apple-shipped daemons
+# whose effective UID is the user's (rare but happens for things like
+# /System/.../com.apple.* helpers re-execed by user logind).
+SYS_PATH_PREFIXES = ("/System/", "/usr/libexec/", "/usr/sbin/", "/sbin/",
+                     "/private/var/db/com.apple")
+
+
+def _is_system_proc(uid: int, comm: str) -> bool:
+    return uid < 500 or comm.startswith(SYS_PATH_PREFIXES)
+
+
 def _sample_top_cpu_processes(n: int) -> list[dict]:
     """Top N processes by CPU% via `ps -r` (sort by CPU desc on macOS).
-    Returns [{pid, cpu, command}, ...] in descending CPU order. Excludes
-    cc_web's own pid (it always shows up at the top because of the very
-    sampler that's reading it — useless noise)."""
+    Returns [{pid, uid, cpu, command, is_system}, ...] in descending CPU
+    order. Excludes cc_web's own pid (it always shows up at the top
+    because of the very sampler that's reading it — useless noise)."""
     try:
         out = subprocess.run(
-            ["ps", "-Arwwo", "pid=,pcpu=,comm="],
+            ["ps", "-Arwwo", "pid=,uid=,pcpu=,comm="],
             capture_output=True, text=True, timeout=3,
         ).stdout
     except Exception:
@@ -1466,18 +1479,21 @@ def _sample_top_cpu_processes(n: int) -> list[dict]:
     self_pid = os.getpid()
     rows: list[dict] = []
     for ln in out.splitlines():
-        parts = ln.strip().split(None, 2)
-        if len(parts) < 3:
+        parts = ln.strip().split(None, 3)
+        if len(parts) < 4:
             continue
         try:
-            pid = int(parts[0]); cpu = float(parts[1])
+            pid = int(parts[0]); uid = int(parts[1]); cpu = float(parts[2])
         except ValueError:
             continue
         if pid == self_pid:
             continue
-        rows.append({"pid": pid, "cpu": cpu, "command": parts[2]})
+        comm = parts[3]
+        rows.append({
+            "pid": pid, "uid": uid, "cpu": cpu, "command": comm,
+            "is_system": _is_system_proc(uid, comm),
+        })
         if len(rows) >= n:
-            # ps -r outputs in CPU-desc order, no need to read further
             break
     return rows
 
@@ -1486,36 +1502,37 @@ def _sample_top_mem_groups(n: int = 10) -> list[dict]:
     """Top N process groups by aggregate RSS, grouped by command basename.
     Each group rolls up RSS + instance count for processes sharing the
     same binary (e.g. dozens of "Chrome Helper" → one row). Returns rows
-    sorted by rss_kb desc with a `cum_kb` running-total column."""
+    sorted by rss_kb desc with a `cum_kb` running-total column. A group
+    is `is_system` if any of its instances looks like a system process
+    (same hybrid uid+path rule as the CPU sampler)."""
     try:
         out = subprocess.run(
-            ["ps", "-Awwo", "rss=,comm="],
+            ["ps", "-Awwo", "uid=,rss=,comm="],
             capture_output=True, text=True, timeout=3,
         ).stdout
     except Exception:
         return []
     groups: dict[str, dict] = {}
     for ln in out.splitlines():
-        parts = ln.strip().split(None, 1)
-        if len(parts) < 2:
+        parts = ln.strip().split(None, 2)
+        if len(parts) < 3:
             continue
         try:
-            rss = int(parts[0])
+            uid = int(parts[0]); rss = int(parts[1])
         except ValueError:
             continue
-        comm_path = parts[1]
-        # Group key = basename, so "/usr/bin/python3" + "/opt/.../python3"
-        # both fold into "python3". The full path of the highest-RSS
-        # representative is kept for the tooltip.
+        comm_path = parts[2]
         key = comm_path.rsplit("/", 1)[-1]
         g = groups.setdefault(key, {"name": key, "rss_kb": 0, "count": 0,
-                                     "sample_path": comm_path})
+                                     "sample_path": comm_path,
+                                     "is_system": _is_system_proc(uid, comm_path)})
         g["rss_kb"] += rss
         g["count"] += 1
-        # Replace sample_path if this instance is bigger — gives a more
-        # representative full path in the tooltip.
         if rss > 0 and len(comm_path) > len(g["sample_path"]):
             g["sample_path"] = comm_path
+        # If any instance qualifies as system, mark the whole group.
+        if _is_system_proc(uid, comm_path):
+            g["is_system"] = True
     rows = sorted(groups.values(), key=lambda g: g["rss_kb"], reverse=True)[:n]
     cum = 0
     for r in rows:
@@ -1705,6 +1722,16 @@ async def get_cpu_history():
     series = list(synthetic)
     # Sort by buffer-average CPU desc — sustained heavy users first.
     pid_order = sorted(active_pids.keys(), key=lambda p: pid_avg[p], reverse=True)
+    # Carry the most-recent is_system flag for each pid so the frontend
+    # can hide system processes on demand. Synthetic series are computed
+    # over the raw snapshots (above) and intentionally include system
+    # processes — top1 / sum-top5 should always reflect total CPU
+    # pressure regardless of the filter.
+    pid_is_system: dict[int, bool] = {}
+    for snap in snapshots:
+        for r in snap["top"]:
+            if r["pid"] in active_pids:
+                pid_is_system[r["pid"]] = bool(r.get("is_system"))
     for pid in pid_order:
         cpus: list[Optional[float]] = []
         for snap in snapshots:
@@ -1716,6 +1743,7 @@ async def get_cpu_history():
             "cpu": cpus,
             "peak": pid_peak[pid],
             "avg": pid_avg[pid],
+            "is_system": pid_is_system.get(pid, False),
         })
     return {
         "samples_at": samples_at,
