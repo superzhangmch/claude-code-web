@@ -1354,10 +1354,10 @@ footer button.icon {
     const interval = data.interval_sec || 60;
     const tickCount = 6;
     for (let t = 0; t <= tickCount; t++) {
-      const i = Math.round(((tickCount - t) / tickCount) * (N - 1));
+      // t=0 → leftmost (oldest sample), t=tickCount → rightmost (now)
+      const i = Math.round((t / tickCount) * (N - 1));
       const x = xAt(i);
       const minsBack = Math.round(((N - 1 - i) * interval) / 60);
-      // small tick mark just above the label
       svg.push(`<line x1="${x.toFixed(1)}" y1="${(padT + innerH).toFixed(1)}" x2="${x.toFixed(1)}" y2="${(padT + innerH + 3).toFixed(1)}" stroke="#5a5f6c" stroke-width="1"/>`);
       const anchor = (t === 0) ? "start" : (t === tickCount ? "end" : "middle");
       const label = (t === tickCount) ? "now" : `-${minsBack}m`;
