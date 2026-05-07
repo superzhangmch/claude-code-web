@@ -1643,8 +1643,9 @@ async def get_cpu_history():
         active_pids = alive_pids
     else:
         active_pids = {p: alive_pids[p] for p in alive_pids if sample_count[p] > 5}
-    if not active_pids:
-        return {"samples_at": [], "series": [], "interval_sec": CPU_SAMPLE_INTERVAL_SEC, "mem_top": _sample_top_mem_groups(10)}
+    # Note: even when active_pids is empty (every real pid filtered out),
+    # we still want to emit the synthetic top1 / sum_top5 curves below,
+    # so don't bail here.
     samples_at = [s["ts"] for s in snapshots]
     # Per-pid stats: peak (max), and avg over the FULL buffer with absent
     # samples counted as 0. Average-with-zeros (rather than mean of just
@@ -1668,11 +1669,40 @@ async def get_cpu_history():
     # qualified as a top-N visitor and never actually used the CPU.
     if len(snapshots) > 10 and len(active_pids) > 5:
         active_pids = {p: c for p, c in active_pids.items() if pid_peak[p] >= 2.0}
-        if not active_pids:
-            return {"samples_at": [], "series": [], "interval_sec": CPU_SAMPLE_INTERVAL_SEC, "mem_top": _sample_top_mem_groups(10)}
         pid_peak = {p: pid_peak[p] for p in active_pids}
         pid_avg = {p: pid_avg[p] for p in active_pids}
-    series = []
+    # Synthetic "pseudo-process" curves the user always wants to see —
+    # max(top1) shows the worst-offender envelope, sum(top5) shows
+    # cumulative top-N load. Included even when no real pid passes the
+    # peak filter.
+    top1_curve: list[Optional[float]] = []
+    sum_curve: list[Optional[float]] = []
+    top1_peak = 0.0; sum_peak = 0.0
+    top1_total = 0.0; sum_total = 0.0
+    for snap in snapshots:
+        if snap["top"]:
+            top1v = max(r["cpu"] for r in snap["top"])
+            sumv = sum(r["cpu"] for r in snap["top"])
+        else:
+            top1v = None
+            sumv = None
+        top1_curve.append(top1v)
+        sum_curve.append(sumv)
+        if top1v is not None:
+            if top1v > top1_peak:
+                top1_peak = top1v
+            top1_total += top1v
+        if sumv is not None:
+            if sumv > sum_peak:
+                sum_peak = sumv
+            sum_total += sumv
+    synthetic = [
+        {"pid": -1, "command": "max top-1", "cpu": top1_curve,
+         "peak": top1_peak, "avg": top1_total / n_buf, "synthetic": True},
+        {"pid": -2, "command": "sum top-5", "cpu": sum_curve,
+         "peak": sum_peak,  "avg": sum_total  / n_buf, "synthetic": True},
+    ]
+    series = list(synthetic)
     # Sort by buffer-average CPU desc — sustained heavy users first.
     pid_order = sorted(active_pids.keys(), key=lambda p: pid_avg[p], reverse=True)
     for pid in pid_order:

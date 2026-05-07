@@ -122,9 +122,18 @@ header .battery:hover { color: var(--text); }
 #cpu-modal .cpu-chart {
   flex-shrink: 0; height: 240px;
   background: var(--code-bg); border: 1px solid var(--border);
-  border-radius: 4px; overflow: hidden;
+  border-radius: 4px;
+  /* Horizontal scroll on narrow viewports — chart keeps a min pixel
+     width below which the lines/labels would be unreadably squeezed. */
+  overflow-x: auto; overflow-y: hidden;
 }
-#cpu-modal .cpu-chart svg { width: 100%; height: 100%; display: block; }
+#cpu-modal .cpu-chart svg {
+  width: 100%; min-width: 760px; height: 100%; display: block;
+}
+#cpu-modal .cpu-chart-actions {
+  display: flex; gap: 6px; flex-shrink: 0;
+}
+#cpu-modal .cpu-chart-actions .btn { font-size: 11px; padding: 3px 10px; }
 #cpu-modal .cpu-legend {
   font: 11px ui-monospace, Menlo, monospace;
   color: var(--text);
@@ -140,6 +149,8 @@ header .battery:hover { color: var(--text); }
 }
 #cpu-modal .cpu-legend .row:hover { background: var(--panel2); }
 #cpu-modal .cpu-legend .row.dim { opacity: 0.35; }
+#cpu-modal .cpu-legend .row.syn { background: rgba(255,255,255,0.04); }
+#cpu-modal .cpu-legend .row.syn .pid { color: #e0a070; }
 #cpu-modal .cpu-legend .swatch {
   width: 14px; height: 3px; border-radius: 2px; flex-shrink: 0;
 }
@@ -772,6 +783,10 @@ footer button.icon {
         <button id="cpu-close" class="btn">close</button>
       </div>
       <div id="cpu-chart" class="cpu-chart"></div>
+      <div class="cpu-chart-actions">
+        <button id="cpu-hide-all" class="btn">clear</button>
+        <button id="cpu-show-all" class="btn">show all</button>
+      </div>
       <div id="cpu-legend" class="cpu-legend"></div>
       <h3 class="cpu-mem-head">Top 10 memory (grouped by binary)</h3>
       <div class="cpu-mem-wrap">
@@ -1332,11 +1347,16 @@ footer button.icon {
       svg.push(`<text x="${x.toFixed(1)}" y="${H - 6}" fill="#8a8f9c" font-size="9" text-anchor="${anchor}">${label}</text>`);
     }
     // Each series as a polyline. Treat consecutive samples as adjacent —
-    // sleep is already collapsed out of the buffer.
+    // sleep is already collapsed out of the buffer. Synthetic series
+    // (max top-1 / sum top-5) use a dashed stroke + thicker line so
+    // they stand out from the per-pid curves.
     for (let i = 0; i < data.series.length; i++) {
       const s = data.series[i];
       if (_cpuHidden.has(s.pid)) continue;
       const color = colorFor(i);
+      const isSyn = !!s.synthetic;
+      const stroke = isSyn ? 2.2 : 1.5;
+      const dash = isSyn ? ` stroke-dasharray="4 3"` : "";
       let segs = [], cur = [];
       for (let j = 0; j < s.cpu.length; j++) {
         const v = s.cpu[j];
@@ -1352,7 +1372,7 @@ footer button.icon {
           const [x, y] = seg[0].split(",");
           svg.push(`<circle cx="${x}" cy="${y}" r="2" fill="${color}"/>`);
         } else {
-          svg.push(`<polyline points="${seg.join(" ")}" fill="none" stroke="${color}" stroke-width="1.5"/>`);
+          svg.push(`<polyline points="${seg.join(" ")}" fill="none" stroke="${color}" stroke-width="${stroke}"${dash}/>`);
         }
       }
     }
@@ -1365,11 +1385,13 @@ footer button.icon {
       row.className = "row" + (_cpuHidden.has(s.pid) ? " dim" : "");
       const sw = document.createElement("span"); sw.className = "swatch";
       sw.style.background = colorFor(i);
-      const pid = document.createElement("span"); pid.className = "pid"; pid.textContent = s.pid;
+      const pid = document.createElement("span"); pid.className = "pid";
+      pid.textContent = s.synthetic ? "★" : s.pid;
       const avgV = (typeof s.avg === "number") ? s.avg : 0;
       const avg = document.createElement("span"); avg.className = "avg"; avg.textContent = "avg " + avgV.toFixed(1) + "%";
       const peak = document.createElement("span"); peak.className = "peak"; peak.textContent = "peak " + s.peak.toFixed(1) + "%";
       const cmd = document.createElement("span"); cmd.className = "cmd"; cmd.textContent = s.command;
+      if (s.synthetic) row.classList.add("syn");
       row.appendChild(sw); row.appendChild(pid); row.appendChild(avg); row.appendChild(peak); row.appendChild(cmd);
       row.addEventListener("click", () => {
         if (_cpuHidden.has(s.pid)) _cpuHidden.delete(s.pid);
@@ -1398,6 +1420,15 @@ footer button.icon {
   batteryEl.addEventListener("click", () => {
     cpuModal.classList.add("show");
     loadCpuHistory();
+  });
+  document.getElementById("cpu-hide-all").addEventListener("click", () => {
+    if (!_cpuData || !_cpuData.series) return;
+    for (const s of _cpuData.series) _cpuHidden.add(s.pid);
+    renderCpuChart();
+  });
+  document.getElementById("cpu-show-all").addEventListener("click", () => {
+    _cpuHidden.clear();
+    renderCpuChart();
   });
   cpuRefresh.addEventListener("click", loadCpuHistory);
   cpuClose.addEventListener("click", () => cpuModal.classList.remove("show"));
