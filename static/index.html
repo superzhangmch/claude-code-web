@@ -130,7 +130,10 @@ header .battery:hover { color: var(--text); }
   color: var(--text);
   display: flex; flex-direction: column; gap: 3px;
   flex-shrink: 0;
+  /* Horizontal scroll for long command lines instead of wrapping. */
+  overflow-x: auto;
 }
+#cpu-modal .cpu-legend .row { min-width: max-content; }
 #cpu-modal .cpu-legend .row {
   display: flex; align-items: center; gap: 8px;
   padding: 2px 4px; cursor: pointer;
@@ -143,21 +146,31 @@ header .battery:hover { color: var(--text); }
 #cpu-modal .cpu-legend .pid {
   min-width: 56px; color: var(--accent); font-weight: 600;
 }
+#cpu-modal .cpu-legend .avg {
+  min-width: 70px; color: #6ee884; font-weight: 600;
+  white-space: nowrap;
+}
 #cpu-modal .cpu-legend .peak {
   min-width: 70px; color: var(--muted);
+  white-space: nowrap;
 }
 #cpu-modal .cpu-legend .cmd {
-  flex: 1; word-break: break-all; white-space: normal;
+  flex: 1; white-space: nowrap;
 }
-#cpu-modal .cpu-legend .row { align-items: flex-start; }
+#cpu-modal .cpu-legend .row { align-items: center; }
 #cpu-modal .cpu-mem-head {
   margin: 8px 0 4px 0; font-size: 12px; color: var(--muted);
   font-weight: 500; text-transform: uppercase; letter-spacing: .05em;
 }
+#cpu-modal .cpu-mem-wrap { overflow-x: auto; flex-shrink: 0; }
 #cpu-modal .cpu-mem-table {
-  width: 100%; border-collapse: collapse;
+  border-collapse: collapse;
   font: 11px ui-monospace, Menlo, monospace;
+  /* min-content so long binary names don't crush other columns —
+     parent .cpu-mem-wrap scrolls horizontally instead. */
+  min-width: max-content;
 }
+#cpu-modal .cpu-mem-table tr td:last-child { white-space: nowrap; }
 #cpu-modal .cpu-mem-table th, #cpu-modal .cpu-mem-table td {
   padding: 3px 6px; vertical-align: top; text-align: left;
 }
@@ -168,7 +181,7 @@ header .battery:hover { color: var(--text); }
   text-align: right; font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-#cpu-modal .cpu-mem-table tr td:first-child { color: var(--accent); font-weight: 600; }
+#cpu-modal .cpu-mem-table tr td:last-child { color: var(--accent); font-weight: 600; }
 #cpu-modal .cpu-mem-table tr:nth-child(even) td { background: rgba(255,255,255,0.025); }
 #picker.show { display: block; }
 #picker h2 {
@@ -761,7 +774,9 @@ footer button.icon {
       <div id="cpu-chart" class="cpu-chart"></div>
       <div id="cpu-legend" class="cpu-legend"></div>
       <h3 class="cpu-mem-head">Top 10 memory (grouped by binary)</h3>
-      <table id="cpu-mem-table" class="cpu-mem-table"></table>
+      <div class="cpu-mem-wrap">
+        <table id="cpu-mem-table" class="cpu-mem-table"></table>
+      </div>
     </div>
   </div>
 
@@ -1252,18 +1267,18 @@ footer button.icon {
     tbl.innerHTML = "";
     if (!rows || !rows.length) return;
     const head = document.createElement("tr");
-    for (const h of ["NAME", "#", "RSS", "CUM"]) {
+    for (const h of ["RSS", "CUM", "#", "NAME"]) {
       const th = document.createElement("th"); th.textContent = h; head.appendChild(th);
     }
     tbl.appendChild(head);
     for (const r of rows) {
       const tr = document.createElement("tr");
-      const tdN = document.createElement("td"); tdN.textContent = r.name;
-      tdN.title = r.sample_path || r.name;
-      const tdI = document.createElement("td"); tdI.className = "num"; tdI.textContent = r.count;
       const tdR = document.createElement("td"); tdR.className = "num"; tdR.textContent = fmtKB(r.rss_kb);
       const tdC = document.createElement("td"); tdC.className = "num"; tdC.textContent = fmtKB(r.cum_kb);
-      tr.appendChild(tdN); tr.appendChild(tdI); tr.appendChild(tdR); tr.appendChild(tdC);
+      const tdI = document.createElement("td"); tdI.className = "num"; tdI.textContent = r.count;
+      const tdN = document.createElement("td"); tdN.textContent = r.name;
+      tdN.title = r.sample_path || r.name;
+      tr.appendChild(tdR); tr.appendChild(tdC); tr.appendChild(tdI); tr.appendChild(tdN);
       tbl.appendChild(tr);
     }
   }
@@ -1351,9 +1366,11 @@ footer button.icon {
       const sw = document.createElement("span"); sw.className = "swatch";
       sw.style.background = colorFor(i);
       const pid = document.createElement("span"); pid.className = "pid"; pid.textContent = s.pid;
+      const avgV = (typeof s.avg === "number") ? s.avg : 0;
+      const avg = document.createElement("span"); avg.className = "avg"; avg.textContent = "avg " + avgV.toFixed(1) + "%";
       const peak = document.createElement("span"); peak.className = "peak"; peak.textContent = "peak " + s.peak.toFixed(1) + "%";
       const cmd = document.createElement("span"); cmd.className = "cmd"; cmd.textContent = s.command;
-      row.appendChild(sw); row.appendChild(pid); row.appendChild(peak); row.appendChild(cmd);
+      row.appendChild(sw); row.appendChild(pid); row.appendChild(avg); row.appendChild(peak); row.appendChild(cmd);
       row.addEventListener("click", () => {
         if (_cpuHidden.has(s.pid)) _cpuHidden.delete(s.pid);
         else _cpuHidden.add(s.pid);

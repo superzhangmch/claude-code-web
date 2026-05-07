@@ -1646,14 +1646,35 @@ async def get_cpu_history():
     if not active_pids:
         return {"samples_at": [], "series": [], "interval_sec": CPU_SAMPLE_INTERVAL_SEC, "mem_top": _sample_top_mem_groups(10)}
     samples_at = [s["ts"] for s in snapshots]
-    series = []
-    # Stable order: highest peak CPU first
+    # Per-pid stats: peak (max), and avg over the FULL buffer with absent
+    # samples counted as 0. Average-with-zeros (rather than mean of just
+    # non-null hits) is what surfaces sustained offenders — a pid that
+    # briefly spiked once would have a high "mean of hits" but a low
+    # buffer-average, ranking it correctly below long-running CPU eaters.
+    n_buf = len(snapshots) or 1
     pid_peak: dict[int, float] = {p: 0.0 for p in active_pids}
+    pid_sum: dict[int, float] = {p: 0.0 for p in active_pids}
     for snap in snapshots:
         for r in snap["top"]:
-            if r["pid"] in pid_peak and r["cpu"] > pid_peak[r["pid"]]:
-                pid_peak[r["pid"]] = r["cpu"]
-    pid_order = sorted(active_pids.keys(), key=lambda p: pid_peak[p], reverse=True)
+            pid = r["pid"]
+            if pid not in pid_peak:
+                continue
+            if r["cpu"] > pid_peak[pid]:
+                pid_peak[pid] = r["cpu"]
+            pid_sum[pid] += r["cpu"]
+    pid_avg = {p: pid_sum[p] / n_buf for p in active_pids}
+    # Once we have enough samples AND enough processes, drop the truly
+    # idle ones — peak CPU < 2% is just noise from a process that briefly
+    # qualified as a top-N visitor and never actually used the CPU.
+    if len(snapshots) > 10 and len(active_pids) > 5:
+        active_pids = {p: c for p, c in active_pids.items() if pid_peak[p] >= 2.0}
+        if not active_pids:
+            return {"samples_at": [], "series": [], "interval_sec": CPU_SAMPLE_INTERVAL_SEC, "mem_top": _sample_top_mem_groups(10)}
+        pid_peak = {p: pid_peak[p] for p in active_pids}
+        pid_avg = {p: pid_avg[p] for p in active_pids}
+    series = []
+    # Sort by buffer-average CPU desc — sustained heavy users first.
+    pid_order = sorted(active_pids.keys(), key=lambda p: pid_avg[p], reverse=True)
     for pid in pid_order:
         cpus: list[Optional[float]] = []
         for snap in snapshots:
@@ -1664,6 +1685,7 @@ async def get_cpu_history():
             "command": active_pids[pid],
             "cpu": cpus,
             "peak": pid_peak[pid],
+            "avg": pid_avg[pid],
         })
     return {
         "samples_at": samples_at,
