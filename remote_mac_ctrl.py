@@ -149,6 +149,35 @@ def click_at(x: float, y: float, button: str = "left", double: bool = False) -> 
     Quartz.CGEventPost(Quartz.kCGHIDEventTap, e_up)
 
 
+def drag_from_to(x1: float, y1: float, x2: float, y2: float,
+                 steps: int = 12) -> None:
+    """Left-button drag from (x1,y1) to (x2,y2).
+
+    Sends intermediate `LeftMouseDragged` frames — many receivers (Finder
+    item drag, Sketch shape drag, lasso-select) only register as a drag
+    when they see motion deltas, not just down→up at a different location.
+    Coords are global event-space (caller adds display origin)."""
+    pos1 = (float(x1), float(y1))
+    pos2 = (float(x2), float(y2))
+    btn = Quartz.kCGMouseButtonLeft
+    e_down = Quartz.CGEventCreateMouseEvent(
+        None, Quartz.kCGEventLeftMouseDown, pos1, btn)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, e_down)
+    _time.sleep(0.05)
+    steps = max(2, steps)
+    for i in range(1, steps + 1):
+        t = i / steps
+        x = x1 + (x2 - x1) * t
+        y = y1 + (y2 - y1) * t
+        e_mid = Quartz.CGEventCreateMouseEvent(
+            None, Quartz.kCGEventLeftMouseDragged, (float(x), float(y)), btn)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, e_mid)
+        _time.sleep(0.012)
+    e_up = Quartz.CGEventCreateMouseEvent(
+        None, Quartz.kCGEventLeftMouseUp, pos2, btn)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, e_up)
+
+
 def scroll_by(dy: int, dx: int = 0) -> None:
     e = Quartz.CGEventCreateScrollWheelEvent(
         None, Quartz.kCGScrollEventUnitPixel, 2, int(dy), int(dx))
@@ -283,6 +312,13 @@ class ClickBody(BaseModel):
 class ScrollBody(BaseModel):
     dx: int = 0
     dy: int = 0
+
+class DragBody(BaseModel):
+    x1f: Optional[float] = None
+    y1f: Optional[float] = None
+    x2f: Optional[float] = None
+    y2f: Optional[float] = None
+    display: str = "main"
 
 class UnlockBody(BaseModel):
     password: str
@@ -433,6 +469,19 @@ def do_click(body: ClickBody):
         raise HTTPException(status_code=400, detail="missing xf/yf or x/y")
     click_at(x, y, button=body.button, double=body.double)
     return {"ok": True, "x": x, "y": y}
+
+
+@api_router.post("/drag")
+def do_drag(body: DragBody):
+    if any(v is None for v in (body.x1f, body.y1f, body.x2f, body.y2f)):
+        raise HTTPException(status_code=400, detail="missing x1f/y1f/x2f/y2f")
+    did, ox, oy, dw, dh = resolve_display(body.display)
+    x1 = body.x1f * dw + ox
+    y1 = body.y1f * dh + oy
+    x2 = body.x2f * dw + ox
+    y2 = body.y2f * dh + oy
+    drag_from_to(x1, y1, x2, y2)
+    return {"ok": True, "from": [x1, y1], "to": [x2, y2]}
 
 
 @api_router.post("/scroll")

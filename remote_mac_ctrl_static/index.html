@@ -291,6 +291,19 @@
     box-shadow: 0 0 0 2px rgba(74,158,255,0.25);
   }
   .click-marker.show { opacity: 1; }
+  /* Drag-start marker = same shape, red instead of blue, so the two are
+     distinguishable at a glance when you're setting up a drag. */
+  .drag-start-marker {
+    position: absolute;
+    width: 22px; height: 22px;
+    border: 2px solid #ff5b5b;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    opacity: 0;
+    box-shadow: 0 0 0 2px rgba(255,91,91,0.25);
+  }
+  .drag-start-marker.show { opacity: 1; }
 
   .scroll-pad {
     display: grid;
@@ -434,6 +447,8 @@
     <button id="btnDouble" onclick="fireClickAction('left',  true)"  disabled>Dbl-Click</button>
     <button id="btnRight"  onclick="fireClickAction('right', false)" disabled>R-Click</button>
     <button id="btnClick"  onclick="fireClickAction('left',  false)" disabled>Click</button>
+    <button id="btnDragStart" onclick="setDragStart()"  disabled title="Lock current point as drag start (red marker), then pick a new point and tap Drag→">⊕ Drag-from</button>
+    <button id="btnDrag"      onclick="fireDrag()"      disabled title="Drag from the red marker to the blue marker">Drag→</button>
   </div>
 
   <div class="shot-info-row">
@@ -730,6 +745,7 @@
         }
         drawPadViewport();
         repositionMarker();
+        repositionDragStartMarker();
       }, { once: true });
       imgEl.src = currentBlobUrl;
 
@@ -837,6 +853,7 @@
   // recomputed from selectedVF at click time.
   let touchStart = null;
   let selectedVF = null;       // {xf, yf} — viewport-fractional in [0,1]
+  let dragStartVF = null;      // {xf, yf} — locked first endpoint for drag
 
   function onPointerDown(ev) {
     if (!imgEl || !screenW) return;
@@ -884,9 +901,12 @@
     if (navigator.vibrate) navigator.vibrate(8);
     repositionMarker();
     updateSelectedInfo();
-    document.getElementById('btnClick').disabled  = false;
-    document.getElementById('btnDouble').disabled = false;
-    document.getElementById('btnRight').disabled  = false;
+    document.getElementById('btnClick').disabled     = false;
+    document.getElementById('btnDouble').disabled    = false;
+    document.getElementById('btnRight').disabled     = false;
+    document.getElementById('btnDragStart').disabled = false;
+    // Drag-end button only enabled once both endpoints exist.
+    document.getElementById('btnDrag').disabled      = !dragStartVF;
   }
 
   // Marker is a child of screen-wrap (in image-content coords), so we add
@@ -901,6 +921,65 @@
     m.classList.add('show');
   }
 
+  // Red drag-start marker, anchored the same way as the blue click marker.
+  function repositionDragStartMarker() {
+    let m = document.getElementById('dragStartMarker');
+    if (!dragStartVF) { if (m) m.classList.remove('show'); return; }
+    if (!m) {
+      m = document.createElement('div');
+      m.id = 'dragStartMarker';
+      m.className = 'drag-start-marker';
+      screenWrap.appendChild(m);
+    }
+    const x = screenWrap.scrollLeft + dragStartVF.xf * screenWrap.clientWidth;
+    const y = screenWrap.scrollTop  + dragStartVF.yf * screenWrap.clientHeight;
+    m.style.left = x + 'px';
+    m.style.top  = y + 'px';
+    m.classList.add('show');
+  }
+
+  function setDragStart() {
+    if (!selectedVF) return;
+    dragStartVF = { xf: selectedVF.xf, yf: selectedVF.yf };
+    repositionDragStartMarker();
+    // Drag fires when both endpoints exist and they differ; for now just
+    // require both to exist (user can fire a no-op zero-length drag if they
+    // really want, system will treat it as a click anyway).
+    document.getElementById('btnDrag').disabled = false;
+    if (navigator.vibrate) navigator.vibrate(15);
+    flash('drag start locked — pick end + tap Drag→', true);
+  }
+
+  function clearDragStart() {
+    dragStartVF = null;
+    const m = document.getElementById('dragStartMarker');
+    if (m) m.classList.remove('show');
+    document.getElementById('btnDrag').disabled = true;
+  }
+
+  async function fireDrag() {
+    if (!dragStartVF || !selectedVF || !imgEl || !imgEl.naturalWidth) {
+      flash('set drag start + end first', false); return;
+    }
+    // Convert both viewport fractions → display-local fractions (frontend
+    // sends display-local; backend adds the display's origin).
+    const s_imgX = screenWrap.scrollLeft + dragStartVF.xf * screenWrap.clientWidth;
+    const s_imgY = screenWrap.scrollTop  + dragStartVF.yf * screenWrap.clientHeight;
+    const e_imgX = screenWrap.scrollLeft + selectedVF.xf  * screenWrap.clientWidth;
+    const e_imgY = screenWrap.scrollTop  + selectedVF.yf  * screenWrap.clientHeight;
+    const x1f = s_imgX / imgEl.naturalWidth, y1f = s_imgY / imgEl.naturalHeight;
+    const x2f = e_imgX / imgEl.naturalWidth, y2f = e_imgY / imgEl.naturalHeight;
+    if (navigator.vibrate) navigator.vibrate(20);
+    try {
+      const d = await req('api/drag', { x1f, y1f, x2f, y2f, display: currentDisplay() });
+      flash(`drag ${Math.round(d.from[0])},${Math.round(d.from[1])} → ${Math.round(d.to[0])},${Math.round(d.to[1])} ✓`, true);
+      clearDragStart();
+      scheduleAutoReload(500);
+    } catch (e) {
+      flash('drag ✗ ' + e.message, false);
+    }
+  }
+
   function updateSelectedInfo() {
     const info = document.getElementById('selectedInfo');
     if (!info || !selectedVF || !screenW || !imgEl || !imgEl.naturalWidth) return;
@@ -912,7 +991,11 @@
   }
 
   // Recompute marker visual position whenever the viewport scrolls (via minimap)
-  screenWrap.addEventListener('scroll', () => { repositionMarker(); updateSelectedInfo(); });
+  screenWrap.addEventListener('scroll', () => {
+    repositionMarker();
+    repositionDragStartMarker();
+    updateSelectedInfo();
+  });
 
   async function fireClickAction(button, double) {
     if (!selectedVF || !imgEl || !imgEl.naturalWidth) { flash('pick a spot first', false); return; }
