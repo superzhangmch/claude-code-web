@@ -2,3 +2,4 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 iterm2>=2.7
 websockets>=12
+pyobjc-framework-Quartz>=10
