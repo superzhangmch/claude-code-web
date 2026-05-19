@@ -987,11 +987,11 @@
 
   screenPad.addEventListener('touchstart', (ev) => {
     ev.preventDefault();
-    const t = ev.touches[0]; padDown(t.clientX, t.clientY);
+    const t = ev.targetTouches[0]; if (t) padDown(t.clientX, t.clientY);
   }, { passive: false });
   screenPad.addEventListener('touchmove', (ev) => {
     ev.preventDefault();
-    const t = ev.touches[0]; padMove(t.clientX, t.clientY);
+    const t = ev.targetTouches[0]; if (t) padMove(t.clientX, t.clientY);
   }, { passive: false });
   screenPad.addEventListener('touchend',    padEnd);
   screenPad.addEventListener('touchcancel', padEnd);
@@ -1026,11 +1026,11 @@
 
   cursorPad.addEventListener('touchstart', (ev) => {
     ev.preventDefault();
-    const t = ev.touches[0]; cursorDown(t.clientX, t.clientY);
+    const t = ev.targetTouches[0]; if (t) cursorDown(t.clientX, t.clientY);
   }, { passive: false });
   cursorPad.addEventListener('touchmove', (ev) => {
     ev.preventDefault();
-    const t = ev.touches[0]; cursorMove(t.clientX, t.clientY);
+    const t = ev.targetTouches[0]; if (t) cursorMove(t.clientX, t.clientY);
   }, { passive: false });
   cursorPad.addEventListener('touchend',    cursorEnd);
   cursorPad.addEventListener('touchcancel', cursorEnd);
