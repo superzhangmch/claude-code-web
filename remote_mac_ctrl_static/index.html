@@ -1,0 +1,1182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Mac Remote</title>
+<style>
+  :root {
+    --bg: #0d0f12;
+    --card: #1a1d22;
+    --card-hi: #242830;
+    --fg: #e6e8eb;
+    --dim: #8a9099;
+    --accent: #4a9eff;
+    --ok: #2eb872;
+    --err: #e25555;
+    --pad: 12px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    min-height: 100vh;
+  }
+  main { padding: var(--pad); }
+  /* Floating toast (replaces old header status pill) */
+  .toast {
+    position: fixed;
+    left: 50%; top: env(safe-area-inset-top, 8px);
+    transform: translateX(-50%) translateY(-100%);
+    background: var(--card);
+    color: var(--fg);
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    opacity: 0;
+    transition: opacity 0.15s, transform 0.18s;
+    pointer-events: none;
+    z-index: 50;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(8px); }
+  .toast.ok  { color: var(--ok); }
+  .toast.err { color: var(--err); }
+
+  button.btn {
+    appearance: none;
+    border: none;
+    background: var(--card);
+    color: var(--fg);
+    padding: 18px 8px;
+    border-radius: 10px;
+    font-size: 15px;
+    font-weight: 500;
+    min-height: 60px;
+    touch-action: manipulation;
+    transition: background 0.08s;
+    cursor: pointer;
+  }
+  button.btn:active { background: var(--card-hi); }
+  button.btn.busy { opacity: 0.5; }
+
+  .keypad { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; margin-bottom: 16px; }
+  .keypad button { font-size: 13px; padding: 12px 4px; min-height: 44px; }
+
+  /* Screen view */
+  .screen-toolbar {
+    display: flex; gap: 8px; margin-bottom: 10px; align-items: center; flex-wrap: wrap;
+  }
+  .screen-toolbar button {
+    appearance: none; border: none; background: var(--card); color: var(--fg);
+    padding: 8px 14px; border-radius: 8px; font: inherit; cursor: pointer;
+  }
+  .screen-toolbar button:active { background: var(--card-hi); }
+  .screen-toolbar button.primary { background: var(--accent); color: white; }
+  .screen-toolbar select {
+    background: var(--card); color: var(--fg); border: 1px solid #2a2e35;
+    border-radius: 8px; padding: 7px 8px; font: inherit;
+  }
+  .screen-meta { font-size: 11px; color: var(--dim); }
+
+  .screen-wrap {
+    position: relative;
+    background: #000;
+    border: 2px solid #e25555;           /* red frame around the display window */
+    border-radius: 10px;
+    overflow: hidden;                    /* scrolling happens via the trackpad below */
+    max-height: 55vh;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .screen-wrap img {
+    display: block;
+    /* No width:100% — render at native pixel size. */
+    pointer-events: none;
+  }
+
+  /* Trackpad: absolute-positioning navigator. Aspect matches the screenshot,
+     so touch position maps directly to where on the screenshot you want to view. */
+  /* Row: arrow-pad | screen-pad (rotated minimap) | click-actions */
+  .pad-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+    align-items: flex-start;
+  }
+
+  /* 5-col × 2-row grid: nav + edit keys + system shortcuts.
+     Short buttons to save vertical space. */
+  .nav-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 6px;
+    margin-top: 12px;
+  }
+  .nav-grid button {
+    appearance: none; border: none;
+    background: var(--card); color: var(--fg);
+    border-radius: 8px;
+    padding: 6px 4px;
+    min-height: 34px;
+    font: inherit; font-size: 13px; font-weight: 600;
+    cursor: pointer; touch-action: manipulation;
+    white-space: nowrap; overflow: hidden;
+  }
+  .nav-grid button:active { background: var(--card-hi); }
+
+  /* Quick keys: 2x2 grid in the pad-row, sized to match minimap height */
+  .quick-keys {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 4px;
+    align-self: flex-start;
+  }
+  .quick-keys button {
+    appearance: none; border: none;
+    background: var(--card); color: var(--fg);
+    border-radius: 8px;
+    font: inherit; font-size: 13px; font-weight: 600;
+    cursor: pointer; touch-action: manipulation;
+    white-space: nowrap; overflow: hidden;
+  }
+  .quick-keys button:active { background: var(--card-hi); }
+
+  /* Cursor-precision pad — aspect = the screenshot DISPLAY CONTAINER's aspect
+     (screen-wrap, which is smaller than the full screenshot image). Touching
+     a spot here moves the click marker to the corresponding spot inside that
+     visible viewport. */
+  .cursor-pad {
+    flex: 1;                            /* fill remaining row width */
+    background: var(--card);
+    border: 1px dashed #2a3038;
+    border-radius: 10px;
+    position: relative;
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    aspect-ratio: 2 / 3;                /* initial: portrait (h:w = 3:2). JS overrides on image load. */
+  }
+  .cursor-pad .cp-hint {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--dim); font-size: 11px;
+    pointer-events: none;
+  }
+  .cursor-pad .cp-dot {
+    position: absolute;
+    width: 12px; height: 12px;
+    background: var(--accent);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    opacity: 0;
+  }
+  .cursor-pad.active .cp-dot  { opacity: 0.9; }
+  .cursor-pad.active .cp-hint { opacity: 0.15; }
+
+  .screen-pad {
+    flex: 0 0 35%;
+    aspect-ratio: 16 / 10;             /* landscape — matches screenshot. JS overrides after load. */
+    background: var(--card) center/cover no-repeat;
+    border: 1px dashed #2a3038;
+    border-radius: 10px;
+    position: relative;
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .click-actions {
+    display: flex;
+    flex-direction: row;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .click-actions button {
+    appearance: none; border: none;
+    background: var(--card); color: var(--fg);
+    flex: 1;
+    min-height: 56px;
+    border-radius: 10px;
+    font: inherit; font-weight: 600; font-size: 15px;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  .click-actions button:active { background: var(--card-hi); }
+  .click-actions button.armed,
+  .click-actions button.primary { background: var(--accent); color: white; }
+  .click-actions button:disabled { opacity: 0.35; cursor: default; }
+  .shot-info-row {
+    text-align: center;
+    margin-top: 6px;
+    color: var(--dim);
+    font-size: 11px;
+  }
+  .selected-info {
+    text-align: center;
+    color: var(--dim); font-size: 11px;
+    padding: 4px 0 0;
+  }
+
+  .screen-pad.has-image { border-style: solid; border-color: #353a45; }
+  .screen-pad .pad-hint { font-size: 11px; padding: 0 8px; text-align: center; }
+  .screen-pad.has-image .pad-hint { display: none; }
+  .screen-pad .pad-vp {
+    /* slightly louder over the screenshot bg */
+    background: rgba(74,158,255,0.18);
+    border-width: 2px;
+  }
+  .screen-pad .pad-hint {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--dim); font-size: 13px;
+    pointer-events: none;
+    transition: opacity 0.15s;
+  }
+  /* "Viewport rectangle" — shows which slice of the full screenshot is currently visible */
+  .screen-pad .pad-vp {
+    position: absolute;
+    border: 1.5px solid var(--accent);
+    background: rgba(74,158,255,0.10);
+    pointer-events: none;
+    border-radius: 3px;
+    transition: left 0.08s, top 0.08s;
+  }
+  .screen-pad .pad-dot {
+    position: absolute;
+    width: 14px; height: 14px;
+    background: var(--accent);
+    border-radius: 50%;
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+  }
+  .screen-pad.active .pad-dot  { opacity: 0.9; }
+  .screen-pad.active .pad-hint { opacity: 0.15; }
+  .screen-wrap svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    background: #fff;
+  }
+  .screen-wrap svg text {
+    fill: #111;
+    font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+    pointer-events: none;
+    /* No dominant-baseline — we measure with getBBox() and set dy manually */
+  }
+  .screen-wrap .empty {
+    color: var(--dim);
+    padding: 60px 20px;
+    text-align: center;
+    font-size: 14px;
+  }
+  .click-marker {
+    position: absolute;
+    width: 22px; height: 22px;
+    border: 2px solid var(--accent);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    opacity: 0;
+    box-shadow: 0 0 0 2px rgba(74,158,255,0.25);
+  }
+  .click-marker.show { opacity: 1; }
+
+  .scroll-pad {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .scroll-pad button {
+    appearance: none; border: none; background: var(--card); color: var(--fg);
+    padding: 14px; border-radius: 8px; font: inherit; cursor: pointer;
+  }
+  .scroll-pad button:active { background: var(--card-hi); }
+
+  .live-bar {
+    display: flex; gap: 8px; align-items: center;
+    background: var(--card); border-radius: 10px;
+    padding: 8px; margin-bottom: 10px;
+  }
+  .live-bar input.live-text {
+    flex: 1;
+    background: #0a0c0f; color: var(--fg);
+    border: 1px solid #2a2e35; border-radius: 8px;
+    padding: 10px; font: inherit;
+  }
+  .live-bar label.live-toggle {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 13px; color: var(--dim);
+    cursor: pointer; user-select: none;
+  }
+  .live-bar label.live-toggle.on { color: var(--ok); }
+  .live-bar label.live-toggle input { accent-color: var(--ok); }
+  .live-bar button.live-send {
+    appearance: none; border: none;
+    background: var(--accent); color: white;
+    padding: 0 14px;
+    border-radius: 8px;
+    font: inherit; font-weight: 600;
+    cursor: pointer; touch-action: manipulation;
+  }
+  .live-bar button.live-send:active { opacity: 0.7; }
+
+  /* Unlock modal */
+  .modal-bg {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.7);
+    display: none; align-items: center; justify-content: center;
+    z-index: 100;
+    padding: 20px;
+  }
+  .modal-bg.show { display: flex; }
+  .modal {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 20px;
+    max-width: 360px; width: 100%;
+    color: var(--fg);
+  }
+  .modal h3 { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
+  .modal .hint { color: var(--dim); font-size: 12px; margin: 0 0 14px; line-height: 1.5; }
+  .modal input[type="password"] {
+    width: 100%;
+    background: #0a0c0f;
+    color: var(--fg);
+    border: 1px solid #2a2e35;
+    border-radius: 8px;
+    padding: 12px;
+    font: inherit;
+    margin-bottom: 12px;
+  }
+  .modal-row { display: flex; gap: 8px; }
+  .modal-row button {
+    appearance: none; border: none; flex: 1;
+    padding: 12px; border-radius: 8px;
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .modal-row .cancel { background: #2a2e35; color: var(--fg); }
+  .modal-row .primary { background: var(--accent); color: white; }
+  .modal label.opt { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--dim); margin-bottom: 12px; }
+
+  /* Desktop / wide browser: the same layout looks bloated when the touchpads
+     scale up with viewport width. Cap them at modest sizes; let the screenshot
+     itself fill the page. Controls stay centered with a comfortable max-width. */
+  @media (min-width: 700px) {
+    main { max-width: none; }
+
+    /* Screenshot keeps full available width (large display area) */
+    .screen-wrap { max-height: 75vh; }
+
+    /* Touch pads stay small, regardless of viewport */
+    .screen-pad  { flex: 0 0 auto; width: 160px; }
+    .cursor-pad  { max-width: 120px; }
+
+    /* Other controls don't need to span the whole monitor */
+    .pad-row,
+    .live-bar,
+    .screen-toolbar,
+    .click-actions,
+    .nav-grid,
+    .keypad { max-width: 680px; }
+
+    /* Centered control column under the wide screenshot */
+    .pad-row, .live-bar, .screen-toolbar,
+    .click-actions, .nav-grid, .keypad,
+    .selected-info { margin-left: auto; margin-right: auto; }
+  }
+</style>
+</head>
+<body>
+
+<div class="toast" id="toast"></div>
+
+<main>
+
+<section id="view-screen">
+
+  <div class="screen-wrap" id="screenWrap">
+    <div class="empty">Tap Refresh below to load screenshot. Then tap to click, long-press for right-click.</div>
+  </div>
+
+  <div class="pad-row">
+    <div class="screen-pad" id="screenPad">
+      <span class="pad-hint">touch to jump</span>
+      <span class="pad-vp" id="padViewport"></span>
+      <span class="pad-dot" id="padDot"></span>
+    </div>
+    <div class="quick-keys">
+      <button onclick="sendKey('Return')">⏎</button>
+      <button onclick="sendKey('Escape')">Esc</button>
+      <button onclick="openUnlockModal()">Unlock</button>
+      <button onclick="sendKey('ctrl+cmd+q')">Lock</button>
+    </div>
+    <div class="cursor-pad" id="cursorPad">
+      <span class="cp-hint">cursor</span>
+      <span class="cp-dot" id="cursorDot"></span>
+    </div>
+  </div>
+  <div class="selected-info" id="selectedInfo"></div>
+
+  <div class="click-actions">
+    <button class="primary" onclick="refreshScreenshot('photo')">↻ Refresh</button>
+    <button id="btnDouble" onclick="fireClickAction('left',  true)"  disabled>Dbl-Click</button>
+    <button id="btnRight"  onclick="fireClickAction('right', false)" disabled>R-Click</button>
+    <button id="btnClick"  onclick="fireClickAction('left',  false)" disabled>Click</button>
+  </div>
+
+  <div class="shot-info-row">
+    <span class="screen-meta" id="shotInfo"></span>
+  </div>
+
+  <div class="live-bar">
+    <input class="live-text" id="liveText" placeholder="Type here → sends to focused Mac app" autocapitalize="off" autocorrect="off" autocomplete="off" />
+    <button class="live-send" id="liveSend">Send</button>
+    <label class="live-toggle" id="liveToggleLabel"><input type="checkbox" id="liveOn">Live</label>
+  </div>
+
+  <!-- 2 rows × 5 cols. "new-line" in the spec = row break (not a button). -->
+  <div class="nav-grid">
+    <button onclick="sendScroll(0, 400)">PgUp</button>
+    <button onclick="sendKey('Up')">↑</button>
+    <button onclick="sendScroll(0, -400)">PgDn</button>
+    <button onclick="sendKey('Tab')">⇥</button>
+    <button onclick="sendKey('Backspace')">⌫</button>
+    <button onclick="sendKey('Left')">←</button>
+    <button onclick="sendKey('Down')">↓</button>
+    <button onclick="sendKey('Right')">→</button>
+    <button onclick="runAction(this, {label:'Wake', type:'wake', target:''})">💡 Wake</button>
+    <button onclick="runAction(this, {label:'Dock', type:'show_dock', target:''})">Dock</button>
+  </div>
+
+
+  <!-- Capture options, parked at the bottom -->
+  <div class="screen-toolbar" style="margin-top: 16px;">
+    <label class="screen-meta">Quality:
+      <select id="quality">
+        <option value="30" selected>low (30)</option>
+        <option value="50">med (50)</option>
+        <option value="75">high (75)</option>
+      </select>
+    </label>
+    <label class="screen-meta">Resolution:
+      <select id="maxdim">
+        <option value="640">640px</option>
+        <option value="960">960px</option>
+        <option value="1280" selected>1280px</option>
+        <option value="1600">1600px</option>
+      </select>
+    </label>
+    <label class="screen-meta">Auto:
+      <select id="autoRefresh">
+        <option value="0" selected>off</option>
+        <option value="3">3s</option>
+        <option value="10">10s</option>
+        <option value="30">30s</option>
+      </select>
+    </label>
+  </div>
+
+</section>
+
+</main>
+
+<div id="tokenBar" style="display:none; padding:10px; background:#2a1f1f; color:#f0c878; position:fixed; bottom:0; left:0; right:0; font-size:13px;">
+  Token required:
+  <input type="password" id="tokenInput" placeholder="cc_web token" style="background:transparent;border:1px solid #5a4838;color:inherit;border-radius:6px;padding:4px 8px;margin-left:8px;font:inherit;" />
+  <button onclick="saveToken()" style="margin-left:8px;">save</button>
+</div>
+
+<div class="modal-bg" id="unlockModal">
+  <div class="modal">
+    <h3>🔓 Wake &amp; Unlock Mac</h3>
+    <p class="hint">Wakes the display, types the password at HID level, then presses Return. Password is sent over Tailscale + never stored.</p>
+    <input type="password" id="unlockPassword" placeholder="Mac password" autocomplete="off" />
+    <label class="opt"><input type="checkbox" id="unlockWake" checked> wake display first</label>
+    <div class="modal-row">
+      <button class="cancel" onclick="closeUnlockModal()">Cancel</button>
+      <button class="primary" onclick="submitUnlock()">Wake &amp; Send</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const status = document.getElementById('toast');
+  const tokenBar = document.getElementById('tokenBar');
+  const tokenInput = document.getElementById('tokenInput');
+  let token = localStorage.getItem('cc_web_token') || '';
+  tokenInput.value = token;
+
+  function saveToken() {
+    token = tokenInput.value;
+    localStorage.setItem('cc_web_token', token);
+    tokenBar.style.display = 'none';
+  }
+
+  function flash(msg, ok = true) {
+    if (!status) return;
+    status.textContent = msg;
+    status.className = 'toast show ' + (ok ? 'ok' : 'err');
+    clearTimeout(flash._t);
+    flash._t = setTimeout(() => { status.className = 'toast'; }, 1500);
+  }
+
+  async function req(path, body) {
+    const opts = {
+      method: body ? 'POST' : 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    };
+    if (token) opts.headers['Authorization'] = 'Bearer ' + token;
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetch(path, opts);
+    if (r.status === 401) {
+      tokenBar.style.display = 'block';
+      throw new Error('unauthorized');
+    }
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || data.ok === false) throw new Error(data.error || r.statusText);
+    return data;
+  }
+
+  // ── Buttons ────────────────────────────────────
+  async function runAction(btn, action) {
+    if (btn.classList.contains('busy')) return;
+    if (action.type === 'unlock_prompt') { openUnlockModal(); return; }
+    btn.classList.add('busy');
+    if (navigator.vibrate) navigator.vibrate(8);
+    try {
+      await req('api/run', { type: action.type, target: action.target });
+      flash(action.label + ' ✓', true);
+      scheduleAutoReload(500);    // any action likely changes the screen — refresh
+    } catch (e) {
+      flash(action.label + ' ✗ ' + e.message, false);
+    } finally {
+      setTimeout(() => btn.classList.remove('busy'), 120);
+    }
+  }
+
+  // ── Unlock modal ───────────────────────────────
+  const unlockModal = document.getElementById('unlockModal');
+  const unlockPasswordEl = document.getElementById('unlockPassword');
+  const unlockWakeEl = document.getElementById('unlockWake');
+
+  function openUnlockModal() {
+    unlockPasswordEl.value = '';
+    unlockModal.classList.add('show');
+    setTimeout(() => unlockPasswordEl.focus(), 50);
+  }
+  function closeUnlockModal() {
+    unlockModal.classList.remove('show');
+    unlockPasswordEl.value = '';
+  }
+  async function submitUnlock() {
+    const pwd = unlockPasswordEl.value;
+    if (!pwd) { flash('empty', false); return; }
+    try {
+      await req('api/unlock', { password: pwd, wake: unlockWakeEl.checked });
+      flash('unlock sent ✓', true);
+      closeUnlockModal();
+    } catch (e) {
+      flash('unlock ✗ ' + e.message, false);
+    }
+  }
+  // Submit on Enter inside the password field
+  unlockPasswordEl.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); submitUnlock(); }
+    else if (ev.key === 'Escape') { closeUnlockModal(); }
+  });
+  // Tap on the dim background closes
+  unlockModal.addEventListener('click', (ev) => {
+    if (ev.target === unlockModal) closeUnlockModal();
+  });
+
+  async function sendKey(key) {
+    if (navigator.vibrate) navigator.vibrate(8);
+    try {
+      await req('api/key', { key });
+      flash(key + ' ✓', true);
+    } catch (e) {
+      flash('✗ ' + e.message, false);
+    }
+  }
+
+  // ── Screen view ────────────────────────────────
+  const screenWrap = document.getElementById('screenWrap');
+  const shotInfo = document.getElementById('shotInfo');
+  let screenW = 0, screenH = 0;  // logical screen size (for click coord mapping)
+  let imgEl = null;
+  let lastMode = null;           // 'photo' | 'edges' | 'text' — what's currently shown
+  let autoReloadTimer = null;    // one-shot auto-refresh after click/key
+  let autoRefreshInterval = null;// recurring auto-refresh (polling)
+  let currentBlobUrl = null;     // shared between <img> and trackpad bg — revoked on next refresh
+
+  function scheduleAutoReload(delayMs = 500) {
+    if (!lastMode) return;
+    if (autoReloadTimer) clearTimeout(autoReloadTimer);
+    autoReloadTimer = setTimeout(() => {
+      autoReloadTimer = null;
+      refreshScreenshot(lastMode);
+    }, delayMs);
+  }
+
+  function applyAutoRefresh() {
+    const sec = parseInt(document.getElementById('autoRefresh').value, 10);
+    if (autoRefreshInterval) { clearInterval(autoRefreshInterval); autoRefreshInterval = null; }
+    if (!sec || sec <= 0) return;
+    autoRefreshInterval = setInterval(() => {
+      if (document.hidden || !lastMode) return;
+      refreshScreenshot(lastMode);
+    }, sec * 1000);
+  }
+
+  async function refreshScreenshot(mode = 'photo') {
+    const q = document.getElementById('quality').value;
+    const w = document.getElementById('maxdim').value;
+    flash(mode === 'edges' ? 'edge-detecting…' : mode === 'text' ? 'ocr…' : 'capturing…', true);
+    try {
+      if (mode === 'text') {
+        await loadTextMode();
+        return;
+      }
+      let url;
+      if (mode === 'edges') {
+        const edgeMode = document.getElementById('edgeMode')?.value || 'threshold';
+        url = `api/screenshot/edges?mode=${edgeMode}&w=${w}&_=${Date.now()}`;
+      } else {
+        url = `api/screenshot?q=${q}&w=${w}&_=${Date.now()}`;
+      }
+      const r = await fetch(url, { headers: token ? { 'Authorization': 'Bearer ' + token } : {} });
+      if (r.status === 401) { tokenBar.style.display = 'block'; throw new Error('unauthorized'); }
+      if (!r.ok) throw new Error(r.statusText);
+      screenW = parseInt(r.headers.get('X-Screen-W') || '0', 10);
+      screenH = parseInt(r.headers.get('X-Screen-H') || '0', 10);
+      const blob = await r.blob();
+      // Save current scroll + the natural dims it was relative to,
+      // so we can restore the view after the new image loads.
+      const prevScroll = imgEl && imgEl.naturalWidth
+        ? { x: screenWrap.scrollLeft, y: screenWrap.scrollTop,
+            iw: imgEl.naturalWidth,  ih: imgEl.naturalHeight }
+        : null;
+
+      if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+      currentBlobUrl = URL.createObjectURL(blob);
+
+      screenWrap.innerHTML = '';
+      imgEl = document.createElement('img');
+      imgEl.src = currentBlobUrl;
+      imgEl.addEventListener('load', () => {
+        setPadAspect();
+        // Restore scroll. If natural dims changed (different width param), scale
+        // proportionally so the same image region remains visible.
+        if (prevScroll && imgEl.naturalWidth && imgEl.naturalHeight) {
+          const sx = imgEl.naturalWidth  / prevScroll.iw;
+          const sy = imgEl.naturalHeight / prevScroll.ih;
+          screenWrap.scrollLeft = prevScroll.x * sx;
+          screenWrap.scrollTop  = prevScroll.y * sy;
+        }
+        drawPadViewport();
+        repositionMarker();
+      }, { once: true });
+      screenWrap.appendChild(imgEl);
+
+      // Trackpad uses the same image directly (no rotation)
+      screenPad.style.backgroundImage = `url(${currentBlobUrl})`;
+      screenPad.classList.add('has-image');
+      const marker = document.createElement('div');
+      marker.className = 'click-marker';
+      marker.id = 'clickMarker';
+      screenWrap.appendChild(marker);
+
+      shotInfo.textContent = `${screenW}×${screenH} · ${(blob.size/1024).toFixed(0)} KB`;
+      flash((mode === 'edges' ? 'edges' : 'screenshot') + ' ✓', true);
+      lastMode = mode;
+    } catch (e) {
+      flash('shot ✗ ' + e.message, false);
+    }
+  }
+
+  async function loadTextMode() {
+    const t0 = Date.now();
+    const w = document.getElementById('maxdim').value;
+    const struct = document.getElementById('structAlg')?.value || 'canny';
+    const data = await req(`api/screenshot/text?edges=${struct === 'none' ? 0 : 1}&struct=${struct}&ew=${w}`);
+    screenW = data.screen_w; screenH = data.screen_h;
+    const items = data.items || [];
+    const VB = 1000;
+    const aspect = screenH / screenW;
+    const vbH = Math.round(VB * aspect);
+    const parts = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${VB} ${vbH}" preserveAspectRatio="xMidYMid meet">`];
+    const bgs = items.map(i => i.bg).filter(Boolean);
+    const pageBg = bgs.length ? bgs.sort()[Math.floor(bgs.length / 2)] : '#ffffff';
+
+    if (data.edges_png_b64) {
+      parts.push(`<defs><filter id="ed"><feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 0 0 0 0"/></filter></defs>`);
+    }
+
+    parts.push(`<rect width="${VB}" height="${vbH}" fill="${pageBg}"/>`);
+    if (data.edges_png_b64) {
+      parts.push(
+        `<image x="0" y="0" width="${VB}" height="${vbH}" preserveAspectRatio="none" ` +
+        `filter="url(#ed)" opacity="0.6" ` +
+        `href="data:image/png;base64,${data.edges_png_b64}"/>`
+      );
+    }
+
+    for (const it of items) {
+      const x = it.x * VB;
+      const y = it.y * vbH;
+      const w2 = it.w * VB;
+      const h = it.h * vbH;
+      const fs = h * 1.0;
+      const cy = y + h / 2;            // target vertical center of text
+      const bg = it.bg || '#ffffff';
+      const fg = it.fg || '#111111';
+      parts.push(`<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w2.toFixed(1)}" height="${h.toFixed(1)}" fill="${bg}"/>`);
+      const esc = it.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      // Render at natural width — no textLength here. Width fixup is done
+      // post-layout: we only COMPRESS if natural width overflows the OCR
+      // bbox; we never stretch shorter text to fill the box.
+      parts.push(`<text data-cy="${cy.toFixed(2)}" data-tw="${w2.toFixed(1)}" x="${x.toFixed(1)}" y="${cy.toFixed(1)}" font-size="${fs.toFixed(1)}" fill="${fg}">${esc}</text>`);
+    }
+    parts.push('</svg>');
+    const svgText = parts.join('');
+
+    // Inject as inline DOM (not as blob <img>) so getBBox() works for centering.
+    screenWrap.innerHTML = svgText;
+    const svgEl = screenWrap.querySelector('svg');
+    imgEl = svgEl;  // click handler uses imgEl.getBoundingClientRect()
+
+    // Post-layout fixup per text element:
+    //   1. If natural rendered width > OCR bbox width → compress with
+    //      textLength so it fits (never stretch).
+    //   2. Vertical center: shift via dy so the rendered bbox center = target cy.
+    requestAnimationFrame(() => {
+      for (const tEl of svgEl.querySelectorAll('text')) {
+        try {
+          const bb = tEl.getBBox();
+          const targetW = parseFloat(tEl.getAttribute('data-tw'));
+          if (bb.width > targetW * 1.02) {  // 2% tolerance, then compress
+            tEl.setAttribute('textLength', targetW.toFixed(1));
+            tEl.setAttribute('lengthAdjust', 'spacingAndGlyphs');
+          }
+          const currentCy = bb.y + bb.height / 2;
+          const targetCy = parseFloat(tEl.getAttribute('data-cy'));
+          const dy = targetCy - currentCy;
+          if (isFinite(dy)) tEl.setAttribute('dy', dy.toFixed(2));
+        } catch (_) { /* element not measurable, skip */ }
+      }
+    });
+
+    const marker = document.createElement('div');
+    marker.className = 'click-marker'; marker.id = 'clickMarker';
+    screenWrap.appendChild(marker);
+    const edgeBytes = data.edges_png_b64 ? Math.floor(data.edges_png_b64.length * 3 / 4) : 0;
+    const usedStruct = data.struct_used || (data.edges_png_b64 ? 'canny' : 'none');
+    shotInfo.textContent = `${screenW}×${screenH} · ${(svgText.length/1024).toFixed(0)} KB (${usedStruct} ${(edgeBytes/1024).toFixed(0)} KB) · ${items.length} items, ${Date.now()-t0}ms`;
+    flash(`ocr ✓ ${items.length} items`, true);
+    lastMode = 'text';
+  }
+
+  // Tap on the screen image only SELECTS a position (shows marker).
+  // The click is fired by the Click / Double / Right buttons.
+  //
+  // Position is stored as VIEWPORT-fractional coords (0..1 of the visible
+  // window inside screen-wrap), NOT image content coords. So when the user
+  // pans via the minimap, the marker stays put inside the displaying window
+  // while the image scrolls behind it. The actual image-pixel target is
+  // recomputed from selectedVF at click time.
+  let touchStart = null;
+  let selectedVF = null;       // {xf, yf} — viewport-fractional in [0,1]
+
+  function onPointerDown(ev) {
+    if (!imgEl || !screenW) return;
+    const rect = imgEl.getBoundingClientRect();
+    const cx = (ev.touches ? ev.touches[0].clientX : ev.clientX);
+    const cy = (ev.touches ? ev.touches[0].clientY : ev.clientY);
+    touchStart = { x: cx, y: cy, t: Date.now(), rect };
+  }
+
+  function onPointerUp(ev) {
+    if (!touchStart) return;
+    const dt = Date.now() - touchStart.t;
+    const cx = (ev.changedTouches ? ev.changedTouches[0].clientX : ev.clientX);
+    const cy = (ev.changedTouches ? ev.changedTouches[0].clientY : ev.clientY);
+    const dx = cx - touchStart.x, dy = cy - touchStart.y;
+    if (dt < 600 && Math.hypot(dx, dy) < 8) {
+      selectPositionFromPoint(touchStart);
+    }
+    touchStart = null;
+  }
+
+  function onPointerCancel() { touchStart = null; }
+  function onPointerMove(ev) {
+    if (!touchStart) return;
+    const cx = (ev.touches ? ev.touches[0].clientX : ev.clientX);
+    const cy = (ev.touches ? ev.touches[0].clientY : ev.clientY);
+    if (Math.hypot(cx - touchStart.x, cy - touchStart.y) > 8) touchStart = null;
+  }
+
+  function selectPositionFromPoint(p) {
+    if (!imgEl || !screenW) return;
+    const wrapRect = screenWrap.getBoundingClientRect();
+    const viewportX = p.x - wrapRect.left;
+    const viewportY = p.y - wrapRect.top;
+    if (viewportX < 0 || viewportX > wrapRect.width ||
+        viewportY < 0 || viewportY > wrapRect.height) return;
+    setSelectedAtViewport(viewportX, viewportY);
+  }
+
+  function setSelectedAtViewport(viewportX, viewportY) {
+    selectedVF = {
+      xf: Math.max(0, Math.min(1, viewportX / screenWrap.clientWidth)),
+      yf: Math.max(0, Math.min(1, viewportY / screenWrap.clientHeight)),
+    };
+    if (navigator.vibrate) navigator.vibrate(8);
+    repositionMarker();
+    updateSelectedInfo();
+    document.getElementById('btnClick').disabled  = false;
+    document.getElementById('btnDouble').disabled = false;
+    document.getElementById('btnRight').disabled  = false;
+  }
+
+  // Marker is a child of screen-wrap (in image-content coords), so we add
+  // current scroll offsets to keep it visually anchored to the viewport.
+  function repositionMarker() {
+    const m = document.getElementById('clickMarker');
+    if (!m || !selectedVF) return;
+    const x = screenWrap.scrollLeft + selectedVF.xf * screenWrap.clientWidth;
+    const y = screenWrap.scrollTop  + selectedVF.yf * screenWrap.clientHeight;
+    m.style.left = x + 'px';
+    m.style.top  = y + 'px';
+    m.classList.add('show');
+  }
+
+  function updateSelectedInfo() {
+    const info = document.getElementById('selectedInfo');
+    if (!info || !selectedVF || !screenW || !imgEl || !imgEl.naturalWidth) return;
+    const imgX = screenWrap.scrollLeft + selectedVF.xf * screenWrap.clientWidth;
+    const imgY = screenWrap.scrollTop  + selectedVF.yf * screenWrap.clientHeight;
+    const macX = (imgX / imgEl.naturalWidth)  * screenW;
+    const macY = (imgY / imgEl.naturalHeight) * screenH;
+    info.textContent = `@ ${Math.round(macX)},${Math.round(macY)}`;
+  }
+
+  // Recompute marker visual position whenever the viewport scrolls (via minimap)
+  screenWrap.addEventListener('scroll', () => { repositionMarker(); updateSelectedInfo(); });
+
+  async function fireClickAction(button, double) {
+    if (!selectedVF || !imgEl || !imgEl.naturalWidth) { flash('pick a spot first', false); return; }
+    const imgX = screenWrap.scrollLeft + selectedVF.xf * screenWrap.clientWidth;
+    const imgY = screenWrap.scrollTop  + selectedVF.yf * screenWrap.clientHeight;
+    const xf = imgX / imgEl.naturalWidth;
+    const yf = imgY / imgEl.naturalHeight;
+    if (navigator.vibrate) navigator.vibrate(button === 'right' ? 20 : 10);
+    try {
+      const d = await req('api/click', { xf, yf, button, double });
+      flash(`${button}${double ? '×2' : ''} @ ${Math.round(d.x)},${Math.round(d.y)} ✓`, true);
+      scheduleAutoReload(500);
+    } catch (e) {
+      flash('click ✗ ' + e.message, false);
+    }
+  }
+
+  screenWrap.addEventListener('touchstart', onPointerDown, { passive: true });
+  screenWrap.addEventListener('touchmove', onPointerMove, { passive: true });
+  screenWrap.addEventListener('touchend', onPointerUp, { passive: true });
+  screenWrap.addEventListener('touchcancel', onPointerCancel, { passive: true });
+  screenWrap.addEventListener('mousedown', onPointerDown);
+  screenWrap.addEventListener('mouseup', onPointerUp);
+
+  // ── Trackpad: absolute jump-to navigator ──────
+  // Touch position on the pad maps directly to "what region of the screenshot
+  // do you want to view". Pad's aspect ratio matches the screenshot's so the
+  // mapping is intuitive (touching top-right of pad jumps to top-right of img).
+  const screenPad = document.getElementById('screenPad');
+  const padDot = document.getElementById('padDot');
+  const padViewport = document.getElementById('padViewport');
+  let padActive = false;
+
+  function syncArrowPadHeight() {
+    const padH = screenPad.offsetHeight;
+    // Quick-keys (2x2 in pad-row): TOTAL height = minimap height, so each
+    // of the 2 rows of buttons is exactly half of the minimap pad's height.
+    const qk = document.querySelector('.quick-keys');
+    if (qk && padH) qk.style.height = padH + 'px';
+    // Cursor-pad: match minimap height. Aspect = CSS default 2/3 INITIALLY;
+    // after the screenshot has actually loaded, switch to the real display
+    // window's aspect (screen-wrap clientW/H).
+    const cp = document.getElementById('cursorPad');
+    if (cp && padH) {
+      cp.style.flex = '0 0 auto';
+      cp.style.height = padH + 'px';
+      if (imgEl && imgEl.naturalWidth &&
+          screenWrap.clientWidth && screenWrap.clientHeight) {
+        cp.style.aspectRatio = `${screenWrap.clientWidth} / ${screenWrap.clientHeight}`;
+      }
+    }
+  }
+
+  function setPadAspect() {
+    if (!imgEl || !imgEl.naturalWidth) return;
+    screenPad.style.aspectRatio = imgEl.naturalWidth + ' / ' + imgEl.naturalHeight;
+    requestAnimationFrame(syncArrowPadHeight);
+  }
+
+  // Run once at startup (before any image) and on every viewport resize so
+  // the arrow keys don't jump in size after the first refresh.
+  window.addEventListener('load', () => requestAnimationFrame(syncArrowPadHeight));
+  window.addEventListener('resize', syncArrowPadHeight);
+
+  // Whenever screen-wrap actually re-lays-out (image swap, max-height kicking
+  // in, etc.), re-sync cursor-pad aspect to it. This avoids stale ratios.
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(() => syncArrowPadHeight()).observe(screenWrap);
+    new ResizeObserver(() => syncArrowPadHeight()).observe(screenPad);
+  }
+
+  function drawPadViewport() {
+    if (!imgEl || !imgEl.naturalWidth) { padViewport.style.display = 'none'; return; }
+    const padRect = screenPad.getBoundingClientRect();
+    const iw = imgEl.naturalWidth, ih = imgEl.naturalHeight;
+    const vw = screenWrap.clientWidth, vh = screenWrap.clientHeight;
+    const left = (screenWrap.scrollLeft / iw) * padRect.width;
+    const top  = (screenWrap.scrollTop  / ih) * padRect.height;
+    const w    = (vw / iw) * padRect.width;
+    const h    = (vh / ih) * padRect.height;
+    padViewport.style.display = (w >= padRect.width - 1 && h >= padRect.height - 1) ? 'none' : 'block';
+    padViewport.style.left   = left + 'px';
+    padViewport.style.top    = top  + 'px';
+    padViewport.style.width  = w + 'px';
+    padViewport.style.height = h + 'px';
+  }
+
+  function padJump(cx, cy) {
+    if (!imgEl || !imgEl.naturalWidth) return;
+    const rect = screenPad.getBoundingClientRect();
+    let xf = (cx - rect.left) / rect.width;
+    let yf = (cy - rect.top)  / rect.height;
+    xf = Math.max(0, Math.min(1, xf));
+    yf = Math.max(0, Math.min(1, yf));
+    const iw = imgEl.naturalWidth, ih = imgEl.naturalHeight;
+    const vw = screenWrap.clientWidth, vh = screenWrap.clientHeight;
+    let sl = xf * iw - vw / 2;
+    let st = yf * ih - vh / 2;
+    sl = Math.max(0, Math.min(Math.max(0, iw - vw), sl));
+    st = Math.max(0, Math.min(Math.max(0, ih - vh), st));
+    screenWrap.scrollLeft = sl;
+    screenWrap.scrollTop  = st;
+    padDot.style.left = (cx - rect.left) + 'px';
+    padDot.style.top  = (cy - rect.top)  + 'px';
+    drawPadViewport();
+  }
+
+  function padDown(cx, cy) { padActive = true;  screenPad.classList.add('active');   padJump(cx, cy); }
+  function padMove(cx, cy) { if (padActive)     padJump(cx, cy); }
+  function padEnd()        { padActive = false; screenPad.classList.remove('active'); }
+
+  screenPad.addEventListener('touchstart', (ev) => {
+    ev.preventDefault();
+    const t = ev.touches[0]; padDown(t.clientX, t.clientY);
+  }, { passive: false });
+  screenPad.addEventListener('touchmove', (ev) => {
+    ev.preventDefault();
+    const t = ev.touches[0]; padMove(t.clientX, t.clientY);
+  }, { passive: false });
+  screenPad.addEventListener('touchend',    padEnd);
+  screenPad.addEventListener('touchcancel', padEnd);
+  // Mouse for desktop testing
+  screenPad.addEventListener('mousedown', (ev) => { ev.preventDefault(); padDown(ev.clientX, ev.clientY); });
+  window.addEventListener('mousemove', (ev) => { if (padActive) padMove(ev.clientX, ev.clientY); });
+  window.addEventListener('mouseup',   () => { if (padActive) padEnd(); });
+
+  // ── Cursor-precision pad ───────────────────────
+  // Aspect = current visible viewport of the screenshot. Touching here
+  // places the click marker inside that viewport without scrolling.
+  const cursorPad = document.getElementById('cursorPad');
+  const cursorDot = document.getElementById('cursorDot');
+  let cursorActive = false;
+
+  function cursorPadAt(cx, cy) {
+    if (!imgEl || !imgEl.naturalWidth) return;
+    const rect = cursorPad.getBoundingClientRect();
+    let xf_pad = (cx - rect.left) / rect.width;
+    let yf_pad = (cy - rect.top)  / rect.height;
+    xf_pad = Math.max(0, Math.min(1, xf_pad));
+    yf_pad = Math.max(0, Math.min(1, yf_pad));
+    cursorDot.style.left = (cx - rect.left) + 'px';
+    cursorDot.style.top  = (cy - rect.top)  + 'px';
+    // Pad fractions map 1:1 to viewport fractions (same aspect)
+    setSelectedAtViewport(xf_pad * screenWrap.clientWidth, yf_pad * screenWrap.clientHeight);
+  }
+
+  function cursorDown(cx, cy) { cursorActive = true;  cursorPad.classList.add('active');   cursorPadAt(cx, cy); }
+  function cursorMove(cx, cy) { if (cursorActive)     cursorPadAt(cx, cy); }
+  function cursorEnd()        { cursorActive = false; cursorPad.classList.remove('active'); }
+
+  cursorPad.addEventListener('touchstart', (ev) => {
+    ev.preventDefault();
+    const t = ev.touches[0]; cursorDown(t.clientX, t.clientY);
+  }, { passive: false });
+  cursorPad.addEventListener('touchmove', (ev) => {
+    ev.preventDefault();
+    const t = ev.touches[0]; cursorMove(t.clientX, t.clientY);
+  }, { passive: false });
+  cursorPad.addEventListener('touchend',    cursorEnd);
+  cursorPad.addEventListener('touchcancel', cursorEnd);
+  cursorPad.addEventListener('mousedown', (ev) => { ev.preventDefault(); cursorDown(ev.clientX, ev.clientY); });
+  window.addEventListener('mousemove', (ev) => { if (cursorActive) cursorMove(ev.clientX, ev.clientY); });
+  window.addEventListener('mouseup',   () => { if (cursorActive) cursorEnd(); });
+
+  async function sendScroll(dx, dy) {
+    try {
+      await req('api/scroll', { dx, dy });
+      flash(`scroll ${dy > 0 ? '↑' : '↓'} ${Math.abs(dy)} ✓`, true);
+      scheduleAutoReload(500);
+    } catch (e) {
+      flash('scroll ✗ ' + e.message, false);
+    }
+  }
+
+  // ── Live typing in Screen view ─────────────────
+  // Per-keystroke forward to Mac. Backspace/Enter/Tab/arrows map to /key.
+  const liveText = document.getElementById('liveText');
+  const liveOn = document.getElementById('liveOn');
+  const liveToggleLabel = document.getElementById('liveToggleLabel');
+  function syncLiveLabel() { liveToggleLabel.classList.toggle('on', liveOn.checked); }
+  liveOn.addEventListener('change', syncLiveLabel);
+  syncLiveLabel();
+
+  const KEY_MAP = {
+    'Enter': 'Return',
+    'Tab': 'Tab',
+    'Escape': 'Escape',
+    'Backspace': 'Backspace',
+    'Delete': 'ForwardDelete',
+    'ArrowUp': 'Up', 'ArrowDown': 'Down', 'ArrowLeft': 'Left', 'ArrowRight': 'Right',
+  };
+
+  // Avoid double-send when both keydown and input fire (desktop browsers do this).
+  let recentSendAt = 0;
+  let recentSendVal = '';
+  function markSend(v) { recentSendAt = Date.now(); recentSendVal = v; }
+  function isDuplicate(v) { return Date.now() - recentSendAt < 80 && recentSendVal === v; }
+
+  // Send button: when Live is OFF, the user types into liveText buffer locally
+  // and clicks Send (or presses Enter) to flush it to Mac.
+  async function sendBuffered() {
+    const text = liveText.value;
+    if (!text) return;
+    try {
+      await req('api/type', { text });
+      flash(`sent ${text.length} chars ✓`, true);
+      liveText.value = '';
+      scheduleAutoReload(500);
+    } catch (e) {
+      flash('send ✗ ' + e.message, false);
+    }
+  }
+  document.getElementById('liveSend').addEventListener('click', sendBuffered);
+
+  liveText.addEventListener('keydown', async (ev) => {
+    // Live OFF: let the input accumulate. Pressing Enter triggers Send.
+    if (!liveOn.checked) {
+      if (ev.key === 'Enter') { ev.preventDefault(); sendBuffered(); }
+      return;
+    }
+    const k = ev.key;
+    // Soft keyboard / IME composition often surfaces here as Unidentified / Process — let input handler take it.
+    if (k === 'Unidentified' || k === 'Process') return;
+
+    // Special keys → /key
+    if (KEY_MAP[k]) {
+      ev.preventDefault();
+      const mappedKey = KEY_MAP[k];
+      // Apply modifiers (cmd/ctrl/alt/shift)
+      const mods = [];
+      if (ev.metaKey) mods.push('cmd');
+      if (ev.ctrlKey) mods.push('ctrl');
+      if (ev.altKey) mods.push('opt');
+      if (ev.shiftKey && (mods.length > 0 || mappedKey.length > 1)) mods.push('shift');
+      const keySpec = mods.length ? mods.join('+') + '+' + mappedKey : mappedKey;
+      try {
+        await req('api/key', { key: keySpec });
+        flash(keySpec + ' ✓', true);
+        scheduleAutoReload(500);
+      } catch (e) { flash('key ✗ ' + e.message, false); }
+      // Also let local echo for Enter/etc happen visually? we cancelled, so clear local input on Enter
+      if (k === 'Enter') liveText.value = '';
+      return;
+    }
+
+    // Modifier + letter (e.g. cmd+c, cmd+v) → /key
+    if ((ev.metaKey || ev.ctrlKey || ev.altKey) && k.length === 1) {
+      ev.preventDefault();
+      const mods = [];
+      if (ev.metaKey) mods.push('cmd');
+      if (ev.ctrlKey) mods.push('ctrl');
+      if (ev.altKey) mods.push('opt');
+      if (ev.shiftKey) mods.push('shift');
+      const keySpec = mods.join('+') + '+' + k.toLowerCase();
+      try {
+        await req('api/key', { key: keySpec });
+        flash(keySpec + ' ✓', true);
+        scheduleAutoReload(500);
+      } catch (e) { flash('key ✗ ' + e.message, false); }
+      return;
+    }
+
+    // Printable single character → /type
+    if (k.length === 1) {
+      ev.preventDefault();
+      markSend(k);
+      try {
+        await req('api/type', { text: k });
+        scheduleAutoReload(500);
+      } catch (e) { flash('type ✗ ' + e.message, false); }
+    }
+    // Otherwise (Shift alone, Meta alone, etc) — ignore
+  });
+
+  // Mobile IME / autocomplete inserts via 'input' event with no keydown
+  liveText.addEventListener('input', async (ev) => {
+    if (!liveOn.checked) return;
+    if (ev.inputType === 'insertText' && ev.data) {
+      if (isDuplicate(ev.data)) return;  // already sent by keydown
+      markSend(ev.data);
+      try {
+        await req('api/type', { text: ev.data });
+        scheduleAutoReload(500);
+      } catch (e) { flash('type ✗ ' + e.message, false); }
+    } else if (ev.inputType === 'deleteContentBackward') {
+      if (isDuplicate('Backspace')) return;
+      markSend('Backspace');
+      try {
+        await req('api/key', { key: 'Backspace' });
+        scheduleAutoReload(500);
+      } catch (e) { flash('key ✗ ' + e.message, false); }
+    } else if (ev.inputType === 'insertFromComposition' && ev.data) {
+      // IME composition end — send full composed string
+      markSend(ev.data);
+      try {
+        await req('api/type', { text: ev.data });
+        scheduleAutoReload(500);
+      } catch (e) {}
+    }
+  });
+
+  document.getElementById('autoRefresh').addEventListener('change', applyAutoRefresh);
+</script>
+
+</body>
+</html>

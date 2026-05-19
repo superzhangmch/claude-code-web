@@ -2442,3 +2442,16 @@ def _candidate_dict(c: dict) -> dict:
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+# Remote Mac control (phone-as-touchpad). API gated by cc_web's Bearer auth;
+# the HTML page itself is unauthenticated (the JS prompts for the token).
+try:
+    from remote_mac_ctrl import api_router as _remote_api, STATIC_DIR as _REMOTE_STATIC
+    app.include_router(_remote_api, prefix="/remote/api",
+                       dependencies=[Depends(require_token)])
+    if _REMOTE_STATIC.exists():
+        app.mount("/remote", StaticFiles(directory=_REMOTE_STATIC, html=True),
+                  name="remote_mac_static")
+    log.info("mounted remote_mac at /remote/")
+except Exception as e:
+    log.warning("remote_mac not mounted: %s", e)

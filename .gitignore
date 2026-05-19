@@ -6,3 +6,6 @@ __pycache__/
 
 # local-only deploy script with real hosts/paths/credentials
 deploy.sh
+
+# remote_mac_ctrl runtime artifacts (latest screencapture output)
+remote_mac_ctrl_static/cache/
