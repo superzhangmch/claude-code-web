@@ -165,7 +165,33 @@ def act_show_dock() -> str:
     return "ok"
 
 
-def act_unlock(password: str, wake: bool = True) -> None:
+def lock_screen() -> None:
+    """Lock screen via the Ctrl+Cmd+Q shortcut, routed through AppleScript
+    System Events so modifier press/release is handled cleanly.
+
+    The earlier all-Quartz version (CGEventSetFlags on the Q event) left
+    the system in a state where it thought Ctrl+Cmd were still being held
+    when the password chars were posted next — so the password got eaten
+    as if it were a stream of cmd-shortcuts. AppleScript releases the
+    modifiers automatically when the keystroke finishes.
+
+    No-op when already at the lock screen (System Events can't reach
+    loginwindow). Subsequent quartz_type_unicode runs at HID level which
+    does reach the lock screen."""
+    run_applescript(
+        'tell application "System Events" to keystroke "q" '
+        'using {control down, command down}'
+    )
+
+
+def act_unlock(password: str, wake: bool = True, lock_first: bool = True) -> None:
+    """Phone-driven unlock. With `lock_first` (default), trigger Ctrl+Cmd+Q
+    first so the typed password always lands on the lock screen rather than
+    in whatever app happened to have focus. Cheap insurance — Ctrl+Cmd+Q on
+    an already-locked Mac is a no-op."""
+    if lock_first:
+        lock_screen()
+        _time.sleep(1.5)   # let lock screen UI come up + animation settle
     if wake:
         wake_display()
         _time.sleep(0.6)
@@ -228,6 +254,7 @@ class ScrollBody(BaseModel):
 class UnlockBody(BaseModel):
     password: str
     wake: bool = True
+    lock_first: bool = True
 
 
 # ── API router ─────────────────────────────────────────────────────────────
@@ -253,6 +280,74 @@ def screenshot(q: int = 50, w: int = 1280):
             "Cache-Control": "no-store",
         },
     )
+
+
+@api_router.get("/cursor_strip")
+def cursor_strip(
+    w: int = 700,
+    h: int = 110,
+    q: int = 50,
+    cx: Optional[float] = None,
+    cy: Optional[float] = None,
+    ax: float = 0.5,
+    ay: float = 0.5,
+):
+    """Capture a thin horizontal strip around a point.
+
+    Caller passes the focus point as `cx`, `cy` in display points — typically
+    the click-marker position from the phone UI (where the user just pointed
+    on the screenshot). Falls back to the actual mouse pointer position if
+    no point is supplied. Mac's system mouse only moves on an explicit Click,
+    so reading the system cursor here would land in the WRONG place whenever
+    the user moved the marker via cursor-pad but didn't Click before typing.
+
+    `ax` / `ay` control where the focus point sits inside the strip, as a
+    fraction (0 = left/top edge, 1 = right/bottom edge). Defaults to 0.5,
+    0.5 — focus point at the center. Pass e.g. ax=0.75 to bias the strip
+    toward showing text to the left of the cursor (typed-text history)."""
+    w = max(60, min(2000, w))
+    h = max(20, min(800, h))
+    q = max(10, min(95, q))
+    ax = max(0.0, min(1.0, ax))
+    ay = max(0.0, min(1.0, ay))
+    try:
+        if cx is None or cy is None:
+            loc = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+            cx, cy = float(loc.x), float(loc.y)
+        else:
+            cx, cy = float(cx), float(cy)
+        x = int(cx - w * ax)
+        y = int(cy - h * ay)
+        out = CACHE_DIR / "strip.jpg"
+        with _capture_lock:
+            subprocess.run(
+                ["/usr/sbin/screencapture", "-x",
+                 "-R", f"{x},{y},{w},{h}",
+                 "-t", "jpg", str(out)],
+                check=True, timeout=5, capture_output=True,
+            )
+            # Downscale to roughly 1 px/pt + re-encode at target quality.
+            # Same idea as the main /screenshot — keeps bytes small.
+            subprocess.run(
+                ["/usr/bin/sips", "-Z", str(w),
+                 "-s", "format", "jpeg",
+                 "-s", "formatOptions", str(q),
+                 str(out), "--out", str(out)],
+                check=True, timeout=5, capture_output=True,
+            )
+        return Response(
+            content=out.read_bytes(),
+            media_type="image/jpeg",
+            headers={
+                "X-Cursor-X": str(int(cx)),
+                "X-Cursor-Y": str(int(cy)),
+                "Cache-Control": "no-store",
+            },
+        )
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"capture failed: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @api_router.post("/run")
@@ -305,5 +400,5 @@ def do_scroll(body: ScrollBody):
 def do_unlock(body: UnlockBody):
     if not body.password:
         raise HTTPException(status_code=400, detail="missing password")
-    act_unlock(body.password, wake=body.wake)
+    act_unlock(body.password, wake=body.wake, lock_first=body.lock_first)
     return {"ok": True}

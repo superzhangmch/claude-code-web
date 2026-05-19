@@ -440,8 +440,21 @@
     <span class="screen-meta" id="shotInfo"></span>
   </div>
 
+  <!-- In Live mode only: a thin slice of the mac screen around the click-
+       marker position so you can see each keystroke land without flicker
+       from a full screenshot refresh. Sits above the input deliberately —
+       below the input would be hidden under the soft keyboard on phones. -->
+  <div id="cursorStripWrap" style="display:none; margin:4px 0;">
+    <img id="cursorStrip" alt="" style="width:100%; max-height:120px; object-fit:contain; background:#1a1a1a; border-radius:6px; display:block;" />
+    <div id="cursorStripMeta" style="font: 11px/1.4 ui-monospace, monospace; color:#9aa; margin-top:2px;"></div>
+  </div>
+
   <div class="live-bar">
-    <input class="live-text" id="liveText" placeholder="Type here → sends to focused Mac app" autocapitalize="off" autocorrect="off" autocomplete="off" />
+    <!-- type=search + a non-credential name stops Chrome treating this as a
+         username field. Without that, Chrome sees the unlock modal's
+         <input type=password> elsewhere on the page and pops the saved-
+         password chip on every focus. -->
+    <input class="live-text" id="liveText" type="search" name="cc-live-text" placeholder="Type here → sends to focused Mac app" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" />
     <button class="live-send" id="liveSend">Send</button>
     <label class="live-toggle" id="liveToggleLabel"><input type="checkbox" id="liveOn">Live</label>
   </div>
@@ -451,7 +464,7 @@
     <button onclick="sendScroll(0, 400)">PgUp</button>
     <button onclick="sendKey('Up')">↑</button>
     <button onclick="sendScroll(0, -400)">PgDn</button>
-    <button onclick="sendKey('Tab')">⇥</button>
+    <button onclick="fetchCursorStrip(75)" title="Load a strip of the screen around the cursor marker (high quality)">🔍 Strip</button>
     <button onclick="sendKey('Backspace')">⌫</button>
     <button onclick="sendKey('Left')">←</button>
     <button onclick="sendKey('Down')">↓</button>
@@ -501,8 +514,9 @@
 <div class="modal-bg" id="unlockModal">
   <div class="modal">
     <h3>🔓 Wake &amp; Unlock Mac</h3>
-    <p class="hint">Wakes the display, types the password at HID level, then presses Return. Password is sent over Tailscale + never stored.</p>
+    <p class="hint">Locks the screen first (Ctrl+Cmd+Q) so the password never ends up typed into a focused app — no-op if already locked. Then wakes the display, types the password at HID level, presses Return. Password is sent over Tailscale + never stored.</p>
     <input type="password" id="unlockPassword" placeholder="Mac password" autocomplete="off" />
+    <label class="opt"><input type="checkbox" id="unlockLockFirst" checked> lock first (Ctrl+Cmd+Q)</label>
     <label class="opt"><input type="checkbox" id="unlockWake" checked> wake display first</label>
     <div class="modal-row">
       <button class="cancel" onclick="closeUnlockModal()">Cancel</button>
@@ -570,6 +584,7 @@
   const unlockModal = document.getElementById('unlockModal');
   const unlockPasswordEl = document.getElementById('unlockPassword');
   const unlockWakeEl = document.getElementById('unlockWake');
+  const unlockLockFirstEl = document.getElementById('unlockLockFirst');
 
   function openUnlockModal() {
     unlockPasswordEl.value = '';
@@ -584,7 +599,11 @@
     const pwd = unlockPasswordEl.value;
     if (!pwd) { flash('empty', false); return; }
     try {
-      await req('api/unlock', { password: pwd, wake: unlockWakeEl.checked });
+      await req('api/unlock', {
+        password: pwd,
+        wake: unlockWakeEl.checked,
+        lock_first: unlockLockFirstEl.checked,
+      });
       flash('unlock sent ✓', true);
       closeUnlockModal();
     } catch (e) {
@@ -672,9 +691,21 @@
       if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
       currentBlobUrl = URL.createObjectURL(blob);
 
-      screenWrap.innerHTML = '';
-      imgEl = document.createElement('img');
-      imgEl.src = currentBlobUrl;
+      // Reuse the existing <img> + marker on subsequent refreshes. Wiping
+      // screenWrap.innerHTML used to make the container collapse to 0 height
+      // while the new <img> was loading, which let the document shrink and
+      // the page would jump to the top — visible as a hard "flash".
+      if (!imgEl || !imgEl.parentNode) {
+        screenWrap.innerHTML = '';
+        imgEl = document.createElement('img');
+        screenWrap.appendChild(imgEl);
+        if (!document.getElementById('clickMarker')) {
+          const marker = document.createElement('div');
+          marker.className = 'click-marker';
+          marker.id = 'clickMarker';
+          screenWrap.appendChild(marker);
+        }
+      }
       imgEl.addEventListener('load', () => {
         setPadAspect();
         // Restore scroll. If natural dims changed (different width param), scale
@@ -688,15 +719,11 @@
         drawPadViewport();
         repositionMarker();
       }, { once: true });
-      screenWrap.appendChild(imgEl);
+      imgEl.src = currentBlobUrl;
 
       // Trackpad uses the same image directly (no rotation)
       screenPad.style.backgroundImage = `url(${currentBlobUrl})`;
       screenPad.classList.add('has-image');
-      const marker = document.createElement('div');
-      marker.className = 'click-marker';
-      marker.id = 'clickMarker';
-      screenWrap.appendChild(marker);
 
       shotInfo.textContent = `${screenW}×${screenH} · ${(blob.size/1024).toFixed(0)} KB`;
       flash((mode === 'edges' ? 'edges' : 'screenshot') + ' ✓', true);
@@ -1072,6 +1099,52 @@
   function markSend(v) { recentSendAt = Date.now(); recentSendVal = v; }
   function isDuplicate(v) { return Date.now() - recentSendAt < 80 && recentSendVal === v; }
 
+  // ── Cursor-strip preview (Live mode only) ──────
+  // After a typing action, fetch a thin slice of the Mac screen centered on
+  // the click-marker position so the user can see each char land without a
+  // full screenshot refresh (which causes a visible flash). Send mode uses
+  // the full-screenshot auto-reload instead, so this only runs when Live is on.
+  const cursorStripWrap = document.getElementById('cursorStripWrap');
+  const cursorStrip = document.getElementById('cursorStrip');
+  const cursorStripMeta = document.getElementById('cursorStripMeta');
+  let stripTimer = 0;
+  let stripObjectURL = '';
+  async function fetchCursorStrip(qOverride) {
+    try {
+      const headers = {};
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+      // Prefer the click-marker position (where the user pointed on the
+      // screenshot) over mac's system mouse pointer — the system mouse
+      // only moves on an explicit Click, so otherwise it'd be stale.
+      const q = qOverride != null
+        ? qOverride
+        : (document.getElementById('quality').value || 50);
+      let qs = `w=300&h=55&q=${q}`;
+      if (selectedVF && screenW && screenH && imgEl && imgEl.naturalWidth) {
+        const imgX = screenWrap.scrollLeft + selectedVF.xf * screenWrap.clientWidth;
+        const imgY = screenWrap.scrollTop  + selectedVF.yf * screenWrap.clientHeight;
+        const macX = (imgX / imgEl.naturalWidth)  * screenW;
+        const macY = (imgY / imgEl.naturalHeight) * screenH;
+        qs += `&cx=${macX.toFixed(0)}&cy=${macY.toFixed(0)}`;
+      }
+      const r = await fetch('api/cursor_strip?' + qs, { headers });
+      if (!r.ok) return;
+      const blob = await r.blob();
+      if (stripObjectURL) URL.revokeObjectURL(stripObjectURL);
+      stripObjectURL = URL.createObjectURL(blob);
+      cursorStrip.onload = () => {
+        const w = cursorStrip.naturalWidth, h = cursorStrip.naturalHeight;
+        cursorStripMeta.textContent = `${w}×${h} · ${(blob.size/1024).toFixed(1)} KB`;
+      };
+      cursorStrip.src = stripObjectURL;
+      cursorStripWrap.style.display = 'block';
+    } catch (e) { /* ignore */ }
+  }
+  function scheduleCursorStrip(delay = 250) {
+    clearTimeout(stripTimer);
+    stripTimer = setTimeout(fetchCursorStrip, delay);
+  }
+
   // Send button: when Live is OFF, the user types into liveText buffer locally
   // and clicks Send (or presses Enter) to flush it to Mac.
   async function sendBuffered() {
@@ -1081,7 +1154,10 @@
       await req('api/type', { text });
       flash(`sent ${text.length} chars ✓`, true);
       liveText.value = '';
-      scheduleAutoReload(500);
+      // Use the strip preview instead of a full-screenshot reload — same
+      // policy as Live mode, avoids the page-jump flash. User can tap
+      // Refresh manually to see the whole screen.
+      scheduleCursorStrip();
     } catch (e) {
       flash('send ✗ ' + e.message, false);
     }
@@ -1112,7 +1188,7 @@
       try {
         await req('api/key', { key: keySpec });
         flash(keySpec + ' ✓', true);
-        scheduleAutoReload(500);
+        scheduleCursorStrip();
       } catch (e) { flash('key ✗ ' + e.message, false); }
       // Also let local echo for Enter/etc happen visually? we cancelled, so clear local input on Enter
       if (k === 'Enter') liveText.value = '';
@@ -1131,7 +1207,7 @@
       try {
         await req('api/key', { key: keySpec });
         flash(keySpec + ' ✓', true);
-        scheduleAutoReload(500);
+        scheduleCursorStrip();
       } catch (e) { flash('key ✗ ' + e.message, false); }
       return;
     }
@@ -1142,7 +1218,7 @@
       markSend(k);
       try {
         await req('api/type', { text: k });
-        scheduleAutoReload(500);
+        scheduleCursorStrip();
       } catch (e) { flash('type ✗ ' + e.message, false); }
     }
     // Otherwise (Shift alone, Meta alone, etc) — ignore
@@ -1156,21 +1232,21 @@
       markSend(ev.data);
       try {
         await req('api/type', { text: ev.data });
-        scheduleAutoReload(500);
+        scheduleCursorStrip();
       } catch (e) { flash('type ✗ ' + e.message, false); }
     } else if (ev.inputType === 'deleteContentBackward') {
       if (isDuplicate('Backspace')) return;
       markSend('Backspace');
       try {
         await req('api/key', { key: 'Backspace' });
-        scheduleAutoReload(500);
+        scheduleCursorStrip();
       } catch (e) { flash('key ✗ ' + e.message, false); }
     } else if (ev.inputType === 'insertFromComposition' && ev.data) {
       // IME composition end — send full composed string
       markSend(ev.data);
       try {
         await req('api/type', { text: ev.data });
-        scheduleAutoReload(500);
+        scheduleCursorStrip();
       } catch (e) {}
     }
   });
