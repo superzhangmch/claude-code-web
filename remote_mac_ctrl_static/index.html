@@ -490,7 +490,9 @@
     <label class="live-toggle" id="liveToggleLabel"><input type="checkbox" id="liveOn">Live</label>
   </div>
 
-  <!-- 2 rows × 5 cols. "new-line" in the spec = row break (not a button). -->
+  <!-- 4 rows × 5 cols. Row 1-2: scrolling + arrows + utilities.
+       Row 3: terminal line-nav + delete trio (readline-style ^A ^E ^W ^U ^K).
+       Row 4: ^C interrupt, ^L clear, Shift+Tab (claude code mode), ⌘C ⌘V. -->
   <div class="nav-grid">
     <button onclick="sendScroll(0, 400)">PgUp</button>
     <button onclick="sendKey('Up')">↑</button>
@@ -502,6 +504,14 @@
     <button onclick="sendKey('Right')">→</button>
     <button onclick="runAction(this, {label:'Wake', type:'wake', target:''})">💡 Wake</button>
     <button onclick="runAction(this, {label:'Dock', type:'show_dock', target:''})">Dock</button>
+    <button onclick="sendKey('ctrl+a')" title="Ctrl+A — line start">⌃A</button>
+    <button onclick="sendKey('ctrl+e')" title="Ctrl+E — line end">⌃E</button>
+    <button onclick="sendKey('ctrl+w')" title="Ctrl+W — delete word backward">⌃W</button>
+    <button onclick="sendKey('ctrl+u')" title="Ctrl+U — delete to line start">⌃U</button>
+    <button onclick="sendKey('ctrl+c')" title="Ctrl+C — interrupt / SIGINT">⌃C</button>
+    <button onclick="sendKey('ctrl+l')" title="Ctrl+L — clear screen">⌃L</button>
+    <button onclick="sendKey('cmd+c')" title="Cmd+C — copy">⌘C</button>
+    <button onclick="sendKey('cmd+v')" title="Cmd+V — paste">⌘V</button>
   </div>
 
 
