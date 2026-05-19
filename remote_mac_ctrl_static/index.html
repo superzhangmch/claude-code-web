@@ -215,6 +215,24 @@
   .click-actions button.armed,
   .click-actions button.primary { background: var(--accent); color: white; }
   .click-actions button:disabled { opacity: 0.35; cursor: default; }
+  /* Drag pair: two half-height buttons stacked, occupying the same row
+     width as a normal sibling. Lets "Drag from" + "Drag" sit in one slot. */
+  .click-actions .drag-pair {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-height: 56px;
+  }
+  .click-actions .drag-pair button {
+    flex: 1;
+    min-height: 0;
+    padding: 0 4px;
+    font-size: 13px;
+    border-radius: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+  }
   .shot-info-row {
     text-align: center;
     margin-top: 6px;
@@ -443,12 +461,14 @@
   <div class="selected-info" id="selectedInfo"></div>
 
   <div class="click-actions">
-    <button class="primary" onclick="refreshScreenshot('photo')">↻ Refresh</button>
+    <button class="primary" onclick="refreshScreenshot('photo')">↻ Load</button>
+    <div class="drag-pair">
+      <button id="btnDragStart" onclick="setDragStart()"  disabled title="Lock current point as drag start (red marker), then pick a new point and tap Drag">↦ From</button>
+      <button id="btnDrag"      onclick="fireDrag()"      disabled title="Drag from the red marker to the blue marker">↣ Drag</button>
+    </div>
     <button id="btnDouble" onclick="fireClickAction('left',  true)"  disabled>Dbl-Click</button>
     <button id="btnRight"  onclick="fireClickAction('right', false)" disabled>R-Click</button>
     <button id="btnClick"  onclick="fireClickAction('left',  false)" disabled>Click</button>
-    <button id="btnDragStart" onclick="setDragStart()"  disabled title="Lock current point as drag start (red marker), then pick a new point and tap Drag→">⊕ Drag-from</button>
-    <button id="btnDrag"      onclick="fireDrag()"      disabled title="Drag from the red marker to the blue marker">Drag→</button>
   </div>
 
   <div class="shot-info-row">
@@ -465,11 +485,7 @@
   </div>
 
   <div class="live-bar">
-    <!-- type=search + a non-credential name stops Chrome treating this as a
-         username field. Without that, Chrome sees the unlock modal's
-         <input type=password> elsewhere on the page and pops the saved-
-         password chip on every focus. -->
-    <input class="live-text" id="liveText" type="search" name="cc-live-text" placeholder="Type here → sends to focused Mac app" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" />
+    <input class="live-text" id="liveText" placeholder="Type here → sends to focused Mac app" autocapitalize="off" autocorrect="off" autocomplete="off" />
     <button class="live-send" id="liveSend">Send</button>
     <label class="live-toggle" id="liveToggleLabel"><input type="checkbox" id="liveOn">Live</label>
   </div>
@@ -519,6 +535,15 @@
       </select>
     </label>
   </div>
+
+  <details class="help" style="margin-top: 16px; padding: 10px 12px; background: var(--card); border-radius: 8px; color: var(--dim); font-size: 13px; line-height: 1.5;">
+    <summary style="cursor: pointer; font-weight: 600; color: var(--fg);">How to drag</summary>
+    <ol style="margin: 8px 0 0 18px; padding: 0;">
+      <li>Choose the start point and click <b>↦ From</b>.</li>
+      <li>Choose the end point.</li>
+      <li>Click <b>↣ Drag</b>.</li>
+    </ol>
+  </details>
 
 </section>
 
@@ -629,7 +654,6 @@
       flash('unlock ✗ ' + e.message, false);
     }
   }
-  // Submit on Enter inside the password field
   unlockPasswordEl.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') { ev.preventDefault(); submitUnlock(); }
     else if (ev.key === 'Escape') { closeUnlockModal(); }
