@@ -114,6 +114,43 @@ lid and walk away without the Mac sleeping or the screen staying
 unlocked. See `macos_helpers/README.md` for what they do and how to
 install them. Optional but strongly recommended for the use case.
 
+## Tap a few buttons on the Mac when needed
+
+`/remote/` (`remote_mac_ctrl.py`) is a crude VNC: no streaming,
+fetch-on-demand screenshots, 10-key on-screen keyboard. The use case is
+narrow — sometimes you want to know *what's happening on the Mac right
+now*, sometimes you need to *click a few buttons remotely*, not enough to
+fire up real VNC and too much hassle to open a laptop.
+
+### macOS TCC permissions
+
+macOS gates each piece of `/remote/` behind a different Privacy &
+Security toggle — they don't share. Without them you get silent failures
+("could not create image from display", clicks that don't land, typed
+chars eaten as shortcuts), and no prompt may appear because the process
+is launchd-spawned.
+
+| Permission | Used for | Why we need it |
+|---|---|---|
+| **Screen & System Audio Recording** | `/remote/api/screenshot`, `/remote/api/cursor_strip` (and any `screencapture` invocation) | macOS blocks pixel readback by default. Without this you can't see the Mac at all. |
+| **Accessibility** | `/remote/api/key` (modifier shortcuts), `/remote/api/unlock` lock-first step (Ctrl+Cmd+Q via AppleScript System Events) | System Events keystroke needs this. Lock-first unlock silently no-ops without it. |
+| **Input Monitoring** | `/remote/api/type`, `/remote/api/click`, `/remote/api/scroll` (Quartz `CGEventPost` at HID level) | HID-level injection through the lock screen (so unlock works) requires this on modern macOS. |
+
+How to grant (one-time per machine):
+
+1. Open **System Settings → Privacy & Security**.
+2. For each of the three sections above, click `+` and add the
+   Python interpreter that runs the server. Typically:
+   `/opt/homebrew/Cellar/python@3.11/<ver>/Frameworks/Python.framework/Versions/3.11/Resources/Python.app`
+3. Toggle it on (you'll be asked to quit + reopen the server — `launchctl kickstart -k gui/$(id -u)/com.zmc.cc-web`).
+4. If `screencapture` still errors with *"could not create image from display"*,
+   make sure the display is awake — capture fails on sleeping displays
+   regardless of TCC.
+
+Resetting (if a prompt was dismissed / denied): `tccutil reset
+ScreenCapture` (and the equivalent `Accessibility` / `ListenEvent`), then
+trigger the feature again to get a fresh prompt.
+
 ## Other languages
 
 - 中文: [README_zh.md](README_zh.md)

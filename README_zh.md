@@ -102,6 +102,38 @@ cp -R skills/session-name ~/.claude/skills/
 锁了"。详见 `macos_helpers/README.md`。本仓库不依赖它，但实际场景里
 强烈推荐。
 
+## 必要时操作几下电脑
+
+`/remote/` (`remote_mac_ctrl.py`) 是个挫版 VNC: 不流式、截图按需拉、键盘
+就 10 个键。场景很窄: **有时候想知道 mac 上发生了啥**, **有时候需要远程点几个
+按钮** — 不至于打开 VNC, 又懒得开笔电。
+
+### macOS TCC 权限
+
+`/remote/` (`remote_mac_ctrl.py`) 让手机看屏 + 点击 + 打字。macOS 把这些功能
+分到**三个独立的隐私授权**里, 互不通用。少一个 → 静默失败 (报"could not
+create image from display"、点击没反应、打字被当 shortcut 吃掉), 而且 launchd
+起的进程不一定会**弹授权框**, 得手动去 System Settings 添。
+
+| 权限 (中文菜单名) | 用在哪 | 为啥要 |
+|---|---|---|
+| **录屏与系统录音** (Screen & System Audio Recording) | `/remote/api/screenshot`, `/remote/api/cursor_strip` (所有 `screencapture` 调用) | macOS 默认禁止读屏像素。不给 → 截不出图, 手机看不到 mac。 |
+| **辅助功能** (Accessibility) | `/remote/api/key` (modifier shortcut), `/remote/api/unlock` 的 lock-first 那步 (Ctrl+Cmd+Q via AppleScript System Events) | System Events 模拟按键吃这个。不给 → lock-first 无效。 |
+| **输入监控** (Input Monitoring) | `/remote/api/type`, `/remote/api/click`, `/remote/api/scroll` (Quartz `CGEventPost` HID 层) | HID 层注入 (能穿透锁屏, 让 unlock 工作) 在现代 macOS 上要这个。 |
+
+**怎么给** (新机器只搞一次):
+
+1. **System Settings → 隐私与安全性**
+2. 上表三个分类挨个进去, 点 `+`, 把跑 server 的 Python 解释器加进去, 通常是:
+   `/opt/homebrew/Cellar/python@3.11/<版本>/Frameworks/Python.framework/Versions/3.11/Resources/Python.app`
+3. 拨到 on (会问你重启服务: `launchctl kickstart -k gui/$(id -u)/com.zmc.cc-web`)
+4. 如果还是报 `could not create image from display`, 看屏幕是不是**睡着了** —
+   screencapture 在熄屏状态本来就抓不了, 跟权限无关
+
+**重置授权** (之前误点了 Don't Allow 导致再也不弹): 在 mac terminal 跑
+`tccutil reset ScreenCapture` (Accessibility / ListenEvent 类似),
+然后再触发一次功能, 会重新弹授权框。
+
 ## 其它语言
 
 - English: [README.md](README.md)
