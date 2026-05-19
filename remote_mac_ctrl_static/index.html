@@ -476,6 +476,10 @@
 
   <!-- Capture options, parked at the bottom -->
   <div class="screen-toolbar" style="margin-top: 16px;">
+    <label class="screen-meta">Display:
+      <label style="margin-left:6px;"><input type="radio" name="dispRadio" value="main" checked> main</label>
+      <label style="margin-left:6px;"><input type="radio" name="dispRadio" value="external"> external</label>
+    </label>
     <label class="screen-meta">Quality:
       <select id="quality">
         <option value="30" selected>low (30)</option>
@@ -634,6 +638,14 @@
   const screenWrap = document.getElementById('screenWrap');
   const shotInfo = document.getElementById('shotInfo');
   let screenW = 0, screenH = 0;  // logical screen size (for click coord mapping)
+  function currentDisplay() {
+    const r = document.querySelector('input[name="dispRadio"]:checked');
+    return r ? r.value : 'main';
+  }
+  document.querySelectorAll('input[name="dispRadio"]').forEach(el => {
+    // Switching display swaps which physical screen we capture + control.
+    el.addEventListener('change', () => refreshScreenshot(lastMode || 'photo'));
+  });
   let imgEl = null;
   let lastMode = null;           // 'photo' | 'edges' | 'text' — what's currently shown
   let autoReloadTimer = null;    // one-shot auto-refresh after click/key
@@ -673,7 +685,7 @@
         const edgeMode = document.getElementById('edgeMode')?.value || 'threshold';
         url = `api/screenshot/edges?mode=${edgeMode}&w=${w}&_=${Date.now()}`;
       } else {
-        url = `api/screenshot?q=${q}&w=${w}&_=${Date.now()}`;
+        url = `api/screenshot?q=${q}&w=${w}&display=${currentDisplay()}&_=${Date.now()}`;
       }
       const r = await fetch(url, { headers: token ? { 'Authorization': 'Bearer ' + token } : {} });
       if (r.status === 401) { tokenBar.style.display = 'block'; throw new Error('unauthorized'); }
@@ -910,7 +922,7 @@
     const yf = imgY / imgEl.naturalHeight;
     if (navigator.vibrate) navigator.vibrate(button === 'right' ? 20 : 10);
     try {
-      const d = await req('api/click', { xf, yf, button, double });
+      const d = await req('api/click', { xf, yf, button, double, display: currentDisplay() });
       flash(`${button}${double ? '×2' : ''} @ ${Math.round(d.x)},${Math.round(d.y)} ✓`, true);
       scheduleAutoReload(500);
     } catch (e) {
@@ -1119,7 +1131,7 @@
       const q = qOverride != null
         ? qOverride
         : (document.getElementById('quality').value || 50);
-      let qs = `w=300&h=55&q=${q}`;
+      let qs = `w=300&h=55&q=${q}&display=${currentDisplay()}`;
       if (selectedVF && screenW && screenH && imgEl && imgEl.naturalWidth) {
         const imgX = screenWrap.scrollLeft + selectedVF.xf * screenWrap.clientWidth;
         const imgY = screenWrap.scrollTop  + selectedVF.yf * screenWrap.clientHeight;

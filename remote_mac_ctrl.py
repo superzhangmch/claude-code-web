@@ -70,21 +70,53 @@ def run_applescript(script: str) -> str:
     return r.stdout.strip()
 
 
-def logical_screen_size() -> tuple[int, int]:
+def resolve_display(target: str = "main") -> tuple[int, float, float, float, float]:
+    """Map a phone-facing target name to a concrete display.
+
+    target = 'main' | 'external' | numeric CGDirectDisplayID
+    Returns (display_id, origin_x, origin_y, width_pt, height_pt). 'external'
+    falls back to main if no second display is connected — keeps the radio
+    in the phone UI usable even when nothing is plugged in."""
     main_id = Quartz.CGMainDisplayID()
-    bounds = Quartz.CGDisplayBounds(main_id)
-    return int(bounds.size.width), int(bounds.size.height)
+    did = main_id
+    if target == "external":
+        err, ids, _ = Quartz.CGGetActiveDisplayList(8, None, None)
+        for d in ids or ():
+            if d != main_id:
+                did = d
+                break
+    elif target and target != "main":
+        try:
+            did = int(target)
+        except (TypeError, ValueError):
+            did = main_id
+    b = Quartz.CGDisplayBounds(did)
+    return did, float(b.origin.x), float(b.origin.y), float(b.size.width), float(b.size.height)
 
 
-def capture_screenshot(max_dim: int = 1280, quality: int = 50) -> bytes:
-    """Capture main display, downscale via sips, return JPEG bytes.
+def logical_screen_size(target: str = "main") -> tuple[int, int]:
+    _, _, _, w, h = resolve_display(target)
+    return int(w), int(h)
+
+
+def capture_screenshot(max_dim: int = 1280, quality: int = 50,
+                       display_target: str = "main") -> bytes:
+    """Capture a specific display (default main), downscale via sips, return JPEG.
     Display must already be awake (use /run wake first if needed)."""
+    did, *_ = resolve_display(display_target)
+    # screencapture -D wants a 1-based INDEX into the active display list, not
+    # a CGDirectDisplayID. Compute it from the same list resolve_display uses
+    # so the two stay in sync.
+    err, ids, _ = Quartz.CGGetActiveDisplayList(8, None, None)
+    sc_index = next((i + 1 for i, d in enumerate(ids or ()) if d == did), 1)
     raw = CACHE_DIR / "raw.jpg"
     small = CACHE_DIR / "small.jpg"
     with _capture_lock:
-        # -m main only, -x silent, -C include cursor
+        # -D <n> picks a specific display by 1-based ordinal.
+        # -x silent, -C include cursor.
         subprocess.run(
-            ["/usr/sbin/screencapture", "-x", "-m", "-C", "-t", "jpg", str(raw)],
+            ["/usr/sbin/screencapture", "-x", "-D", str(sc_index), "-C",
+             "-t", "jpg", str(raw)],
             check=True, timeout=5, capture_output=True,
         )
         subprocess.run(
@@ -246,6 +278,7 @@ class ClickBody(BaseModel):
     y: Optional[float] = None
     button: str = "left"
     double: bool = False
+    display: str = "main"
 
 class ScrollBody(BaseModel):
     dx: int = 0
@@ -263,20 +296,23 @@ api_router = APIRouter()
 
 
 @api_router.get("/screenshot")
-def screenshot(q: int = 50, w: int = 1280):
+def screenshot(q: int = 50, w: int = 1280, display: str = "main"):
     q = max(10, min(95, q))
     w = max(320, min(2560, w))
     try:
-        jpeg = capture_screenshot(max_dim=w, quality=q)
+        jpeg = capture_screenshot(max_dim=w, quality=q, display_target=display)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"capture failed: {e}")
-    sw, sh = logical_screen_size()
+    did, ox, oy, dw, dh = resolve_display(display)
     return Response(
         content=jpeg,
         media_type="image/jpeg",
         headers={
-            "X-Screen-W": str(sw),
-            "X-Screen-H": str(sh),
+            "X-Screen-W": str(int(dw)),
+            "X-Screen-H": str(int(dh)),
+            "X-Display-Id": str(did),
+            "X-Display-Origin-X": str(int(ox)),
+            "X-Display-Origin-Y": str(int(oy)),
             "Cache-Control": "no-store",
         },
     )
@@ -291,6 +327,7 @@ def cursor_strip(
     cy: Optional[float] = None,
     ax: float = 0.5,
     ay: float = 0.5,
+    display: str = "main",
 ):
     """Capture a thin horizontal strip around a point.
 
@@ -311,13 +348,17 @@ def cursor_strip(
     ax = max(0.0, min(1.0, ax))
     ay = max(0.0, min(1.0, ay))
     try:
+        _did, ox, oy, _dw, _dh = resolve_display(display)
         if cx is None or cy is None:
             loc = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
-            cx, cy = float(loc.x), float(loc.y)
+            # CGEventGetLocation is already in global coords.
+            gx, gy = float(loc.x), float(loc.y)
         else:
-            cx, cy = float(cx), float(cy)
-        x = int(cx - w * ax)
-        y = int(cy - h * ay)
+            # Caller-supplied cx/cy are display-local (matches /screenshot's
+            # X-Screen-W/H frame); add display origin to reach global coords.
+            gx, gy = float(cx) + ox, float(cy) + oy
+        x = int(gx - w * ax)
+        y = int(gy - h * ay)
         out = CACHE_DIR / "strip.jpg"
         with _capture_lock:
             subprocess.run(
@@ -339,8 +380,8 @@ def cursor_strip(
             content=out.read_bytes(),
             media_type="image/jpeg",
             headers={
-                "X-Cursor-X": str(int(cx)),
-                "X-Cursor-Y": str(int(cy)),
+                "X-Cursor-X": str(int(gx)),
+                "X-Cursor-Y": str(int(gy)),
                 "Cache-Control": "no-store",
             },
         )
@@ -379,11 +420,15 @@ def send_key(body: KeyBody):
 
 @api_router.post("/click")
 def do_click(body: ClickBody):
-    sw, sh = logical_screen_size()
+    did, ox, oy, dw, dh = resolve_display(body.display)
     if body.xf is not None and body.yf is not None:
-        x, y = body.xf * sw, body.yf * sh
+        # Fractions are relative to the selected display's bounds; add the
+        # display's origin to land at the right place in global event coords
+        # (matters when external monitor sits at negative x/y from main).
+        x, y = body.xf * dw + ox, body.yf * dh + oy
     elif body.x is not None and body.y is not None:
-        x, y = body.x, body.y
+        # Treat x/y as display-local for consistency with the fraction path.
+        x, y = body.x + ox, body.y + oy
     else:
         raise HTTPException(status_code=400, detail="missing xf/yf or x/y")
     click_at(x, y, button=body.button, double=body.double)
