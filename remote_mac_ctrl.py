@@ -364,6 +364,7 @@ def cursor_strip(
     ax: float = 0.5,
     ay: float = 0.5,
     display: str = "main",
+    native_res: bool = False,
 ):
     """Capture a thin horizontal strip around a point.
 
@@ -384,7 +385,7 @@ def cursor_strip(
     ax = max(0.0, min(1.0, ax))
     ay = max(0.0, min(1.0, ay))
     try:
-        _did, ox, oy, _dw, _dh = resolve_display(display)
+        _did, ox, oy, dw, dh = resolve_display(display)
         if cx is None or cy is None:
             loc = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
             # CGEventGetLocation is already in global coords.
@@ -395,6 +396,16 @@ def cursor_strip(
             gx, gy = float(cx) + ox, float(cy) + oy
         x = int(gx - w * ax)
         y = int(gy - h * ay)
+        # Clamp the rect so it never extends past the display edges.
+        # screencapture -R with off-display coords returns a smaller or
+        # partly-zero-padded image; sips -Z then upscales to the requested
+        # w, which makes text look stretched / blurry. Sliding the rect to
+        # fit inside the display gives a native-resolution capture every
+        # time — the focus point just shifts off-center near edges.
+        x_max = int(ox + dw - w)
+        y_max = int(oy + dh - h)
+        x = max(int(ox), min(x, x_max))
+        y = max(int(oy), min(y, y_max))
         out = CACHE_DIR / "strip.jpg"
         with _capture_lock:
             subprocess.run(
@@ -403,21 +414,32 @@ def cursor_strip(
                  "-t", "jpg", str(out)],
                 check=True, timeout=5, capture_output=True,
             )
-            # Downscale to roughly 1 px/pt + re-encode at target quality.
-            # Same idea as the main /screenshot — keeps bytes small.
-            subprocess.run(
-                ["/usr/bin/sips", "-Z", str(w),
-                 "-s", "format", "jpeg",
-                 "-s", "formatOptions", str(q),
-                 str(out), "--out", str(out)],
-                check=True, timeout=5, capture_output=True,
-            )
+            # By default downscale to ~1 px/pt + re-encode at target quality
+            # — same idea as the main /screenshot, keeps bytes small for the
+            # phone UI. native_res=true skips the downscale so the returned
+            # image keeps full retina pixel count (1 mac point → ~2 pixels);
+            # the desktop overlay uses this to stay sharp when sized to match
+            # the underlying screenshot in browser pixels.
+            sips_cmd = ["/usr/bin/sips"]
+            if not native_res:
+                sips_cmd += ["-Z", str(w)]
+            sips_cmd += ["-s", "format", "jpeg",
+                         "-s", "formatOptions", str(q),
+                         str(out), "--out", str(out)]
+            subprocess.run(sips_cmd, check=True, timeout=5, capture_output=True)
         return Response(
             content=out.read_bytes(),
             media_type="image/jpeg",
             headers={
                 "X-Cursor-X": str(int(gx)),
                 "X-Cursor-Y": str(int(gy)),
+                # Actual captured rect in display-LOCAL mac points (after
+                # clamping near display edges). Lets the caller draw an
+                # overlay that pixel-aligns with the original area.
+                "X-Strip-X": str(int(x - ox)),
+                "X-Strip-Y": str(int(y - oy)),
+                "X-Strip-W": str(int(w)),
+                "X-Strip-H": str(int(h)),
                 "Cache-Control": "no-store",
             },
         )

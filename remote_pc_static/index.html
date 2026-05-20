@@ -1,0 +1,1119 @@
+<!doctype html>
+<!--
+  Desktop counterpart of /remote/. Mouse-centric, same backend.
+
+  Gestures on the screenshot:
+    plain click (left)  → /api/click  left
+    double click (left) → /api/click  left double=true
+    right click         → /api/click  right
+    drag (mousedown→up,
+          travel > 6 px) → /api/drag
+
+  Single vs double click is resolved by a 220 ms delay (browser dblclick
+  cancels a pending single). Drag vs click uses a 6 px threshold.
+
+  After-click add-ons (radio in the header):
+    zoom    → fetch /api/cursor_strip and overlay the source area exactly,
+              pixel-aligned with the underlying screenshot
+    type    → enter type-mode (input box + crop overlay) at the click;
+              Send/Live toggle mirrors /remote/'s liveText behavior
+    capkeys → while the cursor is over the screenshot, every key (and
+              modifier combo) is forwarded to Mac; ENTER/ESC trigger a
+              screenshot reload
+
+  All API calls reuse /remote/api/* — no new backend endpoints.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>remote_pc — desktop remote</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --bg: #0e0f12;
+      --panel: #161821;
+      --panel2: #1d2030;
+      --border: #2a2d36;
+      --fg: #d7d9e0;
+      --dim: #8a8f9c;
+      --accent: #4a9eff;
+      --warn: #ffb05a;
+      --err: #ff6a6a;
+      --ok: #6ee884;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg); color: var(--fg);
+      font: 14px/1.4 -apple-system, system-ui, sans-serif;
+      height: 100%;
+    }
+    body { display: flex; flex-direction: column; }
+
+    header {
+      flex: 0 0 auto;
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 12px; background: #000;
+      border-bottom: 1px solid var(--border);
+    }
+    header button {
+      background: var(--panel2); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 5px 12px; font: inherit; cursor: pointer;
+    }
+    header button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+    header button:hover { border-color: var(--accent); }
+    header label { color: var(--dim); }
+    header label input[type="radio"] { margin: 0 4px 0 8px; }
+    header .gap { margin-left: auto; }
+    header .hint { color: var(--dim); font-size: 12px; }
+    /* Visual grouping in the header: thin border around each cluster. */
+    header .grp {
+      display: inline-flex; align-items: center; gap: 4px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 2px 8px;
+    }
+
+    main {
+      flex: 1 1 auto;
+      overflow: auto;
+      position: relative;
+      background: #000;
+    }
+    #screen-wrap {
+      position: relative;
+      display: inline-block;            /* shrink-wrap the image; main scrolls if larger */
+      user-select: none;
+    }
+    #screen-wrap img.screen {
+      display: block;
+      max-width: none;                  /* render at natural pixel size */
+      pointer-events: none;             /* let our overlay receive events */
+    }
+    /* Transparent capture layer covering the screenshot — catches all
+       mouse events so the user can hover/click on the image normally. */
+    #capture {
+      position: absolute; inset: 0;
+      cursor: crosshair;
+    }
+    #capture.dragging { cursor: grabbing; }
+
+    /* Drag-rubber-band line drawn on the screenshot during drag.
+       Implemented as a thin 0-height div rotated to the angle from start
+       to current point — its top-border is a dashed line. */
+    #drag-line {
+      position: absolute; pointer-events: none;
+      height: 0;
+      border-top: 2px dashed #ff8a8a;
+      transform-origin: 0 50%;        /* rotate around the start endpoint */
+      display: none;
+    }
+    .pulse {
+      position: absolute; pointer-events: none;
+      width: 24px; height: 24px;
+      border: 2px solid var(--accent); border-radius: 50%;
+      transform: translate(-50%, -50%);
+      opacity: 0;
+      animation: pulse 0.5s ease-out;
+    }
+    @keyframes pulse {
+      0%   { opacity: 1; width: 8px; height: 8px; }
+      100% { opacity: 0; width: 60px; height: 60px; }
+    }
+
+    /* Floating cursor-strip popup for shift+click. Position-fixed so it
+       lives in viewport coords — no wrapEl / scrollLeft math needed. */
+    .zoom-popup {
+      position: fixed; pointer-events: none;
+      background: #1a1a1a; border: 1.5px solid var(--accent);
+      border-radius: 6px; padding: 2px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.6);
+      z-index: 50;
+    }
+    .zoom-popup img { display: block; }
+    .zoom-popup .meta {
+      font: 11px ui-monospace, monospace; color: var(--dim);
+      text-align: center; margin-top: 2px;
+    }
+
+    /* Type-mode overlay: covers a region of the screenshot with a
+       higher-res crop + input box on top. */
+    .type-overlay {
+      position: absolute;
+      z-index: 100;
+      border: 2px solid var(--accent);
+      box-shadow: 0 4px 24px rgba(74,158,255,0.4);
+      background: #000;
+    }
+    .type-overlay img.crop {
+      display: block;
+      width: 100%; height: 100%;
+      pointer-events: none;
+    }
+    /* Bottom bar below the type-overlay: input + Send button + Live toggle. */
+    .type-overlay .type-bar {
+      position: absolute;
+      left: -2px; right: -2px;
+      top: 100%; margin-top: 4px;
+      display: flex; gap: 6px; align-items: stretch;
+    }
+    .type-overlay .type-bar input.live {
+      flex: 1;
+      background: rgba(0,0,0,0.85); color: var(--fg);
+      border: 1px solid var(--accent); border-radius: 4px;
+      padding: 6px 8px; font: 14px ui-monospace, monospace;
+      outline: none;
+    }
+    .type-overlay .type-bar button.send {
+      background: var(--accent); color: white;
+      border: 1px solid var(--accent); border-radius: 4px;
+      padding: 4px 12px; cursor: pointer;
+      font: inherit; font-weight: 600;
+    }
+    .type-overlay .type-bar label.live-toggle {
+      display: inline-flex; align-items: center; gap: 4px;
+      color: var(--dim); font-size: 12px;
+      padding: 0 6px;
+      border: 1px solid transparent; border-radius: 4px;
+    }
+    .type-overlay .type-bar label.live-toggle.on {
+      color: var(--ok); border-color: var(--ok);
+    }
+    .type-overlay .close {
+      position: absolute; top: -1px; right: -1px;
+      background: var(--accent); color: white; border: none;
+      width: 22px; height: 22px; border-radius: 0 0 0 6px;
+      font: 14px sans-serif; cursor: pointer;
+    }
+
+    /* Unlock modal — only shown when the Unlock button is tapped. */
+    .modal-bg {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.7);
+      display: none; align-items: center; justify-content: center;
+      z-index: 200;
+    }
+    .modal-bg.show { display: flex; }
+    .modal-card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; padding: 16px;
+      width: 360px; max-width: 90vw;
+      color: var(--fg);
+    }
+    .modal-card h3 { margin: 0 0 6px; }
+    .modal-card .hint { color: var(--dim); font-size: 12px; margin: 0 0 12px; line-height: 1.4; }
+    .modal-card input[type="password"] {
+      width: 100%; padding: 6px 8px;
+      background: var(--panel2); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 6px;
+      font: inherit;
+    }
+    .modal-card label.opt { display: block; margin-top: 6px; color: var(--dim); font-size: 13px; }
+    .modal-card .row { display: flex; gap: 8px; margin-top: 14px; justify-content: flex-end; }
+    .modal-card button {
+      background: var(--panel2); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 6px 14px; font: inherit; cursor: pointer;
+    }
+    .modal-card button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+
+    /* Special-keys bar — same set as /remote/'s nav-grid, laid out
+       as a single wrapping row on desktop. */
+    #keybar {
+      flex: 0 0 auto;
+      display: flex; flex-wrap: wrap; gap: 4px;
+      padding: 6px 8px; background: #0a0b0e;
+      border-bottom: 1px solid var(--border);
+    }
+    #keybar button {
+      background: var(--panel2); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 5px;
+      padding: 4px 9px; min-height: 28px;
+      font: 12px ui-monospace, monospace; cursor: pointer;
+      white-space: nowrap;
+    }
+    #keybar button:hover  { border-color: var(--accent); }
+    #keybar button:active { background: var(--card-hi); }
+    #keybar .sep {
+      display: inline-block; width: 1px; align-self: stretch;
+      background: var(--border); margin: 2px 4px;
+    }
+
+    footer {
+      flex: 0 0 auto;
+      padding: 6px 12px; background: #000;
+      border-top: 1px solid var(--border);
+      font: 12px ui-monospace, monospace; color: var(--dim);
+      display: flex; gap: 12px; align-items: center;
+    }
+    footer .status { color: var(--fg); }
+    footer .ok  { color: var(--ok); }
+    footer .err { color: var(--err); }
+  </style>
+</head>
+<body>
+
+<header>
+  <button id="btn-load" class="primary" title="Refresh screenshot">↻ Load</button>
+  <div class="grp">
+    <label>Display:
+      <label><input type="radio" name="disp" value="main" checked> main</label>
+      <label><input type="radio" name="disp" value="external"> external</label>
+    </label>
+  </div>
+  <div class="grp">
+    <label>Quality:
+      <select id="qualitySel">
+        <option value="30">low (30)</option>
+        <option value="50" selected>med (50)</option>
+        <option value="75">high (75)</option>
+      </select>
+    </label>
+    <label>Resolution:
+      <select id="maxdimSel">
+        <option value="960">960px</option>
+        <option value="1280">1280px</option>
+        <option value="1600">1600px</option>
+        <option value="2560">2560px</option>
+      </select>
+    </label>
+    <label>Auto:
+      <select id="autoSel">
+        <option value="0" selected>off</option>
+        <option value="3">3s</option>
+        <option value="5">5s</option>
+        <option value="10">10s</option>
+      </select>
+    </label>
+  </div>
+  <div class="grp">
+    <label><input type="radio" name="actionMode" value="off" checked> off</label>
+    <label><input type="radio" name="actionMode" value="zoom"> 🔍 zoom after click</label>
+    <label><input type="radio" name="actionMode" value="type"> ⌨ type after click</label>
+    <label><input type="radio" name="actionMode" value="capkeys"> ⌨ capture keys on hover</label>
+  </div>
+  <span class="gap"></span>
+</header>
+
+<div id="keybar">
+  <!-- editing / movement (mac action) -->
+  <button onclick="sendKeyPC('Return',     {reload:true})">⏎ Return</button>
+  <button onclick="sendKeyPC('Escape',     {reload:true})">Esc</button>
+  <button onclick="sendKeyPC('Backspace')">⌫ backSp</button>
+  <button onclick="sendKeyPC('Tab')">⇥ Tab</button>
+  <span class="sep"></span>
+  <!-- scroll & arrows -->
+  <button onclick="sendScrollPC(0,  400)">PgUp</button>
+  <button onclick="sendScrollPC(0, -400)">PgDn</button>
+  <button onclick="sendKeyPC('Up',    {reload:true})">↑</button>
+  <button onclick="sendKeyPC('Down',  {reload:true})">↓</button>
+  <button onclick="sendKeyPC('Left')">←</button>
+  <button onclick="sendKeyPC('Right')">→</button>
+  <span class="sep"></span>
+  <!-- readline / clipboard -->
+  <button onclick="sendKeyPC('ctrl+a')" title="line start">⌃A</button>
+  <button onclick="sendKeyPC('ctrl+e')" title="line end">⌃E</button>
+  <button onclick="sendKeyPC('ctrl+w')" title="delete word back">⌃W</button>
+  <button onclick="sendKeyPC('ctrl+u')" title="delete to line start">⌃U</button>
+  <button onclick="sendKeyPC('ctrl+c')" title="interrupt / SIGINT">⌃C</button>
+  <button onclick="sendKeyPC('ctrl+l', {reload:true})" title="clear screen">⌃L</button>
+  <button onclick="sendKeyPC('cmd+c')">⌘C</button>
+  <button onclick="sendKeyPC('cmd+v')">⌘V</button>
+  <span class="sep"></span>
+  <!-- system / window -->
+  <button onclick="sendKeyPC('ctrl+cmd+f', {reload:true})" title="toggle fullscreen">fullScr</button>
+  <button onclick="sendKeyPC('ctrl+cmd+q', {reload:true})" title="lock screen">Lock</button>
+  <button onclick="openUnlockModal()" title="Wake + type password + Return">🔓 Unlock</button>
+  <button onclick="runActionPC({label:'Dock', type:'show_dock'})">Dock</button>
+  <button onclick="runActionPC({label:'Wake', type:'wake', reload:false})">Wake</button>
+  <span class="sep"></span>
+  <span id="traffic" style="font: 11px ui-monospace, monospace; color: var(--dim); align-self: center;" title="last screenshot · last crop image">📷 — · 🔍 —</span>
+</div>
+
+<main id="main">
+  <div id="screen-wrap">
+    <img id="screen" class="screen" alt="" />
+    <div id="capture"></div>
+    <div id="drag-line" class="drag-line"></div>
+  </div>
+</main>
+
+<!-- Unlock modal — password input is injected lazily so Chrome's password
+     manager doesn't see a permanent type=password on the page. -->
+<div class="modal-bg" id="unlockModal">
+  <div class="modal-card">
+    <h3>🔓 Wake &amp; Unlock Mac</h3>
+    <p class="hint">Locks the screen first (Ctrl+Cmd+Q) so the password never lands in a focused app — no-op if already locked. Then wakes the display, types the password at HID level, presses Return.</p>
+    <div id="unlockPwdSlot"></div>
+    <label class="opt"><input type="checkbox" id="unlockLockFirst" checked> lock first (Ctrl+Cmd+Q)</label>
+    <label class="opt"><input type="checkbox" id="unlockWake" checked> wake display first</label>
+    <div class="row">
+      <button onclick="closeUnlockModal()">Cancel</button>
+      <button class="primary" onclick="submitUnlock()">Wake &amp; Send</button>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <span class="status" id="status">ready — click Load to fetch screenshot</span>
+  <span class="gap"></span>
+  <span id="screen-meta"></span>
+</footer>
+
+<script>
+'use strict';
+
+// ── token: same as /remote/ ───────────────────────────────────────────────
+let token = localStorage.getItem('cc_web_token') || '';
+if (!token) {
+  token = prompt('cc_web token:') || '';
+  if (token) localStorage.setItem('cc_web_token', token);
+}
+const authHeaders = () => (token ? { 'Authorization': 'Bearer ' + token } : {});
+
+// ── DOM refs ───────────────────────────────────────────────────────────────
+const mainEl     = document.getElementById('main');
+const wrapEl     = document.getElementById('screen-wrap');
+const screenImg  = document.getElementById('screen');
+const captureEl  = document.getElementById('capture');
+const statusEl   = document.getElementById('status');
+const metaEl     = document.getElementById('screen-meta');
+const btnLoad    = document.getElementById('btn-load');
+const dragLineEl = document.getElementById('drag-line');
+
+function currentDisplay() {
+  const r = document.querySelector('input[name="disp"]:checked');
+  return r ? r.value : 'main';
+}
+document.querySelectorAll('input[name="disp"]').forEach(el => {
+  el.addEventListener('change', loadScreenshot);
+});
+document.getElementById('qualitySel').addEventListener('change', loadScreenshot);
+document.getElementById('maxdimSel').addEventListener('change', loadScreenshot);
+
+// ── Auto-reload: per N seconds, stop after AUTO_MAX ticks. The cap is
+// there as a sanity guard against the user wandering off and leaving
+// the page hammering /api/screenshot forever.
+const autoSel = document.getElementById('autoSel');
+const AUTO_MAX = 10;
+let autoTimer = null, autoCount = 0;
+function autoTick() {
+  autoCount++;
+  if (autoCount > AUTO_MAX) {
+    clearInterval(autoTimer); autoTimer = null;
+    autoSel.value = '0';
+    setStatus(`auto-reload paused (hit ${AUTO_MAX}-tick cap, re-select to resume)`, 'err');
+    return;
+  }
+  loadScreenshot();
+}
+function applyAuto() {
+  clearInterval(autoTimer); autoTimer = null;
+  autoCount = 0;
+  const sec = parseInt(autoSel.value, 10);
+  if (sec > 0) autoTimer = setInterval(autoTick, sec * 1000);
+}
+autoSel.addEventListener('change', applyAuto);
+
+// Resolution default: min(1600, screen.width). Also append `screen.width`
+// as an extra option so the user can pick "exactly my monitor" if the
+// preset values don't match.
+(function setupResolutionOptions() {
+  const sel = document.getElementById('maxdimSel');
+  const sw  = (window.screen && window.screen.width) || 1600;
+  const existing = new Set(Array.from(sel.options).map(o => parseInt(o.value, 10)));
+  if (!existing.has(sw)) {
+    const opt = document.createElement('option');
+    opt.value = String(sw);
+    opt.textContent = sw + 'px (screen)';
+    // Insert sorted by value.
+    let inserted = false;
+    for (const o of sel.options) {
+      if (parseInt(o.value, 10) > sw) { sel.insertBefore(opt, o); inserted = true; break; }
+    }
+    if (!inserted) sel.appendChild(opt);
+  }
+  // Pick default = the largest existing value that is <= min(1600, screen.width).
+  const cap = Math.min(1600, sw);
+  const candidates = Array.from(sel.options)
+    .map(o => parseInt(o.value, 10))
+    .filter(v => v <= cap);
+  const def = candidates.length ? Math.max(...candidates) : 960;
+  sel.value = String(def);
+})();
+
+// ── status helpers ─────────────────────────────────────────────────────────
+function setStatus(msg, kind) {
+  statusEl.textContent = msg;
+  statusEl.className = 'status' + (kind ? ' ' + kind : '');
+}
+function pulseAt(x, y) {
+  const p = document.createElement('div');
+  p.className = 'pulse';
+  p.style.left = x + 'px'; p.style.top = y + 'px';
+  wrapEl.appendChild(p);
+  setTimeout(() => p.remove(), 600);
+}
+
+// ── screen-W/H + display origin (read from /api/screenshot headers) ────────
+let screenW = 0, screenH = 0, displayOriginX = 0, displayOriginY = 0;
+
+// Last fetched image size (KB) — shown in the keybar's traffic readout.
+let lastScreenKB = null, lastCropKB = null;
+function updateTraffic() {
+  const el = document.getElementById('traffic');
+  if (!el) return;
+  const s = lastScreenKB == null ? '—' : lastScreenKB + ' KB';
+  const c = lastCropKB   == null ? '—' : lastCropKB   + ' KB';
+  el.textContent = `📷 ${s} · 🔍 ${c}`;
+}
+
+async function loadScreenshot() {
+  setStatus('loading…');
+  try {
+    const q = document.getElementById('qualitySel').value || 50;
+    const w = document.getElementById('maxdimSel').value || 2560;
+    const r = await fetch(`/remote/api/screenshot?w=${w}&q=${q}&display=${currentDisplay()}&_=${Date.now()}`,
+                          { headers: authHeaders() });
+    if (r.status === 401) { localStorage.removeItem('cc_web_token'); setStatus('unauthorized — reload', 'err'); return; }
+    if (!r.ok) { setStatus('HTTP ' + r.status, 'err'); return; }
+    screenW = parseInt(r.headers.get('X-Screen-W') || '0', 10);
+    screenH = parseInt(r.headers.get('X-Screen-H') || '0', 10);
+    displayOriginX = parseInt(r.headers.get('X-Display-Origin-X') || '0', 10);
+    displayOriginY = parseInt(r.headers.get('X-Display-Origin-Y') || '0', 10);
+    const blob = await r.blob();
+    if (screenImg._lastUrl) URL.revokeObjectURL(screenImg._lastUrl);
+    screenImg._lastUrl = URL.createObjectURL(blob);
+    screenImg.src = screenImg._lastUrl;
+    await new Promise(res => screenImg.onload = res);
+    metaEl.textContent = `${screenW}×${screenH} pt · ${screenImg.naturalWidth}×${screenImg.naturalHeight} px · ${(blob.size/1024).toFixed(0)} KB`;
+    lastScreenKB = (blob.size/1024).toFixed(0);
+    updateTraffic();
+    setStatus('loaded', 'ok');
+    setTimeout(() => setStatus('ready'), 1200);
+  } catch (e) {
+    setStatus('load error: ' + e.message, 'err');
+  }
+}
+btnLoad.addEventListener('click', () => { resetAutoCount(); loadScreenshot(); });
+window.addEventListener('load', loadScreenshot);
+
+// ── point conversion: screenshot CSS pixels → mac display points ───────────
+// The screenshot is rendered at its natural pixel size (max-width: none).
+// So a click at CSS (x, y) on the <img> corresponds to:
+//   mac_x_local = (x / naturalWidth)  * screenW   (in display points)
+//   mac_y_local = (y / naturalHeight) * screenH
+// (Backend adds the display origin to reach global event coords.)
+function clientToWrap(clientX, clientY) {
+  const rect = wrapEl.getBoundingClientRect();
+  return { x: clientX - rect.left, y: clientY - rect.top };
+}
+function wrapToFractions(x, y) {
+  if (!screenImg.naturalWidth) return null;
+  return { xf: x / screenImg.naturalWidth, yf: y / screenImg.naturalHeight };
+}
+
+// ── click/drag pipeline ────────────────────────────────────────────────────
+const DRAG_THRESHOLD = 6;
+const DBLCLICK_DELAY = 220;
+let mouseStart = null;     // { x, y, t, button, shift, ctrl }
+let pendingClick = null;   // setTimeout handle for delayed single-click
+
+function cancelPending() {
+  if (pendingClick) { clearTimeout(pendingClick); pendingClick = null; }
+}
+
+// After any state-changing action, refresh the screenshot so the user
+// sees the result without manually clicking Load. ALSO resets the
+// auto-reload tick counter — any explicit user activity counts as
+// "still active", so the auto-reloader doesn't hit its safety cap.
+// No-op when auto is off (nothing to reset).
+function resetAutoCount() { if (autoTimer) autoCount = 0; }
+function scheduleReload(delayMs = 500) {
+  resetAutoCount();
+  clearTimeout(scheduleReload._t);
+  scheduleReload._t = setTimeout(loadScreenshot, delayMs);
+}
+
+// ── Keybar helpers — used by the special-keys buttons up top. ──────
+async function sendKeyPC(key, opts = {}) {
+  try {
+    await fetch('/remote/api/key', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', ...authHeaders()},
+      body: JSON.stringify({ key }),
+    });
+    setStatus(key + ' ✓', 'ok');
+    if (opts.reload) scheduleReload();
+  } catch (e) { setStatus('key ✗ ' + e.message, 'err'); }
+}
+async function sendScrollPC(dx, dy) {
+  try {
+    await fetch('/remote/api/scroll', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', ...authHeaders()},
+      body: JSON.stringify({ dx, dy }),
+    });
+    setStatus(`scroll ${dy > 0 ? '↑' : '↓'} ${Math.abs(dy)} ✓`, 'ok');
+    scheduleReload();
+  } catch (e) { setStatus('scroll ✗ ' + e.message, 'err'); }
+}
+// ── Unlock modal ───────────────────────────────────────────────────
+// Password input is created on demand so the DOM doesn't carry a
+// permanent type=password (which would prompt Chrome's saved-password UI).
+const unlockModal      = document.getElementById('unlockModal');
+const unlockPwdSlot    = document.getElementById('unlockPwdSlot');
+const unlockLockFirst  = document.getElementById('unlockLockFirst');
+const unlockWake       = document.getElementById('unlockWake');
+let unlockPwdEl = null;
+
+function openUnlockModal() {
+  unlockPwdSlot.innerHTML =
+    '<input type="password" id="unlockPwd" placeholder="Mac password" autocomplete="off" />';
+  unlockPwdEl = document.getElementById('unlockPwd');
+  unlockPwdEl.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter')  { ev.preventDefault(); submitUnlock(); }
+    if (ev.key === 'Escape') { ev.preventDefault(); closeUnlockModal(); }
+  });
+  unlockModal.classList.add('show');
+  setTimeout(() => unlockPwdEl && unlockPwdEl.focus(), 50);
+}
+function closeUnlockModal() {
+  unlockModal.classList.remove('show');
+  unlockPwdSlot.innerHTML = '';
+  unlockPwdEl = null;
+}
+async function submitUnlock() {
+  const pwd = unlockPwdEl ? unlockPwdEl.value : '';
+  if (!pwd) { setStatus('unlock: empty pw', 'err'); return; }
+  try {
+    await fetch('/remote/api/unlock', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', ...authHeaders()},
+      body: JSON.stringify({
+        password: pwd,
+        wake: unlockWake.checked,
+        lock_first: unlockLockFirst.checked,
+      }),
+    });
+    setStatus('unlock sent ✓', 'ok');
+    closeUnlockModal();
+    scheduleReload();
+  } catch (e) {
+    setStatus('unlock ✗ ' + e.message, 'err');
+  }
+}
+unlockModal.addEventListener('click', (ev) => {
+  if (ev.target === unlockModal) closeUnlockModal();
+});
+
+async function runActionPC(action) {
+  try {
+    await fetch('/remote/api/run', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', ...authHeaders()},
+      body: JSON.stringify({ type: action.type, target: action.target || '' }),
+    });
+    setStatus(action.label + ' ✓', 'ok');
+    if (action.reload !== false) scheduleReload();
+  } catch (e) { setStatus(action.label + ' ✗ ' + e.message, 'err'); }
+}
+
+async function postClick(xf, yf, button, double) {
+  try {
+    const d = await fetch('/remote/api/click', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ xf, yf, button, double, display: currentDisplay() }),
+    }).then(r => r.json());
+    setStatus(`${button}${double ? '×2' : ''} @ ${Math.round(d.x)},${Math.round(d.y)} ✓`, 'ok');
+    scheduleReload();
+  } catch (e) {
+    setStatus('click ✗ ' + e.message, 'err');
+  }
+}
+
+async function postDrag(x1f, y1f, x2f, y2f) {
+  try {
+    const d = await fetch('/remote/api/drag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ x1f, y1f, x2f, y2f, display: currentDisplay() }),
+    }).then(r => r.json());
+    setStatus(`drag ${Math.round(d.from[0])},${Math.round(d.from[1])} → ${Math.round(d.to[0])},${Math.round(d.to[1])} ✓`, 'ok');
+    scheduleReload();
+  } catch (e) {
+    setStatus('drag ✗ ' + e.message, 'err');
+  }
+}
+
+// Only one zoom popup at a time — a new shift+click replaces the old one.
+let currentZoomPopup = null;
+function dismissZoomPopup() {
+  if (!currentZoomPopup) return;
+  const { el, objUrl, timer } = currentZoomPopup;
+  if (timer) clearTimeout(timer);
+  el.remove();
+  if (objUrl) URL.revokeObjectURL(objUrl);
+  currentZoomPopup = null;
+}
+
+async function showZoomPopup(clientX, clientY, frac) {
+  dismissZoomPopup();
+  const macX = Math.round(frac.xf * screenW);
+  const macY = Math.round(frac.yf * screenH);
+  const w = 700, h = 200;
+  const url = `/remote/api/cursor_strip?w=${w}&h=${h}&q=75&native_res=true&cx=${macX}&cy=${macY}&display=${currentDisplay()}`;
+  try {
+    const r = await fetch(url, { headers: authHeaders() });
+    if (!r.ok) throw new Error(r.statusText);
+    // Backend may clamp the rect near display edges so the crop stays
+    // fully on-screen; the actual rect comes back as X-Strip-X/Y/W/H in
+    // DISPLAY-LOCAL mac points. Anchor the popup using THAT rect, not the
+    // click point — otherwise the overlay drifts at the edges.
+    const stripX = parseFloat(r.headers.get('X-Strip-X') || '0');
+    const stripY = parseFloat(r.headers.get('X-Strip-Y') || '0');
+    const stripW = parseFloat(r.headers.get('X-Strip-W') || String(w));
+    const stripH = parseFloat(r.headers.get('X-Strip-H') || String(h));
+    const blob = await r.blob();
+    const objUrl = URL.createObjectURL(blob);
+    const pop = document.createElement('div');
+    pop.className = 'zoom-popup';
+    const img = document.createElement('img');
+    img.src = objUrl;
+    // Each mac point maps to (naturalWidth / screenW) browser pixels on
+    // the displayed screenshot — image is rendered at its natural size.
+    const ratioX = screenImg.naturalWidth  / screenW;
+    const ratioY = screenImg.naturalHeight / screenH;
+    let dispW = stripW * ratioX;
+    let dispH = stripH * ratioY;
+    // Shrink the overlay (preserving aspect) if it would not fit in the
+    // viewport. Near corners the overlay can drift off its source, but
+    // its bounds are guaranteed fully visible.
+    const PAD = 10;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const scale = Math.min(1, (vw - 2 * PAD) / dispW, (vh - 2 * PAD) / dispH);
+    dispW = Math.round(dispW * scale);
+    dispH = Math.round(dispH * scale);
+    img.style.width  = dispW + 'px';
+    img.style.height = dispH + 'px';
+    pop.appendChild(img);
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    pop.appendChild(meta);
+    document.body.appendChild(pop);
+    await new Promise(res => img.onload = res);
+    meta.textContent = `${img.naturalWidth}×${img.naturalHeight} px · ${(blob.size/1024).toFixed(1)} KB · @${(scale*100).toFixed(0)}%`;
+    lastCropKB = (blob.size/1024).toFixed(1);
+    updateTraffic();
+    // Source rect in screenshot natural pixels:
+    const srcLeftPx = stripX * ratioX;
+    const srcTopPx  = stripY * ratioY;
+    // Translate to viewport: wrapEl's current viewport offset + screenshot pixel.
+    const wrapRect = wrapEl.getBoundingClientRect();
+    let imgViewportLeft = wrapRect.left + srcLeftPx * scale;
+    let imgViewportTop  = wrapRect.top  + srcTopPx  * scale;
+    // CSS box-sizing:border-box — pop.left = border-edge. img is offset
+    // inside by 1.5px border + 2px padding = 3.5px each side.
+    let px = imgViewportLeft - 3.5;
+    let py = imgViewportTop  - 3.5;
+    const popW = dispW + 7, popH = dispH + 7 + 16;     // 16 ≈ meta-line height
+    px = Math.max(PAD, Math.min(px, vw - popW - PAD));
+    py = Math.max(PAD, Math.min(py, vh - popH - PAD));
+    pop.style.left = px + 'px';
+    pop.style.top  = py + 'px';
+    const timer = setTimeout(dismissZoomPopup, 6000);
+    currentZoomPopup = { el: pop, objUrl, timer };
+  } catch (e) {
+    setStatus('zoom ✗ ' + e.message, 'err');
+  }
+}
+
+// ── type mode ──────────────────────────────────────────────────────────────
+// Click point (in screenshot CSS pixels) + a configurable crop size.
+// Overlay covers exactly the area the crop was taken from, so the
+// rendered chars appear in place. Input box sits at the bottom of the
+// overlay, per-keystroke sent to /api/type.
+const TYPE_W_PT = 400;   // points wide on mac
+const TYPE_H_PT = 80;    // points tall on mac
+
+function enterTypeMode(wrapX, wrapY, frac) {
+  // The overlay sits in wrapEl coords (image-content pixels). We position
+  // it from the X-Strip-* headers returned by /api/cursor_strip — those
+  // reflect the actual capture rect AFTER any edge-clamp. Using the click
+  // point would drift near display edges.
+  const ratioX = screenImg.naturalWidth  / screenW;
+  const ratioY = screenImg.naturalHeight / screenH;
+  const overlay = document.createElement('div');
+  overlay.className = 'type-overlay';
+  // Initial best-guess position (click-centered, before headers come back)
+  // — refined below as soon as the first refreshCrop completes.
+  let cssW = Math.round(TYPE_W_PT * ratioX);
+  let cssH = Math.round(TYPE_H_PT * ratioY);
+  overlay.style.left  = (wrapX - cssW / 2) + 'px';
+  overlay.style.top   = (wrapY - cssH / 2) + 'px';
+  overlay.style.width  = cssW + 'px';
+  overlay.style.height = cssH + 'px';
+  const img = document.createElement('img');
+  img.className = 'crop';
+  overlay.appendChild(img);
+  // Bottom bar: input + Send + Live toggle (mirrors /remote/'s live-bar).
+  const bar = document.createElement('div');
+  bar.className = 'type-bar';
+  const input = document.createElement('input');
+  input.className = 'live';
+  input.placeholder = 'type here → mac';
+  input.autocapitalize = 'off'; input.autocorrect = 'off'; input.autocomplete = 'off';
+  const sendBtn = document.createElement('button');
+  sendBtn.className = 'send';
+  sendBtn.textContent = 'Send';
+  const liveLabel = document.createElement('label');
+  liveLabel.className = 'live-toggle';
+  const liveCb = document.createElement('input');
+  liveCb.type = 'checkbox';
+  liveLabel.appendChild(liveCb);
+  liveLabel.appendChild(document.createTextNode(' Live'));
+  bar.appendChild(input);
+  bar.appendChild(sendBtn);
+  bar.appendChild(liveLabel);
+  overlay.appendChild(bar);
+  liveCb.addEventListener('change', () => {
+    liveLabel.classList.toggle('on', liveCb.checked);
+  });
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'close';
+  closeBtn.textContent = '×';
+  overlay.appendChild(closeBtn);
+  wrapEl.appendChild(overlay);
+
+  const macX = Math.round(frac.xf * screenW);
+  const macY = Math.round(frac.yf * screenH);
+  let lastBlobUrl = '';
+  let refreshTimer = 0;
+  async function refreshCrop() {
+    try {
+      // native_res=true → JPEG keeps full retina pixel count, so a mild
+      // browser downscale to dispW×dispH stays sharp.
+      const r = await fetch(`/remote/api/cursor_strip?w=${TYPE_W_PT}&h=${TYPE_H_PT}&q=75&native_res=true&cx=${macX}&cy=${macY}&display=${currentDisplay()}`,
+                            { headers: authHeaders() });
+      if (!r.ok) return;
+      // Re-anchor overlay using the actual captured rect (display-local pts).
+      const stripX = parseFloat(r.headers.get('X-Strip-X') || '0');
+      const stripY = parseFloat(r.headers.get('X-Strip-Y') || '0');
+      const stripW = parseFloat(r.headers.get('X-Strip-W') || String(TYPE_W_PT));
+      const stripH = parseFloat(r.headers.get('X-Strip-H') || String(TYPE_H_PT));
+      // border-box: overlay.width already includes the 2px border. The
+      // CSS img inside is width/height 100%, so it fills the content box
+      // which is (overlay.width - 2*border) = source-area-in-screenshot.
+      overlay.style.left   = (stripX * ratioX - 2) + 'px';
+      overlay.style.top    = (stripY * ratioY - 2) + 'px';
+      overlay.style.width  = (stripW * ratioX + 4) + 'px';
+      overlay.style.height = (stripH * ratioY + 4) + 'px';
+      const blob = await r.blob();
+      if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+      lastBlobUrl = URL.createObjectURL(blob);
+      img.src = lastBlobUrl;
+      lastCropKB = (blob.size/1024).toFixed(1);
+      updateTraffic();
+    } catch {}
+  }
+  refreshCrop();
+
+  function exit() {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+    overlay.remove();
+    document.removeEventListener('mousedown', outsideHandler, true);
+  }
+  function outsideHandler(ev) {
+    if (!overlay.contains(ev.target)) exit();
+  }
+  document.addEventListener('mousedown', outsideHandler, true);
+  closeBtn.addEventListener('click', exit);
+
+  // Per-keystroke: send + debounced crop refresh.
+  function scheduleRefresh() {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(refreshCrop, 250);
+  }
+  async function sendBuffered() {
+    const text = input.value;
+    if (!text) return;
+    try {
+      await fetch('/remote/api/type', {
+        method:'POST',
+        headers:{'Content-Type':'application/json', ...authHeaders()},
+        body: JSON.stringify({ text }),
+      });
+      input.value = '';
+      scheduleRefresh();
+      resetAutoCount();
+    } catch (e) {
+      setStatus('type ✗ ' + e.message, 'err');
+    }
+  }
+  sendBtn.addEventListener('click', sendBuffered);
+
+  input.addEventListener('keydown', async (ev) => {
+    if (ev.key === 'Escape') { ev.preventDefault(); exit(); return; }
+    // Send mode (Live OFF): buffer locally; Enter / Send-button flushes.
+    // The user can use arrows / Backspace etc to edit the buffer freely
+    // (browser default behavior on the <input>) and only ship the final
+    // string. Tab and other special keys also stay local.
+    if (!liveCb.checked) {
+      if (ev.key === 'Enter') { ev.preventDefault(); sendBuffered(); }
+      return;
+    }
+    // Live mode: per-keystroke forwarding (specials → /api/key, modifier
+    // combos → /api/key, plain chars → /api/type).
+    const KEY_MAP = { Enter:'Return', Tab:'Tab', Backspace:'Backspace', Delete:'ForwardDelete',
+                      ArrowUp:'Up', ArrowDown:'Down', ArrowLeft:'Left', ArrowRight:'Right' };
+    if (KEY_MAP[ev.key]) {
+      ev.preventDefault();
+      const mods = [];
+      if (ev.metaKey) mods.push('cmd');
+      if (ev.ctrlKey) mods.push('ctrl');
+      if (ev.altKey)  mods.push('opt');
+      if (ev.shiftKey && (mods.length || KEY_MAP[ev.key].length > 1)) mods.push('shift');
+      const keySpec = mods.length ? mods.join('+') + '+' + KEY_MAP[ev.key] : KEY_MAP[ev.key];
+      try { await fetch('/remote/api/key', { method:'POST', headers:{'Content-Type':'application/json', ...authHeaders()},
+                                     body: JSON.stringify({ key: keySpec }) }); } catch {}
+      scheduleRefresh();
+      if (ev.key === 'Enter') resetAutoCount();
+      return;
+    }
+    if ((ev.metaKey || ev.ctrlKey || ev.altKey) && ev.key.length === 1) {
+      ev.preventDefault();
+      const mods = [];
+      if (ev.metaKey) mods.push('cmd');
+      if (ev.ctrlKey) mods.push('ctrl');
+      if (ev.altKey)  mods.push('opt');
+      if (ev.shiftKey) mods.push('shift');
+      const keySpec = mods.join('+') + '+' + ev.key.toLowerCase();
+      try { await fetch('/remote/api/key', { method:'POST', headers:{'Content-Type':'application/json', ...authHeaders()},
+                                     body: JSON.stringify({ key: keySpec }) }); } catch {}
+      scheduleRefresh();
+      return;
+    }
+    if (ev.key.length === 1) {
+      ev.preventDefault();
+      try { await fetch('/remote/api/type', { method:'POST', headers:{'Content-Type':'application/json', ...authHeaders()},
+                                      body: JSON.stringify({ text: ev.key }) }); } catch {}
+      scheduleRefresh();
+    }
+  });
+  setTimeout(() => input.focus(), 50);
+}
+
+// ── mouse pipeline on the capture layer ────────────────────────────────────
+captureEl.addEventListener('contextmenu', (ev) => ev.preventDefault());
+
+captureEl.addEventListener('mousedown', (ev) => {
+  if (!screenImg.naturalWidth) return;
+  const { x, y } = clientToWrap(ev.clientX, ev.clientY);
+  mouseStart = {
+    x, y,
+    clientX: ev.clientX, clientY: ev.clientY,   // viewport coords for popup positioning
+    button: ev.button,                          // 0 left, 1 middle, 2 right
+  };
+  // Start drawing the drag-line — only actually shown once mouse moves past threshold.
+  dragLineEl.style.left = x + 'px';
+  dragLineEl.style.top  = y + 'px';
+  dragLineEl.style.display = 'none';
+});
+
+captureEl.addEventListener('mousemove', (ev) => {
+  if (!mouseStart) return;
+  const { x, y } = clientToWrap(ev.clientX, ev.clientY);
+  const dx = x - mouseStart.x, dy = y - mouseStart.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist > DRAG_THRESHOLD) {
+    captureEl.classList.add('dragging');
+    dragLineEl.style.display = 'block';
+    // Anchor left edge at mousedown point; rotate by start→cur angle.
+    const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+    dragLineEl.style.left = mouseStart.x + 'px';
+    dragLineEl.style.top  = mouseStart.y + 'px';
+    dragLineEl.style.width = dist + 'px';
+    dragLineEl.style.transform = `rotate(${angle}deg)`;
+  }
+});
+
+captureEl.addEventListener('mouseup', (ev) => {
+  if (!mouseStart) return;
+  const start = mouseStart;
+  mouseStart = null;
+  captureEl.classList.remove('dragging');
+  dragLineEl.style.display = 'none';
+  const { x, y } = clientToWrap(ev.clientX, ev.clientY);
+  const dx = x - start.x, dy = y - start.y;
+  const dist = Math.hypot(dx, dy);
+  const startFrac = wrapToFractions(start.x, start.y);
+  const endFrac   = wrapToFractions(x, y);
+  if (!startFrac || !endFrac) return;
+  pulseAt(start.x, start.y);
+
+  // Drag — fire if moved beyond threshold (any button)
+  if (dist > DRAG_THRESHOLD) {
+    cancelPending();
+    postDrag(startFrac.xf, startFrac.yf, endFrac.xf, endFrac.yf);
+    return;
+  }
+
+  // Right click — immediate, no delay
+  if (start.button === 2) { cancelPending(); postClick(startFrac.xf, startFrac.yf, 'right', false); return; }
+
+  // Left click — schedule single click, dblclick handler may cancel.
+  // After the click is posted, the mode radio decides what (if anything)
+  // fires on top.
+  if (start.button === 0) {
+    cancelPending();
+    pendingClick = setTimeout(() => {
+      pendingClick = null;
+      postClick(startFrac.xf, startFrac.yf, 'left', false);
+      const m = currentMode();
+      if      (m === 'type') enterTypeMode(start.x, start.y, startFrac);
+      else if (m === 'zoom') showZoomPopup(start.clientX, start.clientY, startFrac);
+    }, DBLCLICK_DELAY);
+  }
+});
+
+captureEl.addEventListener('dblclick', (ev) => {
+  if (!screenImg.naturalWidth) return;
+  cancelPending();
+  const { x, y } = clientToWrap(ev.clientX, ev.clientY);
+  const frac = wrapToFractions(x, y);
+  if (!frac) return;
+  pulseAt(x, y);
+  postClick(frac.xf, frac.yf, 'left', true);
+});
+
+// Cancel pending mousedown state if mouse leaves the window (avoids stuck
+// drag-state when user releases outside).
+window.addEventListener('mouseup', () => {
+  if (mouseStart) { mouseStart = null; captureEl.classList.remove('dragging'); dragLineEl.style.display = 'none'; }
+});
+
+// Mode radio: exactly one of off / zoom / type / capkeys is active.
+//   zoom     → after each click on the screenshot, fire a zoom popup
+//              aligned with the click area
+//   type     → after each click, enter type-mode (input box + crop overlay
+//              that covers the click area)
+//   capkeys  → while the cursor is over the screenshot, every key the user
+//              presses goes to Mac (preventDefault here, so browser
+//              shortcuts like Cmd+R / Cmd+T won't fire on this page;
+//              switch back to "off" to use the browser normally)
+function currentMode() {
+  const r = document.querySelector('input[name="actionMode"]:checked');
+  return r ? r.value : 'off';
+}
+
+// ── Capture-keys-on-hover ──────────────────────────────────────────
+let mouseOverScreen = false;
+captureEl.addEventListener('mouseenter', () => { mouseOverScreen = true;  updateHoverCursor(); });
+captureEl.addEventListener('mouseleave', () => { mouseOverScreen = false; updateHoverCursor(); });
+
+const PASS_KEY_MAP = {
+  Enter:'Return', Tab:'Tab', Escape:'Escape',
+  Backspace:'Backspace', Delete:'ForwardDelete',
+  ArrowUp:'Up', ArrowDown:'Down', ArrowLeft:'Left', ArrowRight:'Right',
+  Home:'Home', End:'End', PageUp:'PageUp', PageDown:'PageDown',
+  F1:'F1', F2:'F2', F3:'F3', F4:'F4', F5:'F5', F6:'F6',
+  F7:'F7', F8:'F8', F9:'F9', F10:'F10', F11:'F11', F12:'F12',
+};
+
+async function forwardKey(ev) {
+  const k = ev.key;
+  if (PASS_KEY_MAP[k]) {
+    const mods = [];
+    if (ev.metaKey)  mods.push('cmd');
+    if (ev.ctrlKey)  mods.push('ctrl');
+    if (ev.altKey)   mods.push('opt');
+    if (ev.shiftKey && (mods.length > 0 || PASS_KEY_MAP[k].length > 1)) mods.push('shift');
+    const spec = (mods.length ? mods.join('+') + '+' : '') + PASS_KEY_MAP[k];
+    await fetch('/remote/api/key', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', ...authHeaders()},
+      body: JSON.stringify({ key: spec }),
+    });
+    setStatus(spec + ' ✓', 'ok');
+    return;
+  }
+  if ((ev.metaKey || ev.ctrlKey || ev.altKey) && k.length === 1) {
+    const mods = [];
+    if (ev.metaKey)  mods.push('cmd');
+    if (ev.ctrlKey)  mods.push('ctrl');
+    if (ev.altKey)   mods.push('opt');
+    if (ev.shiftKey) mods.push('shift');
+    const spec = mods.join('+') + '+' + k.toLowerCase();
+    await fetch('/remote/api/key', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', ...authHeaders()},
+      body: JSON.stringify({ key: spec }),
+    });
+    setStatus(spec + ' ✓', 'ok');
+    return;
+  }
+  if (k.length === 1) {
+    await fetch('/remote/api/type', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', ...authHeaders()},
+      body: JSON.stringify({ text: k }),
+    });
+    setStatus('typed "' + k + '" ✓', 'ok');
+  }
+}
+
+// Keys that would otherwise scroll the screenshot's container. In any
+// mode that forwards keys to Mac, we want these intercepted so the
+// display doesn't scroll behind the user's back.
+const SCROLL_KEYS = new Set([
+  'ArrowUp','ArrowDown','ArrowLeft','ArrowRight',
+  'PageUp','PageDown','Home','End', ' ',
+]);
+
+// Capture-phase keydown — runs before the browser's default action for
+// shortcuts like Ctrl+Cmd+F that the browser might otherwise grab.
+document.addEventListener('keydown', (ev) => {
+  const mode = currentMode();
+  const tgt = ev.target;
+  const isInInput = tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA');
+
+  // capkeys mode + mouse over the screenshot: forward EVERY non-modifier
+  // key (this is the full keyboard passthrough).
+  if (mode === 'capkeys' && mouseOverScreen) {
+    if (isInInput) return;
+    if (['Shift','Control','Alt','Meta'].includes(ev.key)) return;
+    ev.preventDefault();
+    const k = ev.key;
+    forwardKey(ev)
+      .then(() => {
+        // Only ENTER and ESC reload the screenshot — refreshing on every
+        // char would thrash bandwidth during normal typing.
+        if (k === 'Enter' || k === 'Escape') scheduleReload();
+      })
+      .catch(e => setStatus('key ✗ ' + e.message, 'err'));
+    return;
+  }
+
+  // type or capkeys mode: at minimum, intercept arrow / page / space /
+  // home / end so they don't scroll the screenshot's <main> wrapper —
+  // forward to Mac instead. type-overlay's own input handler already
+  // catches arrows when focused; this is the fallback for when the
+  // overlay is closed (or the user clicked outside it).
+  if ((mode === 'type' || mode === 'capkeys') && !isInInput && SCROLL_KEYS.has(ev.key)) {
+    ev.preventDefault();
+    forwardKey(ev).catch(() => {});
+  }
+}, true);   // ← capture phase
+
+function updateHoverCursor() {
+  captureEl.style.cursor = (currentMode() === 'capkeys' && mouseOverScreen) ? 'text' : 'crosshair';
+}
+document.querySelectorAll('input[name="actionMode"]').forEach(r => r.addEventListener('change', updateHoverCursor));
+updateHoverCursor();
+
+</script>
+</body>
+</html>

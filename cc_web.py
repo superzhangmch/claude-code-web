@@ -2453,5 +2453,11 @@ try:
         app.mount("/remote", StaticFiles(directory=_REMOTE_STATIC, html=True),
                   name="remote_mac_static")
     log.info("mounted remote_mac at /remote/")
+    # Desktop counterpart — same backend endpoints, mouse-centric UI.
+    _REMOTE_PC_STATIC = Path(__file__).parent / "remote_pc_static"
+    if _REMOTE_PC_STATIC.exists():
+        app.mount("/remote_pc", StaticFiles(directory=_REMOTE_PC_STATIC, html=True),
+                  name="remote_pc_static")
+        log.info("mounted remote_pc at /remote_pc/")
 except Exception as e:
     log.warning("remote_mac not mounted: %s", e)
