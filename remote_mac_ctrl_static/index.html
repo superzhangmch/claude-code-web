@@ -100,6 +100,27 @@
     pointer-events: none;
   }
 
+  /* Action-stack: column of 2 buttons that fills the third pad-row slot
+     where the cursor precision pad used to be (Wake / Dock). Sized by
+     JS so it matches the minimap's height. */
+  .action-stack {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 4px;
+    align-self: flex-start;
+  }
+  .action-stack button {
+    appearance: none; border: none;
+    background: var(--card); color: var(--fg);
+    border-radius: 8px;
+    font: inherit; font-size: 13px; font-weight: 600;
+    cursor: pointer; touch-action: manipulation;
+    white-space: nowrap; overflow: hidden;
+  }
+  .action-stack button:active { background: var(--card-hi); }
+
   /* Trackpad: absolute-positioning navigator. Aspect matches the screenshot,
      so touch position maps directly to where on the screenshot you want to view. */
   /* Row: arrow-pad | screen-pad (rotated minimap) | click-actions */
@@ -110,11 +131,12 @@
     align-items: flex-start;
   }
 
-  /* 5-col × 2-row grid: nav + edit keys + system shortcuts.
-     Short buttons to save vertical space. */
+  /* 4-col grid: nav row + arrow row (with ⌫ aligned under 🔍 Strip) +
+     two rows of readline / clipboard shortcuts. Short buttons to save
+     vertical space. */
   .nav-grid {
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 6px;
     margin-top: 12px;
   }
@@ -130,9 +152,12 @@
   }
   .nav-grid button:active { background: var(--card-hi); }
 
-  /* Quick keys: 2x2 grid in the pad-row, sized to match minimap height */
+  /* Quick keys: 2x2 grid in the pad-row, sized to match minimap height.
+     flex: 2 so each of the 2 columns ends up the same width as the
+     single column in .action-stack alongside it (which is flex: 1).
+     Result: every button in the row has the same horizontal width. */
   .quick-keys {
-    flex: 1;
+    flex: 2;
     display: grid;
     grid-template-columns: 1fr 1fr;
     grid-template-rows: 1fr 1fr;
@@ -148,40 +173,6 @@
     white-space: nowrap; overflow: hidden;
   }
   .quick-keys button:active { background: var(--card-hi); }
-
-  /* Cursor-precision pad — aspect = the screenshot DISPLAY CONTAINER's aspect
-     (screen-wrap, which is smaller than the full screenshot image). Touching
-     a spot here moves the click marker to the corresponding spot inside that
-     visible viewport. */
-  .cursor-pad {
-    flex: 1;                            /* fill remaining row width */
-    background: var(--card);
-    border: 1px dashed #2a3038;
-    border-radius: 10px;
-    position: relative;
-    overflow: hidden;
-    touch-action: none;
-    user-select: none;
-    -webkit-user-select: none;
-    aspect-ratio: 2 / 3;                /* initial: portrait (h:w = 3:2). JS overrides on image load. */
-  }
-  .cursor-pad .cp-hint {
-    position: absolute; inset: 0;
-    display: flex; align-items: center; justify-content: center;
-    color: var(--dim); font-size: 11px;
-    pointer-events: none;
-  }
-  .cursor-pad .cp-dot {
-    position: absolute;
-    width: 12px; height: 12px;
-    background: var(--accent);
-    border-radius: 50%;
-    transform: translate(-50%, -50%);
-    pointer-events: none;
-    opacity: 0;
-  }
-  .cursor-pad.active .cp-dot  { opacity: 0.9; }
-  .cursor-pad.active .cp-hint { opacity: 0.15; }
 
   .screen-pad {
     flex: 0 0 35%;
@@ -392,9 +383,8 @@
     /* Screenshot keeps full available width (large display area) */
     .screen-wrap { max-height: 75vh; }
 
-    /* Touch pads stay small, regardless of viewport */
+    /* Touch pad stays small, regardless of viewport */
     .screen-pad  { flex: 0 0 auto; width: 160px; }
-    .cursor-pad  { max-width: 120px; }
 
     /* Other controls don't need to span the whole monitor */
     .pad-row,
@@ -435,9 +425,9 @@
       <button onclick="openUnlockModal()">Unlock</button>
       <button onclick="sendKey('ctrl+cmd+q')">Lock</button>
     </div>
-    <div class="cursor-pad" id="cursorPad">
-      <span class="cp-hint">cursor</span>
-      <span class="cp-dot" id="cursorDot"></span>
+    <div class="action-stack">
+      <button onclick="runAction(this, {label:'Dock', type:'show_dock', target:''})">Dock</button>
+      <button onclick="runAction(this, {label:'Wake', type:'wake', target:''})">Wake</button>
     </div>
   </div>
   <div class="selected-info" id="selectedInfo"></div>
@@ -469,20 +459,20 @@
     <label class="live-toggle" id="liveToggleLabel"><input type="checkbox" id="liveOn">Live</label>
   </div>
 
-  <!-- 4 rows × 5 cols. Row 1-2: scrolling + arrows + utilities.
-       Row 3: terminal line-nav + delete trio (readline-style ^A ^E ^W ^U ^K).
-       Row 4: ^C interrupt, ^L clear, Shift+Tab (claude code mode), ⌘C ⌘V. -->
+  <!-- 4 rows × 4 cols:
+       Row 1: scroll + arrow up + scroll + strip-screenshot
+       Row 2: arrows ← ↓ → and ⌫ Backspace (sits under 🔍 Strip)
+       Row 3: ⌃A ⌃E ⌃W ⌃U   (readline line-nav + word-delete)
+       Row 4: ⌃C ⌃L ⌘C ⌘V   (interrupt, clear, copy, paste) -->
   <div class="nav-grid">
     <button onclick="sendScroll(0, 400)">PgUp</button>
     <button onclick="sendKey('Up')">↑</button>
     <button onclick="sendScroll(0, -400)">PgDn</button>
     <button onclick="fetchCursorStrip(75)" title="Load a strip of the screen around the cursor marker (high quality)">🔍 Strip</button>
-    <button onclick="sendKey('Backspace')">⌫</button>
     <button onclick="sendKey('Left')">←</button>
     <button onclick="sendKey('Down')">↓</button>
     <button onclick="sendKey('Right')">→</button>
-    <button onclick="runAction(this, {label:'Wake', type:'wake', target:''})">💡 Wake</button>
-    <button onclick="runAction(this, {label:'Dock', type:'show_dock', target:''})">Dock</button>
+    <button onclick="sendKey('Backspace')">⌫</button>
     <button onclick="sendKey('ctrl+a')" title="Ctrl+A — line start">⌃A</button>
     <button onclick="sendKey('ctrl+e')" title="Ctrl+E — line end">⌃E</button>
     <button onclick="sendKey('ctrl+w')" title="Ctrl+W — delete word backward">⌃W</button>
@@ -1073,18 +1063,10 @@
     // of the 2 rows of buttons is exactly half of the minimap pad's height.
     const qk = document.querySelector('.quick-keys');
     if (qk && padH) qk.style.height = padH + 'px';
-    // Cursor-pad: match minimap height. Aspect = CSS default 2/3 INITIALLY;
-    // after the screenshot has actually loaded, switch to the real display
-    // window's aspect (screen-wrap clientW/H).
-    const cp = document.getElementById('cursorPad');
-    if (cp && padH) {
-      cp.style.flex = '0 0 auto';
-      cp.style.height = padH + 'px';
-      if (imgEl && imgEl.naturalWidth &&
-          screenWrap.clientWidth && screenWrap.clientHeight) {
-        cp.style.aspectRatio = `${screenWrap.clientWidth} / ${screenWrap.clientHeight}`;
-      }
-    }
+    // Action-stack (Wake / Dock): also match minimap height so the row
+    // ends up at three uniformly-tall columns.
+    const as = document.querySelector('.action-stack');
+    if (as && padH) as.style.height = padH + 'px';
   }
 
   function setPadAspect() {
@@ -1099,7 +1081,7 @@
   window.addEventListener('resize', syncArrowPadHeight);
 
   // Whenever screen-wrap actually re-lays-out (image swap, max-height kicking
-  // in, etc.), re-sync cursor-pad aspect to it. This avoids stale ratios.
+  // in, etc.), re-sync action-stack height to it. This avoids stale ratios.
   if (typeof ResizeObserver !== 'undefined') {
     new ResizeObserver(() => syncArrowPadHeight()).observe(screenWrap);
     new ResizeObserver(() => syncArrowPadHeight()).observe(screenPad);
@@ -1159,44 +1141,6 @@
   screenPad.addEventListener('mousedown', (ev) => { ev.preventDefault(); padDown(ev.clientX, ev.clientY); });
   window.addEventListener('mousemove', (ev) => { if (padActive) padMove(ev.clientX, ev.clientY); });
   window.addEventListener('mouseup',   () => { if (padActive) padEnd(); });
-
-  // ── Cursor-precision pad ───────────────────────
-  // Aspect = current visible viewport of the screenshot. Touching here
-  // places the click marker inside that viewport without scrolling.
-  const cursorPad = document.getElementById('cursorPad');
-  const cursorDot = document.getElementById('cursorDot');
-  let cursorActive = false;
-
-  function cursorPadAt(cx, cy) {
-    if (!imgEl || !imgEl.naturalWidth) return;
-    const rect = cursorPad.getBoundingClientRect();
-    let xf_pad = (cx - rect.left) / rect.width;
-    let yf_pad = (cy - rect.top)  / rect.height;
-    xf_pad = Math.max(0, Math.min(1, xf_pad));
-    yf_pad = Math.max(0, Math.min(1, yf_pad));
-    cursorDot.style.left = (cx - rect.left) + 'px';
-    cursorDot.style.top  = (cy - rect.top)  + 'px';
-    // Pad fractions map 1:1 to viewport fractions (same aspect)
-    setSelectedAtViewport(xf_pad * screenWrap.clientWidth, yf_pad * screenWrap.clientHeight);
-  }
-
-  function cursorDown(cx, cy) { cursorActive = true;  cursorPad.classList.add('active');   cursorPadAt(cx, cy); }
-  function cursorMove(cx, cy) { if (cursorActive)     cursorPadAt(cx, cy); }
-  function cursorEnd()        { cursorActive = false; cursorPad.classList.remove('active'); }
-
-  cursorPad.addEventListener('touchstart', (ev) => {
-    ev.preventDefault();
-    const t = ev.targetTouches[0]; if (t) cursorDown(t.clientX, t.clientY);
-  }, { passive: false });
-  cursorPad.addEventListener('touchmove', (ev) => {
-    ev.preventDefault();
-    const t = ev.targetTouches[0]; if (t) cursorMove(t.clientX, t.clientY);
-  }, { passive: false });
-  cursorPad.addEventListener('touchend',    cursorEnd);
-  cursorPad.addEventListener('touchcancel', cursorEnd);
-  cursorPad.addEventListener('mousedown', (ev) => { ev.preventDefault(); cursorDown(ev.clientX, ev.clientY); });
-  window.addEventListener('mousemove', (ev) => { if (cursorActive) cursorMove(ev.clientX, ev.clientY); });
-  window.addEventListener('mouseup',   () => { if (cursorActive) cursorEnd(); });
 
   async function sendScroll(dx, dy) {
     try {
