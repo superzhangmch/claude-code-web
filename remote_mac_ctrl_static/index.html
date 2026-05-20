@@ -746,6 +746,11 @@
           const sy = imgEl.naturalHeight / prevScroll.ih;
           screenWrap.scrollLeft = prevScroll.x * sx;
           screenWrap.scrollTop  = prevScroll.y * sy;
+          // Markers are stored in image-pixel coords; if the screenshot
+          // was reloaded at a different width (changing natural dims),
+          // rescale them too so they stay anchored to the same scene.
+          if (selectedImg)  { selectedImg.x  *= sx; selectedImg.y  *= sy; }
+          if (dragStartImg) { dragStartImg.x *= sx; dragStartImg.y *= sy; }
         }
         drawPadViewport();
         repositionMarker();
@@ -850,15 +855,14 @@
   // Tap on the screen image only SELECTS a position (shows marker).
   // The click is fired by the Click / Double / Right buttons.
   //
-  // Position is stored as VIEWPORT-fractional coords (0..1 of the visible
-  // window inside screen-wrap), NOT image content coords. So when the user
-  // pans via the minimap, the marker stays put inside the displaying window
-  // while the image scrolls behind it. The actual image-pixel target is
-  // recomputed from selectedVF at click time.
   let touchStart = null;
-  let selectedVF = null;       // {xf, yf} — viewport-fractional in [0,1]
-  let dragStartVF = null;      // {xf, yf} — locked first endpoint for drag
-  let dragArmed = false;       // true after user taps Drag with a selection — next screenshot tap fires
+  // Pixel coordinates on the rendered screenshot — NOT viewport-fractional.
+  // That way the marker is anchored to the image content; an absolutely-
+  // positioned child inside an overflow:auto wrap scrolls with the content,
+  // so the dot stays on the same screen pixel when the user pans/scrolls.
+  let selectedImg  = null;   // { x, y } — chosen click point in image-content pixels
+  let dragStartImg = null;   // { x, y } — locked drag-start point in image-content pixels
+  let dragArmed = false;     // true after user taps Drag with a selection — next tap fires
 
   function onPointerDown(ev) {
     if (!imgEl || !screenW) return;
@@ -899,16 +903,18 @@
   }
 
   function setSelectedAtViewport(viewportX, viewportY) {
-    selectedVF = {
-      xf: Math.max(0, Math.min(1, viewportX / screenWrap.clientWidth)),
-      yf: Math.max(0, Math.min(1, viewportY / screenWrap.clientHeight)),
+    // viewportX/Y are relative to screen-wrap's top-left visible corner.
+    // Add the scroll offset to convert to image-content pixel coords.
+    selectedImg = {
+      x: screenWrap.scrollLeft + viewportX,
+      y: screenWrap.scrollTop  + viewportY,
     };
     if (navigator.vibrate) navigator.vibrate(8);
     repositionMarker();
     updateSelectedInfo();
     // If Drag was armed, this tap is the END point — fire and disarm.
     // Otherwise enable click/drag actions for this freshly-picked point.
-    if (dragArmed && dragStartVF) {
+    if (dragArmed && dragStartImg) {
       fireDragAndDisarm();
     } else {
       document.getElementById('btnClick').disabled  = false;
@@ -918,32 +924,29 @@
     }
   }
 
-  // Marker is a child of screen-wrap (in image-content coords), so we add
-  // current scroll offsets to keep it visually anchored to the viewport.
+  // Marker is a child of screen-wrap (which has overflow:auto). Setting its
+  // left/top in image-content pixel coords means the browser auto-scrolls
+  // it along with the image as the user pans — no scroll-listener math.
   function repositionMarker() {
     const m = document.getElementById('clickMarker');
-    if (!m || !selectedVF) return;
-    const x = screenWrap.scrollLeft + selectedVF.xf * screenWrap.clientWidth;
-    const y = screenWrap.scrollTop  + selectedVF.yf * screenWrap.clientHeight;
-    m.style.left = x + 'px';
-    m.style.top  = y + 'px';
+    if (!m || !selectedImg) return;
+    m.style.left = selectedImg.x + 'px';
+    m.style.top  = selectedImg.y + 'px';
     m.classList.add('show');
   }
 
   // Red drag-start marker, anchored the same way as the blue click marker.
   function repositionDragStartMarker() {
     let m = document.getElementById('dragStartMarker');
-    if (!dragStartVF) { if (m) m.classList.remove('show'); return; }
+    if (!dragStartImg) { if (m) m.classList.remove('show'); return; }
     if (!m) {
       m = document.createElement('div');
       m.id = 'dragStartMarker';
       m.className = 'drag-start-marker';
       screenWrap.appendChild(m);
     }
-    const x = screenWrap.scrollLeft + dragStartVF.xf * screenWrap.clientWidth;
-    const y = screenWrap.scrollTop  + dragStartVF.yf * screenWrap.clientHeight;
-    m.style.left = x + 'px';
-    m.style.top  = y + 'px';
+    m.style.left = dragStartImg.x + 'px';
+    m.style.top  = dragStartImg.y + 'px';
     m.classList.add('show');
   }
 
@@ -954,9 +957,9 @@
   //   - When already armed, tapping Drag again cancels and restores state.
   function toggleArmDrag() {
     if (dragArmed) { disarmDrag(); return; }
-    if (!selectedVF) { flash('pick a start point first', false); return; }
+    if (!selectedImg) { flash('pick a start point first', false); return; }
     dragArmed = true;
-    dragStartVF = { xf: selectedVF.xf, yf: selectedVF.yf };
+    dragStartImg = { x: selectedImg.x, y: selectedImg.y };
     repositionDragStartMarker();
     document.getElementById('btnDrag').classList.add('armed');
     // Disable other click actions while armed — the next tap belongs to
@@ -971,30 +974,29 @@
 
   function disarmDrag() {
     dragArmed = false;
-    dragStartVF = null;
+    dragStartImg = null;
     const m = document.getElementById('dragStartMarker');
     if (m) m.classList.remove('show');
     document.getElementById('btnDrag').classList.remove('armed');
     document.getElementById('btnLoad').disabled = false;
     // Re-enable click action buttons iff a selection still exists.
-    const hasSel = !!selectedVF;
+    const hasSel = !!selectedImg;
     document.getElementById('btnClick').disabled  = !hasSel;
     document.getElementById('btnDouble').disabled = !hasSel;
     document.getElementById('btnRight').disabled  = !hasSel;
   }
 
   async function fireDragAndDisarm() {
-    if (!dragStartVF || !selectedVF || !imgEl || !imgEl.naturalWidth) {
+    if (!dragStartImg || !selectedImg || !imgEl || !imgEl.naturalWidth) {
       disarmDrag(); return;
     }
-    // Convert both viewport fractions → display-local fractions (frontend
-    // sends display-local; backend adds the display's origin).
-    const s_imgX = screenWrap.scrollLeft + dragStartVF.xf * screenWrap.clientWidth;
-    const s_imgY = screenWrap.scrollTop  + dragStartVF.yf * screenWrap.clientHeight;
-    const e_imgX = screenWrap.scrollLeft + selectedVF.xf  * screenWrap.clientWidth;
-    const e_imgY = screenWrap.scrollTop  + selectedVF.yf  * screenWrap.clientHeight;
-    const x1f = s_imgX / imgEl.naturalWidth, y1f = s_imgY / imgEl.naturalHeight;
-    const x2f = e_imgX / imgEl.naturalWidth, y2f = e_imgY / imgEl.naturalHeight;
+    // Both endpoints are already in image-pixel coords — divide by the
+    // image's natural dims to get display-local fractions for the backend
+    // (which adds the display's origin offset).
+    const x1f = dragStartImg.x / imgEl.naturalWidth;
+    const y1f = dragStartImg.y / imgEl.naturalHeight;
+    const x2f = selectedImg.x  / imgEl.naturalWidth;
+    const y2f = selectedImg.y  / imgEl.naturalHeight;
     if (navigator.vibrate) navigator.vibrate(20);
     try {
       const d = await req('api/drag', { x1f, y1f, x2f, y2f, display: currentDisplay() });
@@ -1008,29 +1010,21 @@
 
   function updateSelectedInfo() {
     const info = document.getElementById('selectedInfo');
-    if (!info || !selectedVF || !screenW || !imgEl || !imgEl.naturalWidth) return;
-    const imgX = screenWrap.scrollLeft + selectedVF.xf * screenWrap.clientWidth;
-    const imgY = screenWrap.scrollTop  + selectedVF.yf * screenWrap.clientHeight;
-    const macX = (imgX / imgEl.naturalWidth)  * screenW;
-    const macY = (imgY / imgEl.naturalHeight) * screenH;
+    if (!info || !selectedImg || !screenW || !imgEl || !imgEl.naturalWidth) return;
+    const macX = (selectedImg.x / imgEl.naturalWidth)  * screenW;
+    const macY = (selectedImg.y / imgEl.naturalHeight) * screenH;
     info.textContent = `@ ${Math.round(macX)},${Math.round(macY)}`;
   }
 
-  // Recompute marker + minimap viewport box whenever the screenshot
-  // scrolls — either via finger pan on the wrap or tap on the minimap pad.
-  screenWrap.addEventListener('scroll', () => {
-    repositionMarker();
-    repositionDragStartMarker();
-    updateSelectedInfo();
-    drawPadViewport();
-  });
+  // Markers scroll with the image automatically (they live inside the
+  // overflow:auto wrap), so on scroll we only need to keep the minimap
+  // viewport box in sync.
+  screenWrap.addEventListener('scroll', drawPadViewport);
 
   async function fireClickAction(button, double) {
-    if (!selectedVF || !imgEl || !imgEl.naturalWidth) { flash('pick a spot first', false); return; }
-    const imgX = screenWrap.scrollLeft + selectedVF.xf * screenWrap.clientWidth;
-    const imgY = screenWrap.scrollTop  + selectedVF.yf * screenWrap.clientHeight;
-    const xf = imgX / imgEl.naturalWidth;
-    const yf = imgY / imgEl.naturalHeight;
+    if (!selectedImg || !imgEl || !imgEl.naturalWidth) { flash('pick a spot first', false); return; }
+    const xf = selectedImg.x / imgEl.naturalWidth;
+    const yf = selectedImg.y / imgEl.naturalHeight;
     if (navigator.vibrate) navigator.vibrate(button === 'right' ? 20 : 10);
     try {
       const d = await req('api/click', { xf, yf, button, double, display: currentDisplay() });
@@ -1197,11 +1191,9 @@
         ? qOverride
         : (document.getElementById('quality').value || 50);
       let qs = `w=300&h=55&q=${q}&display=${currentDisplay()}`;
-      if (selectedVF && screenW && screenH && imgEl && imgEl.naturalWidth) {
-        const imgX = screenWrap.scrollLeft + selectedVF.xf * screenWrap.clientWidth;
-        const imgY = screenWrap.scrollTop  + selectedVF.yf * screenWrap.clientHeight;
-        const macX = (imgX / imgEl.naturalWidth)  * screenW;
-        const macY = (imgY / imgEl.naturalHeight) * screenH;
+      if (selectedImg && screenW && screenH && imgEl && imgEl.naturalWidth) {
+        const macX = (selectedImg.x / imgEl.naturalWidth)  * screenW;
+        const macY = (selectedImg.y / imgEl.naturalHeight) * screenH;
         qs += `&cx=${macX.toFixed(0)}&cy=${macY.toFixed(0)}`;
       }
       const r = await fetch('api/cursor_strip?' + qs, { headers });
