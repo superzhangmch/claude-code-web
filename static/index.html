@@ -48,8 +48,16 @@ header .dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; 
 header .dot.off { background: #888; }
 header .dot.err { background: #e04a4a; }
 header .mode-group { display: inline-flex; gap: 2px; }
+/* All header buttons / icons share the same height so they line up
+   with the verbosity (▁▄█) picker. Each individual button keeps its
+   own padding/font-size; this rule just clamps the box. */
+header button, header a.btn, header a.icon {
+  height: 24px;
+  box-sizing: border-box;
+  display: inline-flex; align-items: center; justify-content: center;
+}
 header .mode-group .mode-pick {
-  font-weight: normal; padding: 4px 8px;
+  font-weight: normal; padding: 3px 5px; min-width: 22px;
 }
 header .mode-group .mode-pick.active {
   font-weight: 700; color: var(--accent);
@@ -77,18 +85,22 @@ header .ready.busy::before {
   border: 2px solid #3a2c1f; border-top-color: #e0a070;
   animation: spin 0.8s linear infinite;
 }
-header button.icon {
+header button.icon, header a.icon {
   background: var(--panel2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
-  font-size: 14px; line-height: 1; padding: 4px 8px;
+  font-size: 14px; line-height: 1; padding: 3px 5px;
+  min-width: 22px;
   cursor: pointer;
+  text-decoration: none;
 }
-header button.icon:hover { border-color: var(--accent); }
-header button.btn {
+header button.icon:hover, header a.icon:hover { border-color: var(--accent); }
+header button.btn, header a.btn {
   background: var(--panel2); color: var(--muted);
   border: 1px solid var(--border);
-  padding: 4px 8px; border-radius: 4px;
+  padding: 3px 5px; border-radius: 4px;
+  min-width: 22px;
   font: inherit; font-size: 11px; cursor: pointer;
+  text-decoration: none;
 }
 
 #warn {
@@ -762,6 +774,7 @@ footer button.icon {
     <span id="meta" class="meta"></span>
     <span id="ready" class="ready" style="display:none"></span>
     <span id="traffic" class="traffic"></span>
+    <a id="remote-btn" class="battery" href="/remote/" title="Phone remote control" style="text-decoration:none">📱</a>
     <span id="mode-group" class="mode-group" style="display:none">
       <button class="btn mode-pick" data-mode="brief" title="brief">▁</button>
       <button class="btn mode-pick" data-mode="medium" title="medium">▄</button>
@@ -769,7 +782,6 @@ footer button.icon {
     </span>
     <button id="info-btn" class="btn icon" style="display:none" title="Session info">ⓘ</button>
     <button id="screen-btn" class="btn icon" style="display:none" title="Show iTerm screen">🖥</button>
-    <a id="remote-btn" class="btn icon" href="/remote/" title="Phone remote control" style="text-decoration:none">📱</a>
     <span id="battery" class="battery" style="display:none" title="Click for CPU history"></span>
     <button id="refresh-btn" class="btn icon" style="display:none" title="Refresh list">↻</button>
     <button id="back-btn" class="btn" style="display:none">←</button>
