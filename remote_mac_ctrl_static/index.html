@@ -88,9 +88,9 @@
     background: #000;
     border: 2px solid #e25555;           /* red frame around the display window */
     border-radius: 10px;
-    overflow: hidden;                    /* scrolling happens via the trackpad below */
+    overflow: auto;                      /* finger pans here; minimap trackpad still works */
     max-height: 55vh;
-    touch-action: none;
+    touch-action: pan-x pan-y;           /* allow native pan; tap still fires the marker handler */
     user-select: none;
     -webkit-user-select: none;
   }
@@ -215,24 +215,6 @@
   .click-actions button.armed,
   .click-actions button.primary { background: var(--accent); color: white; }
   .click-actions button:disabled { opacity: 0.35; cursor: default; }
-  /* Drag pair: two half-height buttons stacked, occupying the same row
-     width as a normal sibling. Lets "Drag from" + "Drag" sit in one slot. */
-  .click-actions .drag-pair {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-height: 56px;
-  }
-  .click-actions .drag-pair button {
-    flex: 1;
-    min-height: 0;
-    padding: 0 4px;
-    font-size: 13px;
-    border-radius: 8px;
-    white-space: nowrap;
-    overflow: hidden;
-  }
   .shot-info-row {
     text-align: center;
     margin-top: 6px;
@@ -300,26 +282,26 @@
   }
   .click-marker {
     position: absolute;
-    width: 22px; height: 22px;
-    border: 2px solid var(--accent);
+    width: 12px; height: 12px;
+    border: 1.5px solid var(--accent);
     border-radius: 50%;
     transform: translate(-50%, -50%);
     pointer-events: none;
     opacity: 0;
-    box-shadow: 0 0 0 2px rgba(74,158,255,0.25);
+    box-shadow: 0 0 0 1.5px rgba(74,158,255,0.25);
   }
   .click-marker.show { opacity: 1; }
   /* Drag-start marker = same shape, red instead of blue, so the two are
      distinguishable at a glance when you're setting up a drag. */
   .drag-start-marker {
     position: absolute;
-    width: 22px; height: 22px;
-    border: 2px solid #ff5b5b;
+    width: 12px; height: 12px;
+    border: 1.5px solid #ff5b5b;
     border-radius: 50%;
     transform: translate(-50%, -50%);
     pointer-events: none;
     opacity: 0;
-    box-shadow: 0 0 0 2px rgba(255,91,91,0.25);
+    box-shadow: 0 0 0 1.5px rgba(255,91,91,0.25);
   }
   .drag-start-marker.show { opacity: 1; }
 
@@ -461,11 +443,8 @@
   <div class="selected-info" id="selectedInfo"></div>
 
   <div class="click-actions">
-    <button class="primary" onclick="refreshScreenshot('photo')">↻ Load</button>
-    <div class="drag-pair">
-      <button id="btnDragStart" onclick="setDragStart()"  disabled title="Lock current point as drag start (red marker), then pick a new point and tap Drag">↦ From</button>
-      <button id="btnDrag"      onclick="fireDrag()"      disabled title="Drag from the red marker to the blue marker">↣ Drag</button>
-    </div>
+    <button class="primary" id="btnLoad" onclick="refreshScreenshot('photo')">↻ Load</button>
+    <button id="btnDrag"   onclick="toggleArmDrag()"               disabled title="Arm drag: lock current point as start; next tap on screenshot fires drag to that point. Re-tap to cancel.">↣ Drag</button>
     <button id="btnDouble" onclick="fireClickAction('left',  true)"  disabled>Dbl-Click</button>
     <button id="btnRight"  onclick="fireClickAction('right', false)" disabled>R-Click</button>
     <button id="btnClick"  onclick="fireClickAction('left',  false)" disabled>Click</button>
@@ -549,10 +528,11 @@
   <details class="help" style="margin-top: 16px; padding: 10px 12px; background: var(--card); border-radius: 8px; color: var(--dim); font-size: 13px; line-height: 1.5;">
     <summary style="cursor: pointer; font-weight: 600; color: var(--fg);">How to drag</summary>
     <ol style="margin: 8px 0 0 18px; padding: 0;">
-      <li>Choose the start point and click <b>↦ From</b>.</li>
-      <li>Choose the end point.</li>
-      <li>Click <b>↣ Drag</b>.</li>
+      <li>Tap the start point on the screenshot.</li>
+      <li>Tap <b>↣ Drag</b> — the marker turns red, other actions disabled.</li>
+      <li>Tap the end point on the screenshot. Drag fires automatically.</li>
     </ol>
+    <p style="margin: 8px 0 0;">Tap <b>↣ Drag</b> again before step 3 to cancel.</p>
   </details>
 
 </section>
@@ -888,6 +868,7 @@
   let touchStart = null;
   let selectedVF = null;       // {xf, yf} — viewport-fractional in [0,1]
   let dragStartVF = null;      // {xf, yf} — locked first endpoint for drag
+  let dragArmed = false;       // true after user taps Drag with a selection — next screenshot tap fires
 
   function onPointerDown(ev) {
     if (!imgEl || !screenW) return;
@@ -935,12 +916,16 @@
     if (navigator.vibrate) navigator.vibrate(8);
     repositionMarker();
     updateSelectedInfo();
-    document.getElementById('btnClick').disabled     = false;
-    document.getElementById('btnDouble').disabled    = false;
-    document.getElementById('btnRight').disabled     = false;
-    document.getElementById('btnDragStart').disabled = false;
-    // Drag-end button only enabled once both endpoints exist.
-    document.getElementById('btnDrag').disabled      = !dragStartVF;
+    // If Drag was armed, this tap is the END point — fire and disarm.
+    // Otherwise enable click/drag actions for this freshly-picked point.
+    if (dragArmed && dragStartVF) {
+      fireDragAndDisarm();
+    } else {
+      document.getElementById('btnClick').disabled  = false;
+      document.getElementById('btnDouble').disabled = false;
+      document.getElementById('btnRight').disabled  = false;
+      document.getElementById('btnDrag').disabled   = false;
+    }
   }
 
   // Marker is a child of screen-wrap (in image-content coords), so we add
@@ -972,28 +957,45 @@
     m.classList.add('show');
   }
 
-  function setDragStart() {
-    if (!selectedVF) return;
+  // Arm/disarm the drag flow.
+  //   - When the user has selected a point and taps Drag → lock that point
+  //     as the start (red marker), disable other actions, mark the button
+  //     armed (orange). Next tap on the screenshot fires the drag.
+  //   - When already armed, tapping Drag again cancels and restores state.
+  function toggleArmDrag() {
+    if (dragArmed) { disarmDrag(); return; }
+    if (!selectedVF) { flash('pick a start point first', false); return; }
+    dragArmed = true;
     dragStartVF = { xf: selectedVF.xf, yf: selectedVF.yf };
     repositionDragStartMarker();
-    // Drag fires when both endpoints exist and they differ; for now just
-    // require both to exist (user can fire a no-op zero-length drag if they
-    // really want, system will treat it as a click anyway).
-    document.getElementById('btnDrag').disabled = false;
+    document.getElementById('btnDrag').classList.add('armed');
+    // Disable other click actions while armed — the next tap belongs to
+    // the drag end point, not a click.
+    document.getElementById('btnClick').disabled  = true;
+    document.getElementById('btnDouble').disabled = true;
+    document.getElementById('btnRight').disabled  = true;
+    document.getElementById('btnLoad').disabled   = true;
     if (navigator.vibrate) navigator.vibrate(15);
-    flash('drag start locked — pick end + tap Drag→', true);
+    flash('drag armed — tap screenshot for end point', true);
   }
 
-  function clearDragStart() {
+  function disarmDrag() {
+    dragArmed = false;
     dragStartVF = null;
     const m = document.getElementById('dragStartMarker');
     if (m) m.classList.remove('show');
-    document.getElementById('btnDrag').disabled = true;
+    document.getElementById('btnDrag').classList.remove('armed');
+    document.getElementById('btnLoad').disabled = false;
+    // Re-enable click action buttons iff a selection still exists.
+    const hasSel = !!selectedVF;
+    document.getElementById('btnClick').disabled  = !hasSel;
+    document.getElementById('btnDouble').disabled = !hasSel;
+    document.getElementById('btnRight').disabled  = !hasSel;
   }
 
-  async function fireDrag() {
+  async function fireDragAndDisarm() {
     if (!dragStartVF || !selectedVF || !imgEl || !imgEl.naturalWidth) {
-      flash('set drag start + end first', false); return;
+      disarmDrag(); return;
     }
     // Convert both viewport fractions → display-local fractions (frontend
     // sends display-local; backend adds the display's origin).
@@ -1007,11 +1009,11 @@
     try {
       const d = await req('api/drag', { x1f, y1f, x2f, y2f, display: currentDisplay() });
       flash(`drag ${Math.round(d.from[0])},${Math.round(d.from[1])} → ${Math.round(d.to[0])},${Math.round(d.to[1])} ✓`, true);
-      clearDragStart();
       scheduleAutoReload(500);
     } catch (e) {
       flash('drag ✗ ' + e.message, false);
     }
+    disarmDrag();
   }
 
   function updateSelectedInfo() {
@@ -1024,11 +1026,13 @@
     info.textContent = `@ ${Math.round(macX)},${Math.round(macY)}`;
   }
 
-  // Recompute marker visual position whenever the viewport scrolls (via minimap)
+  // Recompute marker + minimap viewport box whenever the screenshot
+  // scrolls — either via finger pan on the wrap or tap on the minimap pad.
   screenWrap.addEventListener('scroll', () => {
     repositionMarker();
     repositionDragStartMarker();
     updateSelectedInfo();
+    drawPadViewport();
   });
 
   async function fireClickAction(button, double) {
