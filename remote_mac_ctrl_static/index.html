@@ -420,14 +420,14 @@
       <span class="pad-dot" id="padDot"></span>
     </div>
     <div class="quick-keys">
-      <button onclick="sendKey('Return')">⏎</button>
-      <button onclick="sendKey('Escape')">Esc</button>
+      <button onclick="sendKey('Return', {reload: true})">⏎</button>
+      <button onclick="sendKey('Escape', {reload: true})">Esc</button>
       <button onclick="openUnlockModal()">Unlock</button>
-      <button onclick="sendKey('ctrl+cmd+q')">Lock</button>
+      <button onclick="sendKey('ctrl+cmd+q', {reload: true})">Lock</button>
     </div>
     <div class="action-stack">
-      <button onclick="runAction(this, {label:'Dock', type:'show_dock', target:''})">Dock</button>
-      <button onclick="runAction(this, {label:'Wake', type:'wake', target:''})">Wake</button>
+      <button onclick="fetchCursorStrip(75)" title="Load a strip of the screen around the cursor marker (high quality)">🔍 zoom</button>
+      <button onclick="runAction(this, {label:'Wake', type:'wake', target:'', reload: false})">Wake</button>
     </div>
   </div>
   <div class="selected-info" id="selectedInfo"></div>
@@ -450,7 +450,7 @@
        below the input would be hidden under the soft keyboard on phones. -->
   <div id="cursorStripWrap" style="display:none; margin:4px 0;">
     <img id="cursorStrip" alt="" style="width:100%; max-height:120px; object-fit:contain; background:#1a1a1a; border-radius:6px; display:block;" />
-    <div id="cursorStripMeta" style="font: 11px/1.4 ui-monospace, monospace; color:#9aa; margin-top:2px;"></div>
+    <div id="cursorStripMeta" style="font: 11px/1.4 ui-monospace, monospace; color:#9aa; margin-top:2px; text-align:center;"></div>
   </div>
 
   <div class="live-bar">
@@ -466,11 +466,11 @@
        Row 4: ⌃C ⌃L ⌘C ⌘V   (interrupt, clear, copy, paste) -->
   <div class="nav-grid">
     <button onclick="sendScroll(0, 400)">PgUp</button>
-    <button onclick="sendKey('Up')">↑</button>
+    <button onclick="sendKey('Up', {reload: true})">↑</button>
     <button onclick="sendScroll(0, -400)">PgDn</button>
-    <button onclick="fetchCursorStrip(75)" title="Load a strip of the screen around the cursor marker (high quality)">🔍 Strip</button>
+    <button onclick="runAction(this, {label:'Dock', type:'show_dock', target:''})">Dock</button>
     <button onclick="sendKey('Left')">←</button>
-    <button onclick="sendKey('Down')">↓</button>
+    <button onclick="sendKey('Down', {reload: true})">↓</button>
     <button onclick="sendKey('Right')">→</button>
     <button onclick="sendKey('Backspace')">⌫ backSp</button>
     <button onclick="sendKey('ctrl+a')" title="Ctrl+A — line start">⌃A</button>
@@ -478,10 +478,10 @@
     <button onclick="sendKey('ctrl+w')" title="Ctrl+W — delete word backward">⌃W</button>
     <button onclick="sendKey('ctrl+u')" title="Ctrl+U — delete to line start">⌃U</button>
     <button onclick="sendKey('ctrl+c')" title="Ctrl+C — interrupt / SIGINT">⌃C</button>
-    <button onclick="sendKey('ctrl+l')" title="Ctrl+L — clear screen">⌃L</button>
+    <button onclick="sendKey('ctrl+l', {reload: true})" title="Ctrl+L — clear screen">⌃L</button>
     <button onclick="sendKey('cmd+c')" title="Cmd+C — copy">⌘C</button>
     <button onclick="sendKey('cmd+v')" title="Cmd+V — paste">⌘V</button>
-    <button onclick="sendKey('ctrl+cmd+f')" title="Ctrl+Cmd+F — toggle fullscreen for the focused app">fullScr</button>
+    <button onclick="sendKey('ctrl+cmd+f', {reload: true})" title="Ctrl+Cmd+F — toggle fullscreen for the focused app">fullScr</button>
   </div>
 
 
@@ -597,7 +597,10 @@
     try {
       await req('api/run', { type: action.type, target: action.target });
       flash(action.label + ' ✓', true);
-      scheduleAutoReload(500);    // any action likely changes the screen — refresh
+      // Default reload after any run-action; an action can opt out via
+      // reload:false (Wake just turns the display on — no screen content
+      // change worth a fresh screenshot).
+      if (action.reload !== false) scheduleAutoReload(500);
     } catch (e) {
       flash(action.label + ' ✗ ' + e.message, false);
     } finally {
@@ -631,6 +634,7 @@
       });
       flash('unlock sent ✓', true);
       closeUnlockModal();
+      scheduleAutoReload(500);
     } catch (e) {
       flash('unlock ✗ ' + e.message, false);
     }
@@ -644,11 +648,15 @@
     if (ev.target === unlockModal) closeUnlockModal();
   });
 
-  async function sendKey(key) {
+  async function sendKey(key, opts = {}) {
     if (navigator.vibrate) navigator.vibrate(8);
     try {
       await req('api/key', { key });
       flash(key + ' ✓', true);
+      // Opt-in screenshot refresh for keys that visibly change the
+      // screen (fullScr toggle, etc). Most navigation / text-edit keys
+      // don't need it — they'd just churn bandwidth.
+      if (opts.reload) scheduleAutoReload(500);
     } catch (e) {
       flash('✗ ' + e.message, false);
     }
