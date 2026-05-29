@@ -543,13 +543,12 @@
 <div class="modal-bg" id="unlockModal">
   <div class="modal">
     <h3>🔓 Wake &amp; Unlock Mac</h3>
-    <p class="hint">Locks the screen first (Ctrl+Cmd+Q) so the password never ends up typed into a focused app — no-op if already locked. Then wakes the display, types the password at HID level, presses Return. Password is sent over Tailscale + never stored.</p>
+    <p class="hint">Always locks the screen first (Ctrl+Cmd+Q) — no-op if already locked — so the password can never land in a focused app. Then wakes the display, types the password at HID level, presses Return. Password is sent over Tailscale + never stored.</p>
     <input type="password" id="unlockPassword" placeholder="Mac password" autocomplete="off" />
-    <label class="opt"><input type="checkbox" id="unlockLockFirst" checked> lock first (Ctrl+Cmd+Q)</label>
     <label class="opt"><input type="checkbox" id="unlockWake" checked> wake display first</label>
     <div class="modal-row">
       <button class="cancel" onclick="closeUnlockModal()">Cancel</button>
-      <button class="primary" onclick="submitUnlock()">Wake &amp; Send</button>
+      <button class="primary" id="unlockSendBtn" onclick="submitUnlock()">Wake &amp; Send</button>
     </div>
   </div>
 </div>
@@ -616,7 +615,6 @@
   const unlockModal = document.getElementById('unlockModal');
   const unlockPasswordEl = document.getElementById('unlockPassword');
   const unlockWakeEl = document.getElementById('unlockWake');
-  const unlockLockFirstEl = document.getElementById('unlockLockFirst');
 
   function openUnlockModal() {
     unlockPasswordEl.value = '';
@@ -627,20 +625,37 @@
     unlockModal.classList.remove('show');
     unlockPasswordEl.value = '';
   }
+  // Guard against a second submit. CRITICAL: a double-click / double-Enter
+  // used to send the password TWICE — the first unlocked the Mac, the
+  // second typed the password into whatever app then had focus (e.g. a
+  // chat window), leaking it. Once a submit is in flight we disable the
+  // button + input and refuse re-entry until the modal is closed.
+  let unlockInFlight = false;
   async function submitUnlock() {
+    if (unlockInFlight) return;
     const pwd = unlockPasswordEl.value;
     if (!pwd) { flash('empty', false); return; }
+    unlockInFlight = true;
+    const sendBtn = document.getElementById('unlockSendBtn');
+    if (sendBtn) { sendBtn.disabled = true; sendBtn.textContent = 'Sending…'; }
+    unlockPasswordEl.disabled = true;
     try {
       await req('api/unlock', {
         password: pwd,
         wake: unlockWakeEl.checked,
-        lock_first: unlockLockFirstEl.checked,
+        lock_first: true,   // always — never type the password into a focused app
       });
       flash('unlock sent ✓', true);
       closeUnlockModal();
       scheduleAutoReload(500);
     } catch (e) {
       flash('unlock ✗ ' + e.message, false);
+    } finally {
+      // closeUnlockModal() already reset things on success; this restores
+      // the modal if it stayed open after an error.
+      unlockInFlight = false;
+      if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = 'Wake & Send'; }
+      unlockPasswordEl.disabled = false;
     }
   }
   unlockPasswordEl.addEventListener('keydown', (ev) => {
