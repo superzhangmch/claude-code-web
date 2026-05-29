@@ -761,6 +761,32 @@ footer button.icon {
   border: 1px solid var(--border); border-radius: 6px;
   padding: 5px 8px; font: 12px ui-monospace, Menlo, monospace;
 }
+#files-modal .files-favs {
+  display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0;
+  max-height: 18vh; overflow-y: auto;
+}
+#files-modal .files-favs .fav {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--panel2); border: 1px solid var(--border);
+  border-radius: 14px; padding: 3px 4px 3px 10px;
+  font: 12px ui-monospace, Menlo, monospace; cursor: pointer;
+  max-width: 100%;
+}
+#files-modal .files-favs .fav:hover { border-color: var(--accent); }
+#files-modal .files-favs .fav .fav-nm {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw;
+}
+#files-modal .files-favs .fav.dir .fav-nm { color: var(--accent); }
+#files-modal .files-favs .fav .fav-x {
+  border: none; background: transparent; color: var(--muted);
+  cursor: pointer; font-size: 13px; padding: 0 4px; border-radius: 50%;
+}
+#files-modal .files-favs .fav .fav-x:hover { color: var(--err); }
+#files-modal .files-list .row .star {
+  flex-shrink: 0; background: transparent; border: none;
+  color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 4px;
+}
+#files-modal .files-list .row .star.on { color: #f5c451; }
 #files-modal .files-list {
   flex-shrink: 0; max-height: 32vh; overflow: auto;   /* both axes scroll */
   border: 1px solid var(--border); border-radius: 6px;
@@ -933,9 +959,11 @@ footer button.icon {
         <button id="files-go" class="btn">Go</button>
       </div>
       <div class="files-bar">
-        <input id="files-filter" class="files-path" placeholder="filter — substring match on names" />
-        <button id="files-filter-clear" class="btn" title="Clear filter">✕</button>
+        <input id="files-filter" class="files-path" placeholder="filter this page — or Search whole dir" />
+        <button id="files-search" class="btn" title="Search the whole directory (all pages)">🔍 search</button>
+        <button id="files-filter-clear" class="btn" title="Clear filter / search">✕</button>
       </div>
+      <div id="files-favs" class="files-favs" style="display:none"></div>
       <div id="files-list" class="files-list"></div>
       <div class="files-pager" id="files-pager" style="display:none">
         <button id="files-prev" class="btn">‹ prev</button>
@@ -1468,6 +1496,7 @@ footer button.icon {
   let filesLimit = 10;
   let filesFilterTimer = null;
   let filesLastEntries = [];
+  let filesActiveQ = "";   // server search term in effect ("" = plain listing)
 
   function fmtSize(n) {
     if (n < 1024) return n + " B";
@@ -1499,12 +1528,64 @@ footer button.icon {
     filesPreviewEl.innerHTML = '<div class="ph">' + (msg || "Click a file to preview.") + '</div>';
   }
 
-  async function loadFilesDir(path, offset) {
-    // New dir (path differs from current) → reset to first page.
+  // ----- favorites (localStorage, per-browser) -----
+  const FAV_KEY = "cc_web_fav";
+  const filesFavsEl = document.getElementById("files-favs");
+  function loadFavs() {
+    try { const a = JSON.parse(localStorage.getItem(FAV_KEY) || "[]"); return Array.isArray(a) ? a : []; }
+    catch { return []; }
+  }
+  function saveFavs(a) { localStorage.setItem(FAV_KEY, JSON.stringify(a.slice(0, 100))); }
+  function isFav(path) { return loadFavs().some(f => f.path === path); }
+  function toggleFav(entry) {
+    const a = loadFavs();
+    const i = a.findIndex(f => f.path === entry.path);
+    if (i >= 0) a.splice(i, 1); else a.unshift(entry);
+    saveFavs(a); renderFavs();
+  }
+  function openFav(f) {
+    if (f.is_dir) {
+      // Fill the dir box + navigate there.
+      filesPathEl.value = f.path;
+      filesFilterEl.value = "";
+      loadFilesDir(f.path, 0, "");
+    } else {
+      // Open the file directly in a new browser tab.
+      const url = location.origin + "/api/fs/file?path="
+                + encodeURIComponent(f.path) + "&token=" + encodeURIComponent(authToken);
+      window.open(url, "_blank");
+    }
+  }
+  function renderFavs() {
+    const a = loadFavs();
+    if (!a.length) { filesFavsEl.style.display = "none"; filesFavsEl.innerHTML = ""; return; }
+    filesFavsEl.style.display = "flex";
+    filesFavsEl.innerHTML = "";
+    for (const f of a) {
+      const chip = document.createElement("span");
+      chip.className = "fav" + (f.is_dir ? " dir" : "");
+      const nm = document.createElement("span");
+      nm.className = "fav-nm";
+      nm.textContent = (f.is_dir ? "📂 " : "") + (f.name || f.path);
+      nm.title = f.path;
+      nm.addEventListener("click", () => openFav(f));
+      const x = document.createElement("button");
+      x.className = "fav-x"; x.textContent = "✕"; x.title = "Remove favorite";
+      x.addEventListener("click", (ev) => { ev.stopPropagation(); toggleFav(f); });
+      chip.appendChild(nm); chip.appendChild(x);
+      filesFavsEl.appendChild(chip);
+    }
+  }
+
+  // Fetch one server page. q != "" → global search across the whole dir
+  // (server-side, still paginated — never fetch a giant dir at once, to
+  // save mobile bandwidth). q == "" → plain dir listing. Does NOT touch the
+  // filter box; navigation handlers manage that.
+  async function loadFilesDir(path, offset, q) {
     if (offset == null) offset = 0;
+    if (q == null) q = "";
     filesListEl.textContent = "Loading…";
     try {
-      const q = filesFilterEl.value.trim();
       const resp = await authedFetch("/api/fs/list?path=" + encodeURIComponent(path || "")
                                      + "&offset=" + offset
                                      + "&q=" + encodeURIComponent(q));
@@ -1519,56 +1600,76 @@ footer button.icon {
       filesOffset = j.offset;
       filesTotal = j.total;
       filesLimit = j.limit;
+      filesActiveQ = q;
       filesPathEl.value = j.path;
       filesLastEntries = j.entries;
-      filesListEl.textContent = "";
-      // Pager: only when more than one page.
-      if (filesTotal > filesLimit) {
-        filesPagerEl.style.display = "flex";
-        const from = filesTotal ? filesOffset + 1 : 0;
-        const to = Math.min(filesOffset + filesLimit, filesTotal);
-        filesPageInfo.textContent = `${from}–${to} of ${filesTotal}`;
-        filesPrev.disabled = filesOffset <= 0;
-        filesNext.disabled = filesOffset + filesLimit >= filesTotal;
-      } else {
-        filesPagerEl.style.display = "none";
-      }
-      for (const e of j.entries) {
-        const row = document.createElement("div");
-        row.className = "row" + (e.is_dir ? " dir" : "");
-        const nm = document.createElement("span");
-        nm.className = "nm";
-        nm.textContent = (e.is_dir ? "📂 " : "") + e.name;
-        const mt = document.createElement("span");
-        mt.className = "mt"; mt.textContent = fmtMtime(e.mtime);
-        const sz = document.createElement("span");
-        sz.className = "sz"; sz.textContent = e.is_dir ? "" : fmtSize(e.size);
-        const full = j.path.replace(/\/$/, "") + "/" + e.name;
-        if (e.is_dir) {
-          row.appendChild(nm); row.appendChild(mt); row.appendChild(sz);
-          row.addEventListener("click", () => loadFilesDir(full));
-        } else {
-          // Open-in-new-tab button (first), only for types a browser tab
-          // renders well: html / image / text (md, txt, …). pdf & others
-          // are previewable in-modal but get no direct-open link.
-          if (e.kind === "html" || e.kind === "image" || e.kind === "text") {
-            const cp = document.createElement("button");
-            cp.className = "cp"; cp.textContent = "🔗"; cp.title = "Open in new browser tab";
-            cp.addEventListener("click", (ev) => {
-              ev.stopPropagation();
-              const url = location.origin + "/api/fs/file?path="
-                        + encodeURIComponent(full) + "&token=" + encodeURIComponent(authToken);
-              window.open(url, "_blank");
-            });
-            row.appendChild(cp);
-          }
-          row.appendChild(nm); row.appendChild(mt); row.appendChild(sz);
-          row.addEventListener("click", () => previewFile(full, e.kind));
-        }
-        filesListEl.appendChild(row);
-      }
+      renderFilesPage();
     } catch (err) {
       filesListEl.innerHTML = '<div class="ph">Error: ' + err + '</div>';
+    }
+  }
+
+  // Render the currently-loaded page, applying the filter box as a LOCAL
+  // substring filter over just this page (instant, no network). Pager
+  // numbers come from the server (full dir / search total).
+  function renderFilesPage() {
+    filesListEl.textContent = "";
+    if (filesTotal > filesLimit) {
+      filesPagerEl.style.display = "flex";
+      const from = filesTotal ? filesOffset + 1 : 0;
+      const to = Math.min(filesOffset + filesLimit, filesTotal);
+      filesPageInfo.textContent = `${from}–${to} of ${filesTotal}`
+        + (filesActiveQ ? ` · search "${filesActiveQ}"` : "");
+      filesPrev.disabled = filesOffset <= 0;
+      filesNext.disabled = filesOffset + filesLimit >= filesTotal;
+    } else {
+      filesPagerEl.style.display = "none";
+    }
+    const flt = filesFilterEl.value.trim().toLowerCase();
+    for (const e of filesLastEntries) {
+      if (flt && !e.name.toLowerCase().includes(flt)) continue;   // local, this page only
+      const row = document.createElement("div");
+      row.className = "row" + (e.is_dir ? " dir" : "");
+      const nm = document.createElement("span");
+      nm.className = "nm";
+      nm.textContent = (e.is_dir ? "📂 " : "") + e.name;
+      const mt = document.createElement("span");
+      mt.className = "mt"; mt.textContent = fmtMtime(e.mtime);
+      const sz = document.createElement("span");
+      sz.className = "sz"; sz.textContent = e.is_dir ? "" : fmtSize(e.size);
+      const full = filesCurDir.replace(/\/$/, "") + "/" + e.name;
+      // ☆ favorite toggle (works for dirs and files).
+      const star = document.createElement("button");
+      star.className = "star" + (isFav(full) ? " on" : "");
+      star.textContent = isFav(full) ? "★" : "☆";
+      star.title = "Add / remove favorite";
+      star.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        toggleFav({ path: full, is_dir: e.is_dir, kind: e.kind, name: e.name });
+        const on = isFav(full);
+        star.classList.toggle("on", on);
+        star.textContent = on ? "★" : "☆";
+      });
+      row.appendChild(star);
+      if (e.is_dir) {
+        row.appendChild(nm); row.appendChild(mt); row.appendChild(sz);
+        row.addEventListener("click", () => { filesFilterEl.value = ""; loadFilesDir(full, 0, ""); });
+      } else {
+        if (e.kind === "html" || e.kind === "image" || e.kind === "text") {
+          const cp = document.createElement("button");
+          cp.className = "cp"; cp.textContent = "🔗"; cp.title = "Open in new browser tab";
+          cp.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            const url = location.origin + "/api/fs/file?path="
+                      + encodeURIComponent(full) + "&token=" + encodeURIComponent(authToken);
+            window.open(url, "_blank");
+          });
+          row.appendChild(cp);
+        }
+        row.appendChild(nm); row.appendChild(mt); row.appendChild(sz);
+        row.addEventListener("click", () => previewFile(full, e.kind));
+      }
+      filesListEl.appendChild(row);
     }
   }
 
@@ -1604,16 +1705,20 @@ footer button.icon {
     }
   }
 
+  const filesSearch = document.getElementById("files-search");
+
   filesBtn.addEventListener("click", () => {
     filesModal.classList.add("show");
     clearFilesPreview();
-    loadFilesDir(filesCurDir || "");   // empty → server uses home dir
+    filesFilterEl.value = "";
+    renderFavs();
+    loadFilesDir(filesCurDir || "", 0, "");   // empty → server uses home dir
   });
   // Submit the path box. If it points to a FILE (not a dir), split it:
-  // dir → path box, filename → filter box, then load + auto-preview.
+  // dir → path box, filename → filter box, server-search it, then preview.
   async function filesGoSubmit() {
     const v = filesPathEl.value.trim();
-    if (!v) { filesFilterEl.value = ""; loadFilesDir(""); return; }
+    if (!v) { filesFilterEl.value = ""; loadFilesDir("", 0, ""); return; }
     let isDir = false;
     try {
       const probe = await authedFetch("/api/fs/list?path=" + encodeURIComponent(v) + "&offset=0&q=");
@@ -1621,41 +1726,46 @@ footer button.icon {
     } catch {}
     if (isDir) {
       filesFilterEl.value = "";
-      loadFilesDir(v, 0);
+      loadFilesDir(v, 0, "");
       return;
     }
-    // Treat as a file path.
+    // Treat as a file path → parent dir + global search for the basename.
     const norm = v.replace(/\/+$/, "");
     const idx = norm.lastIndexOf("/");
     const dir = idx > 0 ? norm.slice(0, idx) : "/";
     const base = norm.slice(idx + 1);
     filesPathEl.value = dir;
     filesFilterEl.value = base;
-    await loadFilesDir(dir, 0);   // q=base, so the file shows up
+    await loadFilesDir(dir, 0, base);   // server search → file shows on page 1
     const ent = filesLastEntries.find(e => !e.is_dir && e.name === base);
     if (ent) previewFile(dir.replace(/\/$/, "") + "/" + base, ent.kind);
   }
   filesGo.addEventListener("click", filesGoSubmit);
-  filesFilterEl.addEventListener("input", () => {
-    clearTimeout(filesFilterTimer);
-    filesFilterTimer = setTimeout(() => loadFilesDir(filesCurDir, 0), 250);
+  // Filter box: local, current-page only — instant, no network.
+  filesFilterEl.addEventListener("input", renderFilesPage);
+  // Search button: global search across the whole dir (server-side, paged).
+  function filesDoSearch() { loadFilesDir(filesCurDir, 0, filesFilterEl.value.trim()); }
+  filesSearch.addEventListener("click", filesDoSearch);
+  filesFilterEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); filesDoSearch(); }
   });
   filesFilterClear.addEventListener("click", () => {
     filesFilterEl.value = "";
-    loadFilesDir(filesCurDir, 0);
+    loadFilesDir(filesCurDir, 0, "");   // exit search + clear filter
   });
   filesPrev.addEventListener("click", () => {
-    if (filesOffset > 0) loadFilesDir(filesCurDir, Math.max(0, filesOffset - filesLimit));
+    if (filesOffset > 0) loadFilesDir(filesCurDir, Math.max(0, filesOffset - filesLimit), filesActiveQ);
   });
   filesNext.addEventListener("click", () => {
-    if (filesOffset + filesLimit < filesTotal) loadFilesDir(filesCurDir, filesOffset + filesLimit);
+    if (filesOffset + filesLimit < filesTotal) loadFilesDir(filesCurDir, filesOffset + filesLimit, filesActiveQ);
   });
   filesPathEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); filesGoSubmit(); }
   });
   filesUp.addEventListener("click", () => {
     const parent = filesCurDir.replace(/\/+$/, "").split("/").slice(0, -1).join("/") || "/";
-    loadFilesDir(parent);
+    filesFilterEl.value = "";
+    loadFilesDir(parent, 0, "");
   });
   filesClose.addEventListener("click", () => { filesModal.classList.remove("show"); clearFilesPreview(); });
   filesModal.addEventListener("click", (e) => {
