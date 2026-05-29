@@ -2255,6 +2255,138 @@ async def get_iterm_screen(iterm_session_id: str):
     return {"screen": screen}
 
 
+_FS_TEXT_EXT = {".md", ".markdown", ".txt", ".log", ".json", ".yaml", ".yml",
+                ".csv", ".py", ".js", ".ts", ".sh", ".css", ".toml", ".ini",
+                ".conf", ".xml", ".rs", ".go", ".c", ".h", ".cpp", ".java"}
+_FS_IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"}
+_FS_HTML_EXT = {".html", ".htm"}
+_FS_PDF_EXT = {".pdf"}
+_FS_MAX_FILE = 25 * 1024 * 1024   # 25 MB cap on inline file reads
+FS_PAGE_SIZE = 50                 # dir listing page size
+
+
+_FS_TEXT_SNIFF_MAX = 5 * 1024   # sniff content of unknown files up to this size
+
+
+def _fs_kind(name: str) -> str:
+    ext = os.path.splitext(name)[1].lower()
+    if ext in _FS_TEXT_EXT:  return "text"
+    if ext in _FS_IMG_EXT:   return "image"
+    if ext in _FS_HTML_EXT:  return "html"
+    if ext in _FS_PDF_EXT:   return "pdf"
+    return "other"
+
+
+def _looks_text(p: Path, size: int) -> bool:
+    """True if a small file's bytes look like UTF-8 text (no NUL byte,
+    decodes cleanly). Lets us preview extension-less / odd-suffix files
+    (LICENSE, Dockerfile, .gitignore, etc.) up to 5 KB."""
+    if size > _FS_TEXT_SNIFF_MAX:
+        return False
+    try:
+        data = p.read_bytes()
+    except OSError:
+        return False
+    if b"\x00" in data:
+        return False
+    try:
+        data.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+@app.get("/api/fs/list", dependencies=[Depends(require_token)])
+def fs_list(path: str = "", offset: int = 0, limit: int = FS_PAGE_SIZE, q: str = ""):
+    """List a local directory (paginated). Empty path → home dir.
+
+    Entries are sorted (dirs first, then name) THEN sliced to
+    [offset, offset+limit). `total` is the full count for the page UI.
+    Content-sniffing for previewable text is done only for the returned
+    page so big dirs don't read hundreds of small files per request."""
+    p = (Path(path).expanduser() if path else Path.home())
+    try:
+        p = p.resolve()
+    except OSError:
+        raise HTTPException(status_code=400, detail="bad path")
+    if not p.is_dir():
+        raise HTTPException(status_code=404, detail="not a directory")
+    try:
+        children = list(p.iterdir())
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="permission denied")
+
+    # Cheap pass: stat only, no content sniff yet. Skip dotfiles entirely,
+    # and apply an optional case-insensitive substring filter on the name.
+    qlow = q.strip().lower()
+    raw = []
+    for c in children:
+        if c.name.startswith("."):
+            continue   # hidden files not shown
+        if qlow and qlow not in c.name.lower():
+            continue
+        try:
+            st = c.stat()
+            is_dir = c.is_dir()
+        except OSError:
+            continue
+        raw.append((c, is_dir, st.st_size, int(st.st_mtime)))
+    # dirs first, then by name (case-insensitive)
+    raw.sort(key=lambda r: (not r[1], r[0].name.lower()))
+
+    total = len(raw)
+    offset = max(0, offset)
+    limit = max(1, min(limit, 500))
+    page = raw[offset:offset + limit]
+
+    entries = []
+    for c, is_dir, size, mtime in page:
+        if is_dir:
+            kind = "dir"
+        else:
+            kind = _fs_kind(c.name)
+            if kind == "other" and _looks_text(c, size):
+                kind = "text"
+        entries.append({
+            "name": c.name, "is_dir": is_dir,
+            "size": size, "mtime": mtime, "kind": kind,
+        })
+    return {"path": str(p), "parent": str(p.parent),
+            "total": total, "offset": offset, "limit": limit,
+            "entries": entries}
+
+
+@app.get("/api/fs/file")
+def fs_file(path: str, token: str = "",
+            authorization: Optional[str] = Header(default=None)):
+    """Serve a local file inline (browser guesses how to render via the
+    Content-Type FileResponse sets from the extension). Size-capped.
+
+    Auth accepts EITHER the Bearer header (in-app fetch) OR a ?token=
+    query param — the latter so a copied URL works when pasted straight
+    into a browser tab (img / html / pdf), which can't set headers."""
+    supplied = ""
+    if authorization and authorization.startswith("Bearer "):
+        supplied = authorization[len("Bearer "):]
+    elif token:
+        supplied = token
+    if not supplied or not secrets.compare_digest(supplied, AUTH_TOKEN):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
+    p = Path(path).expanduser()
+    try:
+        p = p.resolve()
+    except OSError:
+        raise HTTPException(status_code=400, detail="bad path")
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="not a file")
+    try:
+        if p.stat().st_size > _FS_MAX_FILE:
+            raise HTTPException(status_code=413, detail="file too large (>25 MB)")
+    except OSError:
+        raise HTTPException(status_code=403, detail="cannot stat")
+    return FileResponse(p, headers={"Cache-Control": "no-store"})
+
+
 class ResumePayload(BaseModel):
     claude_session_id: str
 

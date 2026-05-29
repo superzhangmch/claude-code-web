@@ -748,6 +748,61 @@ footer button.icon {
   padding: 8px 10px; margin: 0;
   overflow: auto; white-space: pre;
 }
+
+#files-modal .modal-card.files-card {
+  width: 95vw; max-width: 1100px; height: 85vh;
+  display: flex; flex-direction: column; gap: 8px;
+}
+#files-modal .modal-row { display: flex; align-items: center; gap: 8px; }
+#files-modal .modal-row h3 { margin: 0; flex: 1; font-size: 14px; }
+#files-modal .files-bar { display: flex; gap: 6px; flex-shrink: 0; }
+#files-modal .files-path {
+  flex: 1; background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 8px; font: 12px ui-monospace, Menlo, monospace;
+}
+#files-modal .files-list {
+  flex-shrink: 0; max-height: 32vh; overflow: auto;   /* both axes scroll */
+  border: 1px solid var(--border); border-radius: 6px;
+}
+#files-modal .files-list .row {
+  display: flex; align-items: flex-start; gap: 10px;
+  width: max-content; min-width: 100%;   /* grow with content → horizontal scroll */
+  padding: 5px 10px; cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  font: 12px ui-monospace, Menlo, monospace;
+}
+#files-modal .files-list .row:last-child { border-bottom: 0; }
+#files-modal .files-list .row:hover { background: var(--panel2); }
+/* Name stays on one line and extends to its full length; the list scrolls
+   horizontally so you can swipe to read long names on a phone. */
+#files-modal .files-list .row .nm { white-space: nowrap; }
+#files-modal .files-list .row .mt { color: var(--muted); flex-shrink: 0; white-space: nowrap; }
+#files-modal .files-list .row .sz { color: var(--muted); flex-shrink: 0; width: 64px; text-align: right; white-space: nowrap; }
+#files-modal .files-list .row .cp {
+  flex-shrink: 0; background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px;
+  padding: 2px 7px; cursor: pointer; font-size: 12px;
+}
+#files-modal .files-list .row .cp:hover { border-color: var(--accent); }
+#files-modal .files-list .row.dir .nm { color: var(--accent); }
+#files-modal .files-pager {
+  display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+  font: 12px ui-monospace, Menlo, monospace; color: var(--muted);
+}
+#files-modal .files-pager span { flex: 1; text-align: center; }
+#files-modal .files-preview {
+  flex: 1; min-height: 0; overflow: auto;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: #000;
+}
+#files-modal .files-preview pre {
+  margin: 0; padding: 10px; white-space: pre-wrap; word-break: break-word;
+  font: 12px ui-monospace, Menlo, monospace; color: var(--text);
+}
+#files-modal .files-preview img { max-width: 100%; display: block; margin: 0 auto; }
+#files-modal .files-preview iframe { width: 100%; height: 100%; border: 0; background: #fff; }
+#files-modal .files-preview .ph { color: var(--muted); padding: 14px; font-size: 13px; }
 #info-modal .modal-card.info-card {
   width: 95vw; max-width: 720px; max-height: 85vh;
   display: flex; flex-direction: column; gap: 8px;
@@ -817,6 +872,7 @@ footer button.icon {
     <button id="screen-btn" class="btn icon" style="display:none" title="Show iTerm screen">🖥</button>
     <span id="battery" class="battery" style="display:none" title="Click for CPU history"></span>
     <button id="tabs-btn" class="btn icon" style="display:none" title="Show all iTerm2 tabs">🗂</button>
+    <button id="files-btn" class="btn icon" style="display:none" title="Browse local files">📁</button>
     <button id="refresh-btn" class="btn icon" style="display:none" title="Refresh list">↻</button>
     <button id="back-btn" class="btn" style="display:none">←</button>
     <button id="new-btn" class="btn">+</button>
@@ -862,6 +918,31 @@ footer button.icon {
       </div>
       <div id="tabs-list" class="tabs-list"></div>
       <pre id="tabs-screen" class="screen-body">Pick a tab above to view its screen.</pre>
+    </div>
+  </div>
+
+  <div id="files-modal" class="modal">
+    <div class="modal-card files-card">
+      <div class="modal-row">
+        <h3>Files</h3>
+        <button id="files-close" class="btn">close</button>
+      </div>
+      <div class="files-bar">
+        <button id="files-up" class="btn" title="Parent directory">↑</button>
+        <input id="files-path" class="files-path" placeholder="/path/to/dir — Enter to go" />
+        <button id="files-go" class="btn">Go</button>
+      </div>
+      <div class="files-bar">
+        <input id="files-filter" class="files-path" placeholder="filter — substring match on names" />
+        <button id="files-filter-clear" class="btn" title="Clear filter">✕</button>
+      </div>
+      <div id="files-list" class="files-list"></div>
+      <div class="files-pager" id="files-pager" style="display:none">
+        <button id="files-prev" class="btn">‹ prev</button>
+        <span id="files-pageinfo"></span>
+        <button id="files-next" class="btn">next ›</button>
+      </div>
+      <div id="files-preview" class="files-preview"></div>
     </div>
   </div>
 
@@ -1095,6 +1176,7 @@ footer button.icon {
   const backBtn = document.getElementById("back-btn");
   const newBtn = document.getElementById("new-btn");
   const tabsBtn = document.getElementById("tabs-btn");
+  const filesBtn = document.getElementById("files-btn");
   const warnEl = document.getElementById("warn");
   const pickerEl = document.getElementById("picker");
   const pickerListEl = document.getElementById("picker-list");
@@ -1243,6 +1325,7 @@ footer button.icon {
     newBtn.style.display = "";
     refreshBtn.style.display = "";
     tabsBtn.style.display = "";
+    filesBtn.style.display = "";
     setReady(null);
     metaEl.textContent = "";
     setStatus("off");
@@ -1263,6 +1346,7 @@ footer button.icon {
     newBtn.style.display = "none";
     refreshBtn.style.display = "none";
     tabsBtn.style.display = "none";
+    filesBtn.style.display = "none";
     batteryEl.style.display = "none";  // header version is picker-only
     refreshModeButtons();
     setStatus("ok");
@@ -1361,6 +1445,221 @@ footer button.icon {
   tabsClose.addEventListener("click", () => tabsModal.classList.remove("show"));
   tabsModal.addEventListener("click", (e) => {
     if (e.target === tabsModal) tabsModal.classList.remove("show");
+  });
+
+  // ---------- local file browser (picker page) ----------
+  const filesModal = document.getElementById("files-modal");
+  const filesListEl = document.getElementById("files-list");
+  const filesPreviewEl = document.getElementById("files-preview");
+  const filesPathEl = document.getElementById("files-path");
+  const filesUp = document.getElementById("files-up");
+  const filesGo = document.getElementById("files-go");
+  const filesClose = document.getElementById("files-close");
+  const filesPagerEl = document.getElementById("files-pager");
+  const filesPrev = document.getElementById("files-prev");
+  const filesNext = document.getElementById("files-next");
+  const filesPageInfo = document.getElementById("files-pageinfo");
+  const filesFilterEl = document.getElementById("files-filter");
+  const filesFilterClear = document.getElementById("files-filter-clear");
+  let filesCurDir = "";
+  let filesObjUrl = null;
+  let filesOffset = 0;
+  let filesTotal = 0;
+  let filesLimit = 10;
+  let filesFilterTimer = null;
+  let filesLastEntries = [];
+
+  function fmtSize(n) {
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " K";
+    if (n < 1024 * 1024 * 1024) return (n / 1048576).toFixed(1) + " M";
+    return (n / 1073741824).toFixed(1) + " G";
+  }
+  function fmtMtime(ts) {
+    const d = new Date(ts * 1000);
+    const p = (x) => String(x).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  function copyText(s) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(s).catch(() => fallbackCopy(s));
+    } else {
+      fallbackCopy(s);
+    }
+  }
+  function fallbackCopy(s) {
+    const ta = document.createElement("textarea");
+    ta.value = s; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); } catch {}
+    ta.remove();
+  }
+  function clearFilesPreview(msg) {
+    if (filesObjUrl) { URL.revokeObjectURL(filesObjUrl); filesObjUrl = null; }
+    filesPreviewEl.innerHTML = '<div class="ph">' + (msg || "Click a file to preview.") + '</div>';
+  }
+
+  async function loadFilesDir(path, offset) {
+    // New dir (path differs from current) → reset to first page.
+    if (offset == null) offset = 0;
+    filesListEl.textContent = "Loading…";
+    try {
+      const q = filesFilterEl.value.trim();
+      const resp = await authedFetch("/api/fs/list?path=" + encodeURIComponent(path || "")
+                                     + "&offset=" + offset
+                                     + "&q=" + encodeURIComponent(q));
+      if (!resp.ok) {
+        const t = await resp.json().catch(() => ({}));
+        filesListEl.innerHTML = '<div class="ph">Error: ' + resp.status + ' ' + (t.detail || "") + '</div>';
+        filesPagerEl.style.display = "none";
+        return;
+      }
+      const j = await resp.json();
+      filesCurDir = j.path;
+      filesOffset = j.offset;
+      filesTotal = j.total;
+      filesLimit = j.limit;
+      filesPathEl.value = j.path;
+      filesLastEntries = j.entries;
+      filesListEl.textContent = "";
+      // Pager: only when more than one page.
+      if (filesTotal > filesLimit) {
+        filesPagerEl.style.display = "flex";
+        const from = filesTotal ? filesOffset + 1 : 0;
+        const to = Math.min(filesOffset + filesLimit, filesTotal);
+        filesPageInfo.textContent = `${from}–${to} of ${filesTotal}`;
+        filesPrev.disabled = filesOffset <= 0;
+        filesNext.disabled = filesOffset + filesLimit >= filesTotal;
+      } else {
+        filesPagerEl.style.display = "none";
+      }
+      for (const e of j.entries) {
+        const row = document.createElement("div");
+        row.className = "row" + (e.is_dir ? " dir" : "");
+        const nm = document.createElement("span");
+        nm.className = "nm";
+        nm.textContent = (e.is_dir ? "📂 " : "") + e.name;
+        const mt = document.createElement("span");
+        mt.className = "mt"; mt.textContent = fmtMtime(e.mtime);
+        const sz = document.createElement("span");
+        sz.className = "sz"; sz.textContent = e.is_dir ? "" : fmtSize(e.size);
+        const full = j.path.replace(/\/$/, "") + "/" + e.name;
+        if (e.is_dir) {
+          row.appendChild(nm); row.appendChild(mt); row.appendChild(sz);
+          row.addEventListener("click", () => loadFilesDir(full));
+        } else {
+          // Open-in-new-tab button (first), only for types a browser tab
+          // renders well: html / image / text (md, txt, …). pdf & others
+          // are previewable in-modal but get no direct-open link.
+          if (e.kind === "html" || e.kind === "image" || e.kind === "text") {
+            const cp = document.createElement("button");
+            cp.className = "cp"; cp.textContent = "🔗"; cp.title = "Open in new browser tab";
+            cp.addEventListener("click", (ev) => {
+              ev.stopPropagation();
+              const url = location.origin + "/api/fs/file?path="
+                        + encodeURIComponent(full) + "&token=" + encodeURIComponent(authToken);
+              window.open(url, "_blank");
+            });
+            row.appendChild(cp);
+          }
+          row.appendChild(nm); row.appendChild(mt); row.appendChild(sz);
+          row.addEventListener("click", () => previewFile(full, e.kind));
+        }
+        filesListEl.appendChild(row);
+      }
+    } catch (err) {
+      filesListEl.innerHTML = '<div class="ph">Error: ' + err + '</div>';
+    }
+  }
+
+  async function previewFile(path, kind) {
+    clearFilesPreview("Loading…");
+    if (kind === "other") { clearFilesPreview("Not a previewable type."); return; }
+    try {
+      const resp = await authedFetch("/api/fs/file?path=" + encodeURIComponent(path));
+      if (!resp.ok) { clearFilesPreview("Error: " + resp.status); return; }
+      if (kind === "text") {
+        const txt = await resp.text();
+        filesPreviewEl.innerHTML = "";
+        const pre = document.createElement("pre");
+        pre.textContent = txt;
+        filesPreviewEl.appendChild(pre);
+        return;
+      }
+      const blob = await resp.blob();
+      if (filesObjUrl) URL.revokeObjectURL(filesObjUrl);
+      filesObjUrl = URL.createObjectURL(blob);
+      filesPreviewEl.innerHTML = "";
+      if (kind === "image") {
+        const img = document.createElement("img");
+        img.src = filesObjUrl;
+        filesPreviewEl.appendChild(img);
+      } else {  // html, pdf → iframe
+        const ifr = document.createElement("iframe");
+        ifr.src = filesObjUrl;
+        filesPreviewEl.appendChild(ifr);
+      }
+    } catch (err) {
+      clearFilesPreview("Error: " + err);
+    }
+  }
+
+  filesBtn.addEventListener("click", () => {
+    filesModal.classList.add("show");
+    clearFilesPreview();
+    loadFilesDir(filesCurDir || "");   // empty → server uses home dir
+  });
+  // Submit the path box. If it points to a FILE (not a dir), split it:
+  // dir → path box, filename → filter box, then load + auto-preview.
+  async function filesGoSubmit() {
+    const v = filesPathEl.value.trim();
+    if (!v) { filesFilterEl.value = ""; loadFilesDir(""); return; }
+    let isDir = false;
+    try {
+      const probe = await authedFetch("/api/fs/list?path=" + encodeURIComponent(v) + "&offset=0&q=");
+      isDir = probe.ok;
+    } catch {}
+    if (isDir) {
+      filesFilterEl.value = "";
+      loadFilesDir(v, 0);
+      return;
+    }
+    // Treat as a file path.
+    const norm = v.replace(/\/+$/, "");
+    const idx = norm.lastIndexOf("/");
+    const dir = idx > 0 ? norm.slice(0, idx) : "/";
+    const base = norm.slice(idx + 1);
+    filesPathEl.value = dir;
+    filesFilterEl.value = base;
+    await loadFilesDir(dir, 0);   // q=base, so the file shows up
+    const ent = filesLastEntries.find(e => !e.is_dir && e.name === base);
+    if (ent) previewFile(dir.replace(/\/$/, "") + "/" + base, ent.kind);
+  }
+  filesGo.addEventListener("click", filesGoSubmit);
+  filesFilterEl.addEventListener("input", () => {
+    clearTimeout(filesFilterTimer);
+    filesFilterTimer = setTimeout(() => loadFilesDir(filesCurDir, 0), 250);
+  });
+  filesFilterClear.addEventListener("click", () => {
+    filesFilterEl.value = "";
+    loadFilesDir(filesCurDir, 0);
+  });
+  filesPrev.addEventListener("click", () => {
+    if (filesOffset > 0) loadFilesDir(filesCurDir, Math.max(0, filesOffset - filesLimit));
+  });
+  filesNext.addEventListener("click", () => {
+    if (filesOffset + filesLimit < filesTotal) loadFilesDir(filesCurDir, filesOffset + filesLimit);
+  });
+  filesPathEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); filesGoSubmit(); }
+  });
+  filesUp.addEventListener("click", () => {
+    const parent = filesCurDir.replace(/\/+$/, "").split("/").slice(0, -1).join("/") || "/";
+    loadFilesDir(parent);
+  });
+  filesClose.addEventListener("click", () => { filesModal.classList.remove("show"); clearFilesPreview(); });
+  filesModal.addEventListener("click", (e) => {
+    if (e.target === filesModal) { filesModal.classList.remove("show"); clearFilesPreview(); }
   });
 
   // Send raw bytes (escape seqs allowed) to the bound iTerm tab, then
