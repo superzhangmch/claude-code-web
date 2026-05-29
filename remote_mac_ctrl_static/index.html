@@ -459,28 +459,33 @@
     <label class="live-toggle" id="liveToggleLabel"><input type="checkbox" id="liveOn">Live</label>
   </div>
 
-  <!-- 4 rows × 4 cols:
-       Row 1: scroll + arrow up + scroll + strip-screenshot
-       Row 2: arrows ← ↓ → and ⌫ Backspace (sits under 🔍 Strip)
-       Row 3: ⌃A ⌃E ⌃W ⌃U   (readline line-nav + word-delete)
-       Row 4: ⌃C ⌃L ⌘C ⌘V   (interrupt, clear, copy, paste) -->
+  <!-- 5 rows × 4 cols:
+       Row 1: Dock · ⌃↑ · ⌃↓ · ⌫ backSp  (space navigation + delete)
+       Row 2: PgUp · ↑ · PgDn · →-less arrow group continues below
+       Row 3: ← ↓ →
+       Row 4: ⌃A ⌃E ⌃W ⌃U   (readline line-nav + word-delete)
+       Row 5: ⌃C ⌃L ⌘C ⌘V   (interrupt, clear, copy, paste) + fullScr -->
   <div class="nav-grid">
+    <button onclick="runAction(this, {label:'Dock', type:'show_dock', target:''})">Dock</button>
+    <button onclick="sendKey('ctrl+Up', {reload: true})" title="Ctrl+Up — Mission Control (all windows)">all win</button>
+    <button onclick="sendKey('ctrl+Down', {reload: true})" title="Ctrl+Down — App windows (App Exposé)">app win</button>
+    <button onclick="sendKey('Backspace')">⌫ backSp</button>
     <button onclick="sendScroll(0, 400)">PgUp</button>
     <button onclick="sendKey('Up', {reload: true})">↑</button>
     <button onclick="sendScroll(0, -400)">PgDn</button>
-    <button onclick="runAction(this, {label:'Dock', type:'show_dock', target:''})">Dock</button>
+    <button onclick="sendKey('cmd+Up', {reload: true})" title="Cmd+Up — scroll to top">⤒ top</button>
     <button onclick="sendKey('Left')">←</button>
     <button onclick="sendKey('Down', {reload: true})">↓</button>
     <button onclick="sendKey('Right')">→</button>
-    <button onclick="sendKey('Backspace')">⌫ backSp</button>
-    <button onclick="sendKey('ctrl+a')" title="Ctrl+A — line start">⌃A</button>
-    <button onclick="sendKey('ctrl+e')" title="Ctrl+E — line end">⌃E</button>
-    <button onclick="sendKey('ctrl+w')" title="Ctrl+W — delete word backward">⌃W</button>
-    <button onclick="sendKey('ctrl+u')" title="Ctrl+U — delete to line start">⌃U</button>
-    <button onclick="sendKey('ctrl+c')" title="Ctrl+C — interrupt / SIGINT">⌃C</button>
-    <button onclick="sendKey('ctrl+l', {reload: true})" title="Ctrl+L — clear screen">⌃L</button>
-    <button onclick="sendKey('cmd+c')" title="Cmd+C — copy">⌘C</button>
-    <button onclick="sendKey('cmd+v')" title="Cmd+V — paste">⌘V</button>
+    <button onclick="sendKey('cmd+Down', {reload: true})" title="Cmd+Down — scroll to bottom">⤓ bot</button>
+    <button onclick="sendKey('ctrl+a')" title="Ctrl+A — line start">⌃A home</button>
+    <button onclick="sendKey('ctrl+e')" title="Ctrl+E — line end">⌃E end</button>
+    <button onclick="sendKey('ctrl+w')" title="Ctrl+W — delete word backward">⌃W delW</button>
+    <button onclick="sendKey('ctrl+u')" title="Ctrl+U — delete to line start">⌃U delL</button>
+    <button onclick="sendKey('ctrl+c')" title="Ctrl+C — interrupt / SIGINT">⌃C int</button>
+    <button onclick="sendKey('ctrl+l', {reload: true})" title="Ctrl+L — clear screen">⌃L clr</button>
+    <button onclick="sendKey('cmd+c')" title="Cmd+C — copy">⌘C copy</button>
+    <button onclick="sendKey('cmd+v')" title="Cmd+V — paste">⌘V paste</button>
     <button onclick="sendKey('ctrl+cmd+f', {reload: true})" title="Ctrl+Cmd+F — toggle fullscreen for the focused app">fullScr</button>
   </div>
 

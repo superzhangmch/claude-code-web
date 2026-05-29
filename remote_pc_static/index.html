@@ -310,16 +310,20 @@
   <button onclick="sendKeyPC('Down',  {reload:true})">↓</button>
   <button onclick="sendKeyPC('Left')">←</button>
   <button onclick="sendKeyPC('Right')">→</button>
+  <button onclick="sendKeyPC('cmd+Up',   {reload:true})" title="Cmd+Up — scroll to top">⤒ top</button>
+  <button onclick="sendKeyPC('cmd+Down', {reload:true})" title="Cmd+Down — scroll to bottom">⤓ bot</button>
+  <button onclick="sendKeyPC('ctrl+Up',   {reload:true})" title="Ctrl+Up — Mission Control (all windows)">all win</button>
+  <button onclick="sendKeyPC('ctrl+Down', {reload:true})" title="Ctrl+Down — App windows (App Exposé)">app win</button>
   <span class="sep"></span>
   <!-- readline / clipboard -->
-  <button onclick="sendKeyPC('ctrl+a')" title="line start">⌃A</button>
-  <button onclick="sendKeyPC('ctrl+e')" title="line end">⌃E</button>
-  <button onclick="sendKeyPC('ctrl+w')" title="delete word back">⌃W</button>
-  <button onclick="sendKeyPC('ctrl+u')" title="delete to line start">⌃U</button>
-  <button onclick="sendKeyPC('ctrl+c')" title="interrupt / SIGINT">⌃C</button>
-  <button onclick="sendKeyPC('ctrl+l', {reload:true})" title="clear screen">⌃L</button>
-  <button onclick="sendKeyPC('cmd+c')">⌘C</button>
-  <button onclick="sendKeyPC('cmd+v')">⌘V</button>
+  <button onclick="sendKeyPC('ctrl+a')" title="Ctrl+A — line start">⌃A home</button>
+  <button onclick="sendKeyPC('ctrl+e')" title="Ctrl+E — line end">⌃E end</button>
+  <button onclick="sendKeyPC('ctrl+w')" title="Ctrl+W — delete word backward">⌃W delW</button>
+  <button onclick="sendKeyPC('ctrl+u')" title="Ctrl+U — delete to line start">⌃U delL</button>
+  <button onclick="sendKeyPC('ctrl+c')" title="Ctrl+C — interrupt / SIGINT">⌃C int</button>
+  <button onclick="sendKeyPC('ctrl+l', {reload:true})" title="Ctrl+L — clear screen">⌃L clr</button>
+  <button onclick="sendKeyPC('cmd+c')" title="Cmd+C — copy">⌘C copy</button>
+  <button onclick="sendKeyPC('cmd+v')" title="Cmd+V — paste">⌘V paste</button>
   <span class="sep"></span>
   <!-- system / window -->
   <button onclick="sendKeyPC('ctrl+cmd+f', {reload:true})" title="toggle fullscreen">fullScr</button>
