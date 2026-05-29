@@ -39,13 +39,19 @@ class ItermBridge:
     async def ensure_connected(self) -> None:
         """Lazy connect + reconnect-on-failure. Serialized to avoid duplicate connects.
 
-        The iterm2 App caches windows/sessions locally, so we need an actual roundtrip
-        to the daemon to detect a dead connection. Re-fetching the app does that.
+        The iterm2 App caches windows/sessions locally and keeps itself current
+        via a layout-change subscription — but that subscription can silently
+        miss tab-creation events, leaving app.windows STALE (it happily reports
+        3 tabs while 5 exist). async_get_app on the same connection returns that
+        same stale singleton, so we additionally call app.async_refresh() to
+        force a fresh roundtrip of the full window/tab/session hierarchy. That
+        roundtrip also doubles as the dead-connection check.
         """
         async with self._lock:
             if self.app is not None:
                 try:
                     self.app = await iterm2.async_get_app(self.connection)
+                    await self.app.async_refresh()   # force-refresh stale window model
                     return
                 except Exception:
                     self.connection = None
@@ -56,8 +62,29 @@ class ItermBridge:
         """Enumerate all iTerm2 tabs with a live foreground `claude` process.
 
         Pure enumeration — does NOT pair to a session_id. Pairing is done
-        lazily by the server's attach flow with explicit screen-content scoring."""
-        assert self.app is not None
+        lazily by the server's attach flow with explicit screen-content scoring.
+
+        Builds a FRESH connection every call. The long-lived connection's App
+        singleton goes stale — its layout subscription silently misses
+        tab-creation events and app.async_refresh() does NOT un-stick it once
+        established (observed: a server that connected while 3 tabs existed kept
+        reporting 3 even after 2 more tabs opened). A brand-new connection
+        always reflects the current window/tab hierarchy. Enumeration is only
+        triggered by user actions (attach / sessions list / resume / new tab),
+        so the extra connect (~100-200 ms) is fine here."""
+        async with self._lock:
+            try:
+                self.connection = await iterm2.Connection.async_create()
+                self.app = await iterm2.async_get_app(self.connection)
+                # Force a full layout fetch — in some event-loop contexts
+                # async_get_app returns before the window model is fully
+                # populated, yielding a partial tab list.
+                await self.app.async_refresh()
+            except Exception:
+                self.connection = None
+                self.app = None
+        if self.app is None:
+            return []
         refs: list[ClaudeSessionRef] = []
         for wi, window in enumerate(self.app.windows):
             for ti, tab in enumerate(window.tabs):

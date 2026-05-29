@@ -220,6 +220,13 @@ def _trunc_msg(text: str, ts: str, max_chars: int) -> dict:
 
 
 def _project_path_from_jsonl(path: Path) -> Optional[str]:
+    """The session's MOST RECENT cwd (last cwd entry in the JSONL).
+
+    A session's cwd can change over its lifetime (cd into another repo,
+    resume in a different dir, etc.), so the first cwd is not reliable —
+    the live iTerm tab sits in the *current* cwd, which is the last one
+    recorded. Returns that."""
+    last = None
     try:
         with path.open("r", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -229,10 +236,30 @@ def _project_path_from_jsonl(path: Path) -> Optional[str]:
                     continue
                 cwd = e.get("cwd")
                 if cwd:
-                    return cwd
+                    last = cwd
     except OSError:
         pass
-    return None
+    return last
+
+
+def _project_cwds_from_jsonl(path: Path) -> set[str]:
+    """Every distinct cwd the session has ever recorded. Used to match
+    candidate iTerm tabs: the live tab's cwd should be one of these even
+    if the session moved between directories during its life."""
+    cwds: set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                cwd = e.get("cwd")
+                if cwd:
+                    cwds.add(cwd)
+    except OSError:
+        pass
+    return cwds
 
 
 def find_jsonl_for_session(session_id: str) -> Optional[Path]:
@@ -1778,6 +1805,7 @@ async def post_attach(payload: AttachPayload):
         raise HTTPException(status_code=404, detail="unknown session_id")
 
     target_cwd = _project_path_from_jsonl(jsonl)
+    target_cwds = _project_cwds_from_jsonl(jsonl)
     fingerprints = pick_jsonl_fingerprints(jsonl)
 
     try:
@@ -1786,8 +1814,10 @@ async def post_attach(payload: AttachPayload):
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
 
     refs = await bridge.list_claude_tabs()
-    # Restrict to candidates whose cwd matches the target session's cwd.
-    candidates_refs = [r for r in refs if target_cwd is None or r.cwd == target_cwd]
+    # Restrict to candidates whose cwd is one the session has used. Match
+    # against ALL cwds seen in the JSONL (not just the latest) because a
+    # session can move between dirs — the live tab may sit in any of them.
+    candidates_refs = [r for r in refs if not target_cwds or r.cwd in target_cwds]
     if not candidates_refs:
         return {"result": "not_running", "session_id": sid, "cwd": target_cwd}
 
