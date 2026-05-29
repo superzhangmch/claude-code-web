@@ -2219,11 +2219,40 @@ async def get_screen(claude_session_id: str):
         # a clean capture (no leftover box-drawing chars from earlier
         # frames). Only safe for user-initiated reads — not the polling
         # path, which would flicker every 5 seconds.
+        # strip_input=False → show the full screen, including the input box
+        # and footer at the bottom (the attach flow strips those, but here
+        # the user wants to see everything that's actually on the tab).
         screen = await bridge.get_screen_for(b.iterm_session_id, max_lines=200,
-                                             refresh=True)
+                                             refresh=True, strip_input=False)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
     return {"screen": screen or ""}
+
+
+@app.get("/api/iterm-tabs", dependencies=[Depends(require_token)])
+async def get_iterm_tabs():
+    """List every iTerm2 tab/session for the 'iTerm2 tabs' viewer."""
+    try:
+        tabs = await bridge.list_all_tabs()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
+    return {"tabs": tabs}
+
+
+@app.get("/api/iterm-screen", dependencies=[Depends(require_token)])
+async def get_iterm_screen(iterm_session_id: str):
+    """Read the full screen of an arbitrary iTerm2 session (by its session id,
+    as returned from /api/iterm-tabs). No Ctrl+L refresh here — we don't want
+    to disturb non-claude shells. strip_input=False shows everything."""
+    try:
+        await bridge.ensure_connected()
+        screen = await bridge.get_screen_for(iterm_session_id, max_lines=400,
+                                             refresh=False, strip_input=False)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
+    if screen is None:
+        raise HTTPException(status_code=404, detail="iterm session not found")
+    return {"screen": screen}
 
 
 class ResumePayload(BaseModel):

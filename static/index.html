@@ -715,6 +715,39 @@ footer button.icon {
   display: flex; flex-wrap: wrap; gap: 6px;
   justify-content: flex-end;
 }
+#info-modal .modal-row {
+  display: flex; align-items: center; gap: 8px;
+}
+#info-modal .modal-row h3 { margin: 0; flex: 1; font-size: 14px; }
+
+#tabs-modal .modal-card.tabs-card {
+  width: 95vw; max-width: 1100px; max-height: 85vh;
+  display: flex; flex-direction: column; gap: 8px;
+}
+#tabs-modal .modal-row { display: flex; align-items: center; gap: 8px; }
+#tabs-modal .modal-row h3 { margin: 0; flex: 1; font-size: 14px; }
+#tabs-modal .tabs-list {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  flex-shrink: 0; max-height: 30vh; overflow-y: auto;
+}
+#tabs-modal .tabs-list button {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 10px; font: inherit; font-size: 12px; cursor: pointer;
+  text-align: left; max-width: 100%; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+#tabs-modal .tabs-list button:hover { border-color: var(--accent); }
+#tabs-modal .tabs-list button.active { border-color: var(--accent); background: var(--accent); color: #fff; }
+#tabs-modal .tabs-list button .claude-dot { color: #6ee884; margin-right: 4px; }
+#tabs-modal .screen-body {
+  flex: 1; min-height: 0;
+  background: #000; color: var(--text);
+  font: 12px ui-monospace, Menlo, monospace;
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 8px 10px; margin: 0;
+  overflow: auto; white-space: pre;
+}
 #info-modal .modal-card.info-card {
   width: 95vw; max-width: 720px; max-height: 85vh;
   display: flex; flex-direction: column; gap: 8px;
@@ -783,6 +816,7 @@ footer button.icon {
     <button id="info-btn" class="btn icon" style="display:none" title="Session info">ⓘ</button>
     <button id="screen-btn" class="btn icon" style="display:none" title="Show iTerm screen">🖥</button>
     <span id="battery" class="battery" style="display:none" title="Click for CPU history"></span>
+    <button id="tabs-btn" class="btn icon" style="display:none" title="Show all iTerm2 tabs">🗂</button>
     <button id="refresh-btn" class="btn icon" style="display:none" title="Refresh list">↻</button>
     <button id="back-btn" class="btn" style="display:none">←</button>
     <button id="new-btn" class="btn">+</button>
@@ -816,6 +850,18 @@ footer button.icon {
         <button id="info-close" class="btn">close</button>
       </div>
       <table id="info-body" class="info-table"></table>
+    </div>
+  </div>
+
+  <div id="tabs-modal" class="modal">
+    <div class="modal-card tabs-card">
+      <div class="modal-row">
+        <h3>iTerm2 tabs</h3>
+        <button id="tabs-refresh" class="btn">↻</button>
+        <button id="tabs-close" class="btn">close</button>
+      </div>
+      <div id="tabs-list" class="tabs-list"></div>
+      <pre id="tabs-screen" class="screen-body">Pick a tab above to view its screen.</pre>
     </div>
   </div>
 
@@ -1048,6 +1094,7 @@ footer button.icon {
   const modePicks = Array.from(document.querySelectorAll(".mode-pick"));
   const backBtn = document.getElementById("back-btn");
   const newBtn = document.getElementById("new-btn");
+  const tabsBtn = document.getElementById("tabs-btn");
   const warnEl = document.getElementById("warn");
   const pickerEl = document.getElementById("picker");
   const pickerListEl = document.getElementById("picker-list");
@@ -1195,6 +1242,7 @@ footer button.icon {
     infoBtn.style.display = "none";
     newBtn.style.display = "";
     refreshBtn.style.display = "";
+    tabsBtn.style.display = "";
     setReady(null);
     metaEl.textContent = "";
     setStatus("off");
@@ -1214,6 +1262,7 @@ footer button.icon {
     infoBtn.style.display = "";
     newBtn.style.display = "none";
     refreshBtn.style.display = "none";
+    tabsBtn.style.display = "none";
     batteryEl.style.display = "none";  // header version is picker-only
     refreshModeButtons();
     setStatus("ok");
@@ -1244,6 +1293,74 @@ footer button.icon {
   screenClose.addEventListener("click", () => screenModal.classList.remove("show"));
   screenModal.addEventListener("click", (e) => {
     if (e.target === screenModal) screenModal.classList.remove("show");
+  });
+
+  // ---------- iTerm2 tabs viewer (picker page) ----------
+  const tabsModal = document.getElementById("tabs-modal");
+  const tabsListEl = document.getElementById("tabs-list");
+  const tabsScreenEl = document.getElementById("tabs-screen");
+  const tabsRefresh = document.getElementById("tabs-refresh");
+  const tabsClose = document.getElementById("tabs-close");
+  let tabsSelectedId = null;
+
+  async function loadItermTabs() {
+    tabsListEl.textContent = "Loading…";
+    try {
+      const resp = await authedFetch("/api/iterm-tabs");
+      if (!resp.ok) { tabsListEl.textContent = "Error: " + resp.status; return; }
+      const j = await resp.json();
+      const tabs = j.tabs || [];
+      tabsListEl.textContent = "";
+      if (!tabs.length) { tabsListEl.textContent = "(no tabs)"; return; }
+      for (const t of tabs) {
+        const b = document.createElement("button");
+        const label = `w${t.window_index}·t${t.tab_index}  ${t.name || "(unnamed)"}`;
+        if (t.is_claude) {
+          const dot = document.createElement("span");
+          dot.className = "claude-dot"; dot.textContent = "●";
+          b.appendChild(dot);
+        }
+        b.appendChild(document.createTextNode(label));
+        b.title = label + (t.tty ? "  [" + t.tty + "]" : "");
+        b.addEventListener("click", () => {
+          tabsSelectedId = t.iterm_session_id;
+          for (const c of tabsListEl.children) c.classList.remove("active");
+          b.classList.add("active");
+          loadItermScreen(t.iterm_session_id);
+        });
+        tabsListEl.appendChild(b);
+      }
+    } catch (e) {
+      tabsListEl.textContent = "Error: " + e;
+    }
+  }
+
+  async function loadItermScreen(sid) {
+    tabsScreenEl.textContent = "Loading…";
+    try {
+      const resp = await authedFetch("/api/iterm-screen?iterm_session_id=" + encodeURIComponent(sid));
+      if (!resp.ok) { tabsScreenEl.textContent = "Error: " + resp.status + " " + resp.statusText; return; }
+      const j = await resp.json();
+      tabsScreenEl.textContent = j.screen || "(empty)";
+      tabsScreenEl.scrollTop = tabsScreenEl.scrollHeight;
+    } catch (e) {
+      tabsScreenEl.textContent = "Error: " + e;
+    }
+  }
+
+  tabsBtn.addEventListener("click", () => {
+    tabsModal.classList.add("show");
+    tabsSelectedId = null;
+    tabsScreenEl.textContent = "Pick a tab above to view its screen.";
+    loadItermTabs();
+  });
+  tabsRefresh.addEventListener("click", () => {
+    loadItermTabs();
+    if (tabsSelectedId) loadItermScreen(tabsSelectedId);
+  });
+  tabsClose.addEventListener("click", () => tabsModal.classList.remove("show"));
+  tabsModal.addEventListener("click", (e) => {
+    if (e.target === tabsModal) tabsModal.classList.remove("show");
   });
 
   // Send raw bytes (escape seqs allowed) to the bound iTerm tab, then

@@ -119,6 +119,43 @@ class ItermBridge:
     async def list_claude_sessions(self) -> list[ClaudeSessionRef]:
         return await self.list_claude_tabs()
 
+    async def list_all_tabs(self) -> list[dict]:
+        """Enumerate EVERY iTerm2 tab/session (not just claude ones), for the
+        'iTerm2 tabs' viewer. Fresh connection for the same staleness reason
+        as list_claude_tabs. Each entry: window/tab index, session id, name,
+        tty, and whether a foreground claude is running on it."""
+        async with self._lock:
+            try:
+                self.connection = await iterm2.Connection.async_create()
+                self.app = await iterm2.async_get_app(self.connection)
+                await self.app.async_refresh()
+            except Exception:
+                self.connection = None
+                self.app = None
+        if self.app is None:
+            return []
+        out: list[dict] = []
+        for wi, window in enumerate(self.app.windows):
+            for ti, tab in enumerate(window.tabs):
+                for session in tab.sessions:
+                    try:
+                        tty = await session.async_get_variable("tty")
+                    except Exception:
+                        tty = None
+                    try:
+                        name = await session.async_get_variable("session.name") or ""
+                    except Exception:
+                        name = ""
+                    out.append({
+                        "iterm_session_id": session.session_id,
+                        "window_index": wi,
+                        "tab_index": ti,
+                        "name": name,
+                        "tty": tty or "",
+                        "is_claude": bool(tty and _claude_on_tty(tty)),
+                    })
+        return out
+
     async def send_text_to(self, iterm_session_id: str, text: str) -> bool:
         """Send text to a specific iTerm2 session.
 
@@ -230,7 +267,8 @@ class ItermBridge:
         return False
 
     async def get_screen_for(self, iterm_session_id: str, max_lines: int = 80,
-                             refresh: bool = False) -> Optional[str]:
+                             refresh: bool = False,
+                             strip_input: bool = True) -> Optional[str]:
         """Read the current screen tail from `iterm_session_id`.
 
         When `refresh=True`, send Ctrl+L (form feed) first and wait
@@ -238,6 +276,10 @@ class ItermBridge:
         / styling artifacts left in iTerm's grid from previous frames,
         giving a cleaner capture. Don't use refresh on the auto-poll
         path: every 5s of Ctrl+L would be visible flicker for the user.
+
+        `strip_input` (default True) removes the Ink input box + footer at
+        the bottom — wanted for attach scoring, but the "iTerm screen"
+        viewer passes False to show the full screen including those lines.
         """
         if not self.app:
             return None
@@ -261,7 +303,8 @@ class ItermBridge:
             # output without each having to remember the workaround.
             s = line.string.replace("\x00", " ").rstrip()
             lines.append(s)
-        lines = _strip_input_area(lines)
+        if strip_input:
+            lines = _strip_input_area(lines)
         while lines and not lines[-1]:
             lines.pop()
         return "\n".join(lines[-max_lines:])
