@@ -715,11 +715,6 @@ footer button.icon {
   display: flex; flex-wrap: wrap; gap: 6px;
   justify-content: flex-end;
 }
-#info-modal .modal-row {
-  display: flex; align-items: center; gap: 8px;
-}
-#info-modal .modal-row h3 { margin: 0; flex: 1; font-size: 14px; }
-
 #tabs-modal .modal-card.tabs-card {
   width: 95vw; max-width: 1100px; max-height: 85vh;
   display: flex; flex-direction: column; gap: 8px;
@@ -753,6 +748,16 @@ footer button.icon {
   width: 95vw; max-width: 1100px; height: 85vh;
   display: flex; flex-direction: column; gap: 8px;
 }
+/* Dark-theme the bar/pager buttons (close, ↑, Go, 🔍 search, ✕, prev/next)
+   — they'd otherwise render as white browser-default buttons. */
+#files-modal .btn {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 10px; font: inherit; font-size: 13px; cursor: pointer;
+}
+#files-modal .btn:hover { border-color: var(--accent); }
+#files-modal .btn:disabled { opacity: 0.4; cursor: default; }
+#files-modal #files-fav-dir.on { color: #f5c451; border-color: #f5c451; }
 #files-modal .modal-row { display: flex; align-items: center; gap: 8px; }
 #files-modal .modal-row h3 { margin: 0; flex: 1; font-size: 14px; }
 #files-modal .files-bar { display: flex; gap: 6px; flex-shrink: 0; }
@@ -766,15 +771,15 @@ footer button.icon {
   max-height: 18vh; overflow-y: auto;
 }
 #files-modal .files-favs .fav {
-  display: inline-flex; align-items: center; gap: 4px;
+  display: inline-flex; align-items: flex-start; gap: 4px;
   background: var(--panel2); border: 1px solid var(--border);
-  border-radius: 14px; padding: 3px 4px 3px 10px;
+  border-radius: 8px; padding: 4px 4px 4px 10px;
   font: 12px ui-monospace, Menlo, monospace; cursor: pointer;
   max-width: 100%;
 }
 #files-modal .files-favs .fav:hover { border-color: var(--accent); }
 #files-modal .files-favs .fav .fav-nm {
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw;
+  white-space: normal; overflow-wrap: anywhere; word-break: break-all;
 }
 #files-modal .files-favs .fav.dir .fav-nm { color: var(--accent); }
 #files-modal .files-favs .fav .fav-x {
@@ -784,7 +789,8 @@ footer button.icon {
 #files-modal .files-favs .fav .fav-x:hover { color: var(--err); }
 #files-modal .files-list .row .star {
   flex-shrink: 0; background: transparent; border: none;
-  color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 4px;
+  color: var(--muted); cursor: pointer; font-size: 13px;
+  padding: 0; width: 16px; line-height: 1;
 }
 #files-modal .files-list .row .star.on { color: #f5c451; }
 #files-modal .files-list {
@@ -792,9 +798,9 @@ footer button.icon {
   border: 1px solid var(--border); border-radius: 6px;
 }
 #files-modal .files-list .row {
-  display: flex; align-items: flex-start; gap: 10px;
+  display: flex; align-items: flex-start; gap: 6px;
   width: max-content; min-width: 100%;   /* grow with content → horizontal scroll */
-  padding: 5px 10px; cursor: pointer;
+  padding: 4px 8px; cursor: pointer;
   border-bottom: 1px solid var(--border);
   font: 12px ui-monospace, Menlo, monospace;
 }
@@ -806,9 +812,8 @@ footer button.icon {
 #files-modal .files-list .row .mt { color: var(--muted); flex-shrink: 0; white-space: nowrap; }
 #files-modal .files-list .row .sz { color: var(--muted); flex-shrink: 0; width: 64px; text-align: right; white-space: nowrap; }
 #files-modal .files-list .row .cp {
-  flex-shrink: 0; background: var(--panel2); color: var(--text);
-  border: 1px solid var(--border); border-radius: 5px;
-  padding: 2px 7px; cursor: pointer; font-size: 12px;
+  flex-shrink: 0; background: transparent; border: none;
+  cursor: pointer; font-size: 13px; padding: 0; width: 18px; line-height: 1;
 }
 #files-modal .files-list .row .cp:hover { border-color: var(--accent); }
 #files-modal .files-list .row.dir .nm { color: var(--accent); }
@@ -829,27 +834,38 @@ footer button.icon {
 #files-modal .files-preview img { max-width: 100%; display: block; margin: 0 auto; }
 #files-modal .files-preview iframe { width: 100%; height: 100%; border: 0; background: #fff; }
 #files-modal .files-preview .ph { color: var(--muted); padding: 14px; font-size: 13px; }
-#info-modal .modal-card.info-card {
-  width: 95vw; max-width: 720px; max-height: 85vh;
-  display: flex; flex-direction: column; gap: 8px;
-  overflow: auto;
+/* Two tabs: Screen (scroll both axes, in a box) / Info (just a table,
+   horizontal scroll only). One pane visible at a time. */
+#screen-modal .tab-radio {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 13px; color: var(--text); cursor: pointer;
 }
-#info-modal .info-table {
+#screen-modal .tab-radio input { margin: 0; }
+#screen-modal #screen-pane {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column; gap: 8px;
+}
+#screen-modal #info-pane {
+  flex: 1 1 auto; min-height: 0;
+  overflow-x: auto;            /* table scrolls left-right; vertical grows */
+  overflow-y: auto;
+}
+.info-table {
   width: 100%; border-collapse: collapse;
   font: 12px ui-monospace, Menlo, monospace;
 }
-#info-modal .info-table tr { border-bottom: 1px dashed var(--border); }
-#info-modal .info-table tr:last-child { border-bottom: 0; }
-#info-modal .info-table td {
+.info-table tr { border-bottom: 1px dashed var(--border); }
+.info-table tr:last-child { border-bottom: 0; }
+.info-table td {
   padding: 5px 8px; vertical-align: top;
   word-break: break-all;
 }
-#info-modal .info-table td.k {
+.info-table td.k {
   color: var(--accent); white-space: nowrap;
   font-weight: 500; min-width: 110px;
 }
-#info-modal .info-table td.v { color: var(--text); }
-#info-modal .info-table td.v pre {
+.info-table td.v { color: var(--text); }
+.info-table td.v pre {
   margin: 0; white-space: pre; font: inherit;
   overflow-x: auto; max-width: 100%;
 }
@@ -894,8 +910,7 @@ footer button.icon {
       <button class="btn mode-pick" data-mode="medium" title="medium">▄</button>
       <button class="btn mode-pick" data-mode="all" title="all">█</button>
     </span>
-    <button id="info-btn" class="btn icon" style="display:none" title="Session info">ⓘ</button>
-    <button id="screen-btn" class="btn icon" style="display:none" title="Show iTerm screen">🖥</button>
+    <button id="screen-btn" class="btn icon" style="display:none" title="iTerm screen + session info">🖥</button>
     <span id="battery" class="battery" style="display:none" title="Click for CPU history"></span>
     <button id="tabs-btn" class="btn icon" style="display:none" title="Show all iTerm2 tabs">🗂</button>
     <button id="files-btn" class="btn icon" style="display:none" title="Browse local files">📁</button>
@@ -925,16 +940,6 @@ footer button.icon {
     </div>
   </div>
 
-  <div id="info-modal" class="modal">
-    <div class="modal-card info-card">
-      <div class="modal-row">
-        <h3>Session info</h3>
-        <button id="info-close" class="btn">close</button>
-      </div>
-      <table id="info-body" class="info-table"></table>
-    </div>
-  </div>
-
   <div id="tabs-modal" class="modal">
     <div class="modal-card tabs-card">
       <div class="modal-row">
@@ -957,6 +962,7 @@ footer button.icon {
         <button id="files-up" class="btn" title="Parent directory">↑</button>
         <input id="files-path" class="files-path" placeholder="/path/to/dir — Enter to go" />
         <button id="files-go" class="btn">Go</button>
+        <button id="files-fav-dir" class="btn" title="Favorite this directory">☆</button>
       </div>
       <div class="files-bar">
         <input id="files-filter" class="files-path" placeholder="filter this page — or Search whole dir" />
@@ -977,16 +983,25 @@ footer button.icon {
   <div id="screen-modal" class="modal">
     <div class="modal-card screen-card">
       <div class="modal-row">
-        <h3>iTerm screen</h3>
+        <label class="tab-radio"><input type="radio" name="screenTab" value="screen" checked> Screen</label>
+        <label class="tab-radio"><input type="radio" name="screenTab" value="info"> Info</label>
+        <span style="flex:1"></span>
         <button id="screen-refresh" class="btn">↻</button>
         <button id="screen-close" class="btn">close</button>
       </div>
-      <pre id="screen-body" class="screen-body">…</pre>
-      <div class="modal-row screen-actions">
-        <button id="key-esc" class="btn" title="Send ESC">ESC</button>
-        <button id="key-opt1" class="btn" title="Send Enter (selects option 1 / current)">ENTER (opt1)</button>
-        <button id="key-opt2" class="btn" title="Down + Enter (option 2)">OPT2</button>
-        <button id="key-opt3" class="btn" title="Down ×2 + Enter (option 3)">OPT3</button>
+      <!-- Screen tab: scrollable both ways; action keys below the screen. -->
+      <div id="screen-pane">
+        <pre id="screen-body" class="screen-body">…</pre>
+        <div class="modal-row screen-actions">
+          <button id="key-esc" class="btn" title="Send ESC">ESC</button>
+          <button id="key-opt1" class="btn" title="Send Enter (selects option 1 / current)">ENTER (opt1)</button>
+          <button id="key-opt2" class="btn" title="Down + Enter (option 2)">OPT2</button>
+          <button id="key-opt3" class="btn" title="Down ×2 + Enter (option 3)">OPT3</button>
+        </div>
+      </div>
+      <!-- Info tab: just a table, only horizontal scroll. -->
+      <div id="info-pane" style="display:none">
+        <table id="info-body" class="info-table"></table>
       </div>
     </div>
   </div>
@@ -1227,16 +1242,13 @@ footer button.icon {
   const screenRefresh = document.getElementById("screen-refresh");
   const screenClose = document.getElementById("screen-close");
   const refreshBtn = document.getElementById("refresh-btn");
-  const infoBtn = document.getElementById("info-btn");
   const cpuModal = document.getElementById("cpu-modal");
   const cpuChartEl = document.getElementById("cpu-chart");
   const cpuLegendEl = document.getElementById("cpu-legend");
   const cpuRefresh = document.getElementById("cpu-refresh");
   const cpuClose = document.getElementById("cpu-close");
   const batteryEl = document.getElementById("battery");
-  const infoModal = document.getElementById("info-modal");
   const infoBody = document.getElementById("info-body");
-  const infoClose = document.getElementById("info-close");
 
   // ---------- state ----------
   let attachedSid = null;        // currently-viewing claude_session_id
@@ -1349,7 +1361,6 @@ footer button.icon {
     backBtn.style.display = "none";
     modeGroup.style.display = "none";
     screenBtn.style.display = "none";
-    infoBtn.style.display = "none";
     newBtn.style.display = "";
     refreshBtn.style.display = "";
     tabsBtn.style.display = "";
@@ -1370,11 +1381,10 @@ footer button.icon {
     backBtn.style.display = "";
     modeGroup.style.display = "";
     screenBtn.style.display = "";
-    infoBtn.style.display = "";
     newBtn.style.display = "none";
     refreshBtn.style.display = "none";
     tabsBtn.style.display = "none";
-    filesBtn.style.display = "none";
+    filesBtn.style.display = "";       // file browser available in detail view too
     batteryEl.style.display = "none";  // header version is picker-only
     refreshModeButtons();
     setStatus("ok");
@@ -1397,11 +1407,26 @@ footer button.icon {
       screenBody.textContent = "Error: " + e;
     }
   }
-  screenBtn.addEventListener("click", () => {
-    screenModal.classList.add("show");
-    loadScreen();
+  const screenPane = document.getElementById("screen-pane");
+  const infoPane = document.getElementById("info-pane");
+  function showScreenTab(which) {
+    const onScreen = which === "screen";
+    screenPane.style.display = onScreen ? "flex" : "none";
+    infoPane.style.display = onScreen ? "none" : "block";
+    const r = document.querySelector(`input[name="screenTab"][value="${which}"]`);
+    if (r) r.checked = true;
+  }
+  document.querySelectorAll('input[name="screenTab"]').forEach(el => {
+    el.addEventListener("change", () => showScreenTab(el.value));
   });
-  screenRefresh.addEventListener("click", loadScreen);
+  function openScreenInfo() {
+    screenModal.classList.add("show");
+    showScreenTab("screen");
+    loadScreen();
+    loadInfo();
+  }
+  screenBtn.addEventListener("click", openScreenInfo);
+  screenRefresh.addEventListener("click", () => { loadScreen(); loadInfo(); });
   screenClose.addEventListener("click", () => screenModal.classList.remove("show"));
   screenModal.addEventListener("click", (e) => {
     if (e.target === screenModal) screenModal.classList.remove("show");
@@ -1556,7 +1581,16 @@ footer button.icon {
       window.open(url, "_blank");
     }
   }
+  // Reflect whether the current dir is favorited, on the path-bar ☆ button.
+  function refreshDirFavBtn() {
+    const btn = document.getElementById("files-fav-dir");
+    if (!btn) return;
+    const on = filesCurDir && isFav(filesCurDir);
+    btn.textContent = on ? "★" : "☆";
+    btn.classList.toggle("on", !!on);
+  }
   function renderFavs() {
+    refreshDirFavBtn();
     const a = loadFavs();
     if (!a.length) { filesFavsEl.style.display = "none"; filesFavsEl.innerHTML = ""; return; }
     filesFavsEl.style.display = "flex";
@@ -1566,7 +1600,16 @@ footer button.icon {
       chip.className = "fav" + (f.is_dir ? " dir" : "");
       const nm = document.createElement("span");
       nm.className = "fav-nm";
-      nm.textContent = (f.is_dir ? "📂 " : "") + (f.name || f.path);
+      // Dirs: show the last 3 path segments so different dirs with the same
+      // leaf name (…/a/reports vs …/b/reports) are easy to tell apart.
+      let label;
+      if (f.is_dir) {
+        const parts = f.path.replace(/\/+$/, "").split("/").filter(Boolean);
+        label = "📂 " + (parts.length > 3 ? "…/" : "/") + parts.slice(-3).join("/");
+      } else {
+        label = f.name || f.path;
+      }
+      nm.textContent = label;
       nm.title = f.path;
       nm.addEventListener("click", () => openFav(f));
       const x = document.createElement("button");
@@ -1603,6 +1646,7 @@ footer button.icon {
       filesActiveQ = q;
       filesPathEl.value = j.path;
       filesLastEntries = j.entries;
+      refreshDirFavBtn();
       renderFilesPage();
     } catch (err) {
       filesListEl.innerHTML = '<div class="ph">Error: ' + err + '</div>';
@@ -1741,6 +1785,12 @@ footer button.icon {
     if (ent) previewFile(dir.replace(/\/$/, "") + "/" + base, ent.kind);
   }
   filesGo.addEventListener("click", filesGoSubmit);
+  document.getElementById("files-fav-dir").addEventListener("click", () => {
+    if (!filesCurDir) return;
+    const name = filesCurDir.replace(/\/+$/, "").split("/").pop() || filesCurDir;
+    toggleFav({ path: filesCurDir, is_dir: true, kind: "dir", name });
+    refreshDirFavBtn();
+  });
   // Filter box: local, current-page only — instant, no network.
   filesFilterEl.addEventListener("input", renderFilesPage);
   // Search button: global search across the whole dir (server-side, paged).
@@ -2098,14 +2148,8 @@ footer button.icon {
       appendInfoRow(infoBody, "error", String(e));
     }
   }
-  infoBtn.addEventListener("click", () => {
-    infoModal.classList.add("show");
-    loadInfo();
-  });
-  infoClose.addEventListener("click", () => infoModal.classList.remove("show"));
-  infoModal.addEventListener("click", (e) => {
-    if (e.target === infoModal) infoModal.classList.remove("show");
-  });
+  // (Session info is now shown inside the iTerm-screen modal — no separate
+  // info button / modal. loadInfo() is called from openScreenInfo above.)
 
   function refreshModeButtons() {
     for (const b of modePicks) {
