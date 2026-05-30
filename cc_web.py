@@ -450,6 +450,9 @@ def _llm_http_post(url: str, headers: dict, body: dict, timeout: float) -> str:
 _LLM_PICK_CACHE: dict[tuple, tuple[float, dict]] = {}
 LLM_PICK_CACHE_TTL_SEC = 3600.0  # 1 hour
 LLM_PICK_CACHE_MAX_ENTRIES = 256
+# Min length of an LLM evidence pair's common core to count as real proof.
+# Short generic project tokens (pocketchat, CHAT_PASSWORD) fall below this.
+MIN_EVIDENCE_LEN = 16
 
 
 def _llm_pick_cache_key(jsonl_path: Path, scored: list[dict]) -> tuple:
@@ -578,13 +581,18 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
         "{\n"
         f'  "tab": <integer 0..{len(scored)}>,\n'
         '  "matches": [\n'
-        '    {"transcript": "<5-50 char snippet from session>", "screen": "<5-50 char snippet from picked tab>"},\n'
+        '    {"transcript": "<16-80 char snippet from session>", "screen": "<16-80 char snippet from picked tab>"},\n'
         "    ...\n"
         "  ]\n"
         "}\n"
         "\n"
         "RULES for `matches`:\n"
         "- Provide 1-3 strongest evidence pairs.\n"
+        "- Each snippet should be a LONG, DISTINCTIVE fragment (>=16 chars):\n"
+        "  a full file path, a multi-word phrase, a command, a specific\n"
+        "  identifier. Do NOT use a single short generic word (e.g. the\n"
+        "  project name) — it appears in every session of the same project\n"
+        "  and proves nothing.\n"
         "- transcript snippet MUST be copied verbatim from SESSION blocks.\n"
         "- screen snippet MUST be copied verbatim from the picked tab's screen.\n"
         "- The two snippets in EACH pair must be the SAME content. They\n"
@@ -699,16 +707,36 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
                             or s_norm in t_norm)
         else:
             pair_related = False
+        # The common core (shorter normalized side) must be SUBSTANTIAL.
+        # Short generic tokens shared by every session in a project — e.g.
+        # "pocketchat", "CHAT_PASSWORD" — are not real evidence, so they
+        # don't count. Require a distinctive fragment: long enough, and not
+        # a single bare word (must contain a space / path-sep / dot / digit,
+        # i.e. look like a phrase, path, filename, or identifier).
+        core = t_norm if len(t_norm) <= len(s_norm) else s_norm
+        looks_distinctive = bool(re.search(r"[\s/.\d]", core)) or len(core) >= 24
+        long_enough = len(core) >= MIN_EVIDENCE_LEN
         if not (t_in and s_in):
             verdict = "TRANSCRIPT_FAKE" if not t_in else "SCREEN_FAKE"
         elif not pair_related:
             verdict = "PAIR_MISMATCH"
+        elif not long_enough or not looks_distinctive:
+            verdict = "TOO_SHORT"
         else:
             verdict = "OK"
         verified.append({
             "transcript": t_snip, "screen": s_snip, "verdict": verdict,
         })
-    all_ok = bool(verified) and all(v["verdict"] == "OK" for v in verified)
+    # Need real proof: at least 2 OK pairs, OR a single OK pair whose core is
+    # clearly long (>= 30 chars). One short-ish match is not enough.
+    ok_pairs = [v for v in verified if v["verdict"] == "OK"]
+    strong_single = any(
+        len(_normalize_for_match(v["transcript"])) >= 30
+        or len(_normalize_for_match(v["screen"])) >= 30
+        for v in ok_pairs
+    )
+    all_ok = bool(verified) and all(v["verdict"] == "OK" for v in verified) \
+        and (len(ok_pairs) >= 2 or strong_single)
     result = {
         "pick": pick_iterm_id,
         "matches": verified,
@@ -1820,6 +1848,28 @@ async def post_attach(payload: AttachPayload):
     candidates_refs = [r for r in refs if not target_cwds or r.cwd in target_cwds]
     if not candidates_refs:
         return {"result": "not_running", "session_id": sid, "cwd": target_cwd}
+
+    # Ground-truth short-circuit via argv. A tab launched as
+    # `claude --resume <sid>` is DEFINITIVELY running that session — the
+    # command line doesn't lie, no screen/LLM guessing needed.
+    #   - exact match → bind immediately.
+    #   - any candidate whose argv proves it's a DIFFERENT resumed session
+    #     is removed from the pool, so scoring/LLM can't mis-pick it (this
+    #     is what caused f85c to "perfectly match" the tab actually running
+    #     18eda… — they share the my_chat project vocabulary).
+    argv_exact = [r for r in candidates_refs if getattr(r, "claude_session_id", "") == sid]
+    if argv_exact:
+        b = _build_binding(sid, argv_exact[0], jsonl)
+        if b:
+            bindings.insert(b)
+            return {"result": "bound", "binding": _serialize_binding(b),
+                    "auto_bind_reason": "resume_argv_match"}
+    candidates_refs = [r for r in candidates_refs
+                       if not getattr(r, "claude_session_id", "")
+                       or r.claude_session_id == sid]
+    if not candidates_refs:
+        return {"result": "not_running", "session_id": sid, "cwd": target_cwd,
+                "note": "the only tabs in this cwd are running other (resumed) sessions"}
 
     # Marker short-circuit:
     #   1. For each candidate iTerm tab, read its current screen and extract

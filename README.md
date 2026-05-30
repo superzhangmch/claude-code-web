@@ -151,6 +151,40 @@ Resetting (if a prompt was dismissed / denied): `tccutil reset
 ScreenCapture` (and the equivalent `Accessibility` / `ListenEvent`), then
 trigger the feature again to get a fresh prompt.
 
+### Running it as a launchd auto-start — hard-won gotchas
+
+Two machines, same code: mac-pro "just worked", mac-air broke in three
+ways. All three are environment, not code:
+
+1. **Deploy dir must NOT be under `~/Desktop` (or Documents/Downloads).**
+   A launchd-spawned process can't read those TCC-protected folders, so
+   it dies at startup with
+   `PermissionError: Operation not permitted: …/.venv/pyvenv.cfg`.
+   Keep the dev checkout in `~/Desktop/my_code/claude-code-web` but
+   **deploy a copy to `~/claude-code-web`** (rsync dev → deploy, separate
+   `.venv`). `~/bin/cc-web-start.sh` already searches `~/claude-code-web`
+   first.
+
+2. **Grant the deploy `python` ALL THREE permissions, then it works
+   without a reboot.** They're independent; missing one fails silently:
+   - screenshot → HTTP 500 "could not create image" = missing **Screen
+     & System Audio Recording**
+   - click/scroll/type → HTTP **200 but nothing happens** = missing
+     **Accessibility** (Quartz `CGEventPost` needs it; Input Monitoring
+     alone is not enough)
+   - `--resume`/unlock keystrokes eaten = missing **Accessibility** /
+     **Input Monitoring**
+   Add the SAME `…/Python.app` to all three lists. `launchctl kickstart
+   -k gui/$(id -u)/com.zmc.cc-web` picks the grants up immediately — no
+   reboot needed (only add+reboot if a grant refuses to take).
+
+3. **Never restart it with `nohup` from a random shell.** A detached
+   nohup process reparents to launchd with no "responsible app", so it
+   loses BOTH the iTerm2 API cookie (→ attach gets 401 / "cannot reach
+   iTerm2") AND Screen Recording (→ screenshot 500). Restart via
+   `launchctl kickstart -k …` (the agent), or — if the agent isn't set
+   up yet — from inside an iTerm tab (which lends its own TCC grants).
+
 ## Other languages
 
 - 中文: [README_zh.md](README_zh.md)

@@ -677,7 +677,9 @@ footer button.icon {
   flex: 1; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden;
 }
 .candidate .score-fill { height: 100%; background: var(--accent); }
+.candidate .score-fill.low { background: #ff5b5b; }
 .candidate .score-text { font: 11px ui-monospace; color: var(--muted); }
+.candidate .score-text.score-low { color: #ff6a6a; font-weight: 700; }
 .candidate .info { font: 11px ui-monospace, Menlo, monospace; color: var(--muted); margin: 0 10px 4px; }
 .candidate .screen-tail {
   font: 11px ui-monospace, Menlo, monospace; color: var(--text);
@@ -2617,7 +2619,10 @@ footer button.icon {
       const sf = document.createElement("div"); sf.className = "score-fill"; sf.style.width = (c.score * 100) + "%";
       sb.appendChild(sf);
       const st = document.createElement("div"); st.className = "score-text";
-      st.textContent = "score " + (c.score * 100).toFixed(0) + "% (" + c.matched_count + " match)";
+      const pct = c.score * 100;
+      st.textContent = "score " + pct.toFixed(0) + "% (" + c.matched_count + " match)";
+      // Low score = weak/untrustworthy match → red warning.
+      if (pct < 10) { st.classList.add("score-low"); sf.classList.add("low"); }
       r1.appendChild(sb); r1.appendChild(st);
       el.appendChild(r1);
       const info = document.createElement("div"); info.className = "info";

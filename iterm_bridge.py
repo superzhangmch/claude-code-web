@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,7 +99,7 @@ class ItermBridge:
                     info = _claude_on_tty(tty)
                     if info is None:
                         continue
-                    pid, cwd = info
+                    pid, cwd, resume_sid = info
                     try:
                         name = await session.async_get_variable("session.name") or ""
                     except Exception:
@@ -111,7 +112,7 @@ class ItermBridge:
                         name=name,
                         window_index=wi,
                         tab_index=ti,
-                        claude_session_id="",
+                        claude_session_id=resume_sid,   # ground truth from --resume argv
                     ))
         return refs
 
@@ -430,8 +431,24 @@ async def _verify_session_id(session, cwd: str, current_sid: str) -> Optional[st
     return None  # not found in any → cannot verify (e.g. screen too generic)
 
 
-def _claude_on_tty(tty_path: str) -> Optional[tuple[int, str]]:
-    """If a foreground `claude` process is running on this TTY, return (pid, cwd).
+_RESUME_RE = re.compile(
+    r"(?:--resume|--continue|-r)[=\s]+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
+
+
+def _resume_sid_from_cmd(cmd: str) -> str:
+    """If the claude process was launched as `claude --resume <uuid>`, return
+    that session_id. This is GROUND TRUTH: the tab is running exactly that
+    session, no screen-content guessing needed."""
+    m = _RESUME_RE.search(cmd)
+    return m.group(1) if m else ""
+
+
+def _claude_on_tty(tty_path: str) -> Optional[tuple[int, str, str]]:
+    """If a foreground `claude` process is running on this TTY, return
+    (pid, cwd, resume_sid). resume_sid is the session_id from a
+    `--resume <uuid>` argv (ground truth), or "" if launched without it.
 
     Only the foreground process group counts (its `stat` has '+'). This lets
     us ignore Ctrl-Z suspended claudes and other backgrounded copies in the
@@ -464,7 +481,7 @@ def _claude_on_tty(tty_path: str) -> Optional[tuple[int, str]]:
             continue
         cwd = _pid_cwd(pid)
         if cwd:
-            return pid, cwd
+            return pid, cwd, _resume_sid_from_cmd(cmd)
     return None
 
 
