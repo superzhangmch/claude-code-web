@@ -94,6 +94,12 @@ header button.icon, header a.icon {
   text-decoration: none;
 }
 header button.icon:hover, header a.icon:hover { border-color: var(--accent); }
+/* Terminal-tabs button: render its ">_" prompt glyph as a tight monospace
+   shell prompt rather than a thin proportional ">". */
+#tabs-btn {
+  font-family: ui-monospace, Menlo, monospace;
+  font-weight: 700; letter-spacing: -1px;
+}
 header button.btn, header a.btn {
   background: var(--panel2); color: var(--muted);
   border: 1px solid var(--border);
@@ -754,15 +760,22 @@ footer button.icon {
 #tabs-modal .modal-row { display: flex; align-items: center; gap: 8px; }
 #tabs-modal .modal-row h3 { margin: 0; flex: 1; font-size: 14px; }
 #tabs-modal .tabs-list {
-  display: flex; flex-wrap: wrap; gap: 6px;
+  display: flex; flex-direction: column; gap: 6px;
   flex-shrink: 0; max-height: 30vh; overflow-y: auto;
 }
+#tabs-modal .tab-row { display: flex; gap: 6px; align-items: stretch; }
 #tabs-modal .tabs-list button {
   background: var(--panel2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
   padding: 5px 10px; font: inherit; font-size: 12px; cursor: pointer;
-  text-align: left; max-width: 100%; white-space: nowrap;
+  text-align: left; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis;
+}
+#tabs-modal .tab-row .tab-sel { flex: 1; min-width: 0; }
+#tabs-modal .tab-row .tab-act { flex-shrink: 0; }
+#tabs-modal .tab-row .tab-bound {
+  flex-shrink: 0; align-self: center; white-space: nowrap;
+  color: #6ee884; font-size: 11px; padding: 0 4px;
 }
 #tabs-modal .tabs-list button:hover { border-color: var(--accent); }
 #tabs-modal .tabs-list button.active { border-color: var(--accent); background: var(--accent); color: #fff; }
@@ -944,7 +957,7 @@ footer button.icon {
     </span>
     <button id="screen-btn" class="btn icon" style="display:none" title="iTerm screen + session info">🖥</button>
     <span id="battery" class="battery" style="display:none" title="Click for CPU history"></span>
-    <button id="tabs-btn" class="btn icon" style="display:none" title="Show all iTerm2 tabs">🗂</button>
+    <button id="tabs-btn" class="btn icon" style="display:none" title="Show all iTerm2 tabs">&gt;_</button>
     <button id="files-btn" class="btn icon" style="display:none" title="Browse local files">📁</button>
     <button id="refresh-btn" class="btn icon" style="display:none" title="Refresh list">↻</button>
     <button id="back-btn" class="btn" style="display:none">←</button>
@@ -1513,25 +1526,120 @@ footer button.icon {
       tabsListEl.textContent = "";
       if (!tabs.length) { tabsListEl.textContent = "(no tabs)"; return; }
       for (const t of tabs) {
-        const b = document.createElement("button");
+        const row = document.createElement("div"); row.className = "tab-row";
+        const sel = document.createElement("button"); sel.className = "tab-sel";
         const label = `w${t.window_index}·t${t.tab_index}  ${t.name || "(unnamed)"}`;
         if (t.is_claude) {
           const dot = document.createElement("span");
           dot.className = "claude-dot"; dot.textContent = "●";
-          b.appendChild(dot);
+          sel.appendChild(dot);
         }
-        b.appendChild(document.createTextNode(label));
-        b.title = label + (t.tty ? "  [" + t.tty + "]" : "");
-        b.addEventListener("click", () => {
+        sel.appendChild(document.createTextNode(label));
+        sel.title = label + (t.tty ? "  [" + t.tty + "]" : "");
+        sel.addEventListener("click", () => {
           tabsSelectedId = t.iterm_session_id;
-          for (const c of tabsListEl.children) c.classList.remove("active");
-          b.classList.add("active");
+          for (const c of tabsListEl.querySelectorAll(".tab-sel")) c.classList.remove("active");
+          sel.classList.add("active");
           loadItermScreen(t.iterm_session_id);
         });
-        tabsListEl.appendChild(b);
+        row.appendChild(sel);
+        // Per-tab reverse attach. Already bound (via session→tab) → skip the
+        // Attach button, show a ✓ marker + Enter to jump straight in.
+        if (t.is_claude) {
+          if (t.bound_to) {
+            const mark = document.createElement("span");
+            mark.className = "tab-bound"; mark.textContent = "✓ " + t.bound_to.slice(0, 4);
+            row.appendChild(mark);
+            const enter = document.createElement("button");
+            enter.className = "tab-act"; enter.textContent = "Enter";
+            enter.addEventListener("click", () => {
+              tabsModal.classList.remove("show");
+              enterTranscript(t.bound_to, t.name || "");
+            });
+            row.appendChild(enter);
+          } else {
+            const att = document.createElement("button");
+            att.className = "tab-act"; att.textContent = "Attach";
+            att.addEventListener("click", () => tabAttach(t, att));
+            row.appendChild(att);
+          }
+        }
+        tabsListEl.appendChild(row);
       }
     } catch (e) {
       tabsListEl.textContent = "Error: " + e;
+    }
+  }
+
+  // Reverse attach: resolve which session this TAB runs, then bind + enter.
+  async function tabAttach(t, btn) {
+    btn.disabled = true; btn.textContent = "…";
+    try {
+      const r = await authedFetch("/api/tab-attach", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ iterm_session_id: t.iterm_session_id }),
+      });
+      const j = await r.json();
+      if (j.result === "bound") {
+        tabsModal.classList.remove("show");
+        enterTranscript(j.claude_session_id, t.name || "");
+        return;
+      }
+      if (j.result === "choose") { tabChooseSession(t, j.candidates || []); return; }
+      alert("Couldn't match a session to this tab" + (j.cwd ? "\ncwd: " + j.cwd : ""));
+    } catch (e) {
+      alert("Attach failed: " + e);
+    } finally {
+      btn.disabled = false; btn.textContent = "Attach";
+    }
+  }
+
+  // Ambiguous reverse match (several sessions share the tab's cwd) → let the
+  // user pick which session this tab is running, then confirm session→tab.
+  function tabChooseSession(t, candidates) {
+    tabsListEl.innerHTML = "";
+    const hdr = document.createElement("div"); hdr.className = "tab-row";
+    const back = document.createElement("button"); back.className = "tab-act";
+    back.textContent = "← back"; back.addEventListener("click", loadItermTabs);
+    const lbl = document.createElement("span");
+    lbl.className = "tab-bound"; lbl.style.color = "var(--muted)"; lbl.style.flex = "1";
+    lbl.textContent = "Which session is this tab running?";
+    hdr.appendChild(lbl); hdr.appendChild(back); tabsListEl.appendChild(hdr);
+    for (const c of candidates) {
+      const row = document.createElement("div"); row.className = "tab-row";
+      const b = document.createElement("button"); b.className = "tab-sel";
+      const pct = Math.round((c.score || 0) * 100);
+      b.textContent = `[${pct}%] ${c.title || c.first_user_msg || c.claude_session_id.slice(0, 8)}`;
+      b.title = c.claude_session_id + (c.first_user_msg ? "  —  " + c.first_user_msg : "");
+      b.addEventListener("click", () => confirmTabSession(t, c.claude_session_id, b));
+      row.appendChild(b); tabsListEl.appendChild(row);
+    }
+  }
+
+  async function confirmTabSession(t, sid, btn, force) {
+    btn.disabled = true;
+    try {
+      const r = await authedFetch("/api/attach/confirm", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ claude_session_id: sid, iterm_session_id: t.iterm_session_id, force: !!force }),
+      });
+      const j = await r.json();
+      if (j.result === "bound") {
+        tabsModal.classList.remove("show");
+        enterTranscript(sid, t.name || "");
+        return;
+      }
+      if (j.result === "conflict") {
+        if (confirm("That session is already bound to another tab. Rebind it to this tab?")) {
+          return confirmTabSession(t, sid, btn, true);
+        }
+      } else {
+        alert("Bind failed: " + JSON.stringify(j));
+      }
+    } catch (e) {
+      alert("Bind failed: " + e);
+    } finally {
+      btn.disabled = false;
     }
   }
 

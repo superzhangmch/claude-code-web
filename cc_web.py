@@ -861,7 +861,7 @@ _ESC_HINT_RE = re.compile(r"\s*\(esc\)\s*$", re.I)
 # numbers are distinctive enough that we don't fire on ordinary lists.
 _CIRCLED_RE = re.compile(r"[①②③④⑤⑥⑦⑧⑨]")
 _CHOICE_KW_RE = re.compile(
-    r"选项|选择|哪个|哪种|要不要|是否|怎么办|which|choose|option|pick|prefer", re.I
+    r"选项|选择|哪个|哪种|哪一|还是|要不要|是否|怎么办|which|choose|option|pick|prefer|\bor\b", re.I
 )
 # Claude's interactive list selectors (resume picker, file picker, custom
 # menus) don't use "1. 2. 3." — they show a highlighted row plus a hint line
@@ -882,6 +882,41 @@ _last_input_ts: dict[str, float] = {}
 PENDING_CONFIRM_IDLE_SEC = 6.0
 
 
+def _is_dash_run(s: str) -> bool:
+    """A horizontal rule line — a run of >=8 box/ascii dashes, nothing else."""
+    s = s.strip()
+    return len(s) >= 8 and set(s) <= {"─", "-"}
+
+
+def _strip_prompt_box(lines: list[str]) -> list[str]:
+    """Drop claude's free-text input box so TYPED text isn't matched as a menu.
+
+    The input box is structurally `────\n❯ …\n────` — a dash run whose next
+    non-blank line begins with `❯`/`>`, closed by another dash run. We remove
+    that whole block (scanning bottom-up to hit the real box at the screen
+    foot). A selector / numbered menu does NOT have a `❯` line immediately
+    under a dash run (selectors show option/hint text there; menus usually have
+    no dash run at all), so they're preserved. Requiring BOTH the opening and
+    closing dash run keeps us from eating a bar-less menu.
+    """
+    n = len(lines)
+    for i in range(n - 1, -1, -1):
+        if not _is_dash_run(lines[i]):
+            continue
+        j = i + 1
+        while j < n and not lines[j].strip():
+            j += 1
+        if j >= n or lines[j].lstrip()[:1] not in ("❯", ">"):
+            continue
+        k = j + 1
+        while k < n and not _is_dash_run(lines[k]):
+            k += 1
+        if k >= n:
+            continue  # no closing rule → not a complete input box; leave it
+        return lines[:i] + lines[k + 1:]
+    return lines
+
+
 def _detect_pending_confirm_from_screen(screen: str) -> Optional[dict]:
     """Look at the iTerm screen tail for a numbered-choice menu (claude's
     permission / trust dialogs). Returns
@@ -897,6 +932,13 @@ def _detect_pending_confirm_from_screen(screen: str) -> Optional[dict]:
     if not screen:
         return None
     lines = screen.split("\n")
+    # Strip claude's free-text INPUT box before matching, so text TYPED at the
+    # prompt (e.g. "1. xx\n2. vv") isn't read as a numbered menu. Structural
+    # rule (per spec): the input box is a run of dashes immediately followed by
+    # a `❯`/`>` line, then a closing run of dashes — `────\n❯ …\n────`. A
+    # selector's dash-bar is followed by option/hint text (not `❯`), so it is
+    # left intact and still detected.
+    lines = _strip_prompt_box(lines)
     tail = lines[-12:]
     tail_start = len(lines) - len(tail)
     choices: list[dict] = []
@@ -938,11 +980,14 @@ def _detect_pending_confirm_from_screen(screen: str) -> Optional[dict]:
 
 
 def _detect_fallbacks(lines: list[str]) -> Optional[dict]:
-    """Non-"1. 2. 3." ways Claude waits on you, in confidence order:
-    an interactive selector, circled-number prose, then a trailing question."""
+    """Non-"1. 2. 3." ways Claude waits on you that you actually drive on the
+    SCREEN: an interactive ↑/↓ selector, or explicit circled-number (①②③)
+    options. We deliberately do NOT fire on a plain trailing question — yes/no
+    or "A 还是 B" alike — because you just type the answer in the normal input
+    box; the banner there is only noise. (_detect_trailing_question is kept for
+    reference but no longer in the chain.)"""
     return (_detect_selector(lines)
-            or _detect_prose_choices(lines)
-            or _detect_trailing_question(lines))
+            or _detect_prose_choices(lines))
 
 
 def _last_content_line(lines: list[str]) -> str:
@@ -975,10 +1020,17 @@ def _detect_selector(lines: list[str]) -> Optional[dict]:
 
 
 def _detect_trailing_question(lines: list[str]) -> Optional[dict]:
-    """Claude finished its turn and the last content line is a question — it's
-    idle, waiting for your typed answer. choices=[] (you reply by typing)."""
+    """Claude finished its turn and the last content line poses a CHOICE — it's
+    idle, waiting for your answer. choices=[] (you reply by typing).
+
+    Only fires when the question actually offers alternatives (a choice
+    keyword: 还是/哪/选/or/which …). A bare yes/no confirmation like
+    "要我…吗?" / "Want me to…?" is NOT surfaced — you'd just type a reply,
+    there's nothing to pick, so the banner would only be noise."""
     s = _last_content_line(lines)
     if not s.endswith(("?", "？")):
+        return None
+    if not _CHOICE_KW_RE.search(s):
         return None
     # Keep just the final question clause, not the whole paragraph.
     qs = re.findall(r"[^。！!?？\n]*[?？]", s)
@@ -1592,6 +1644,10 @@ class AttachConfirmPayload(BaseModel):
     force: bool = False
 
 
+class TabAttachPayload(BaseModel):
+    iterm_session_id: str
+
+
 class DetachPayload(BaseModel):
     claude_session_id: str
 
@@ -2175,6 +2231,105 @@ async def post_attach_confirm(payload: AttachConfirmPayload):
     return {"result": "bound", "binding": _serialize_binding(b)}
 
 
+def _candidate_jsonls_for_cwd(cwd: str) -> list[Path]:
+    """Every session JSONL recorded under `cwd`'s project dir, freshest first."""
+    encoded = (cwd or "").replace("/", "-").replace("_", "-")
+    proj = PROJECTS_ROOT / encoded
+    if not proj.exists():
+        return []
+    jls = [p for p in proj.glob("*.jsonl")]
+    def _mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+    jls.sort(key=_mtime, reverse=True)
+    return jls
+
+
+TAB_ATTACH_MIN_SCORE = 0.08
+
+
+@app.post("/api/tab-attach", dependencies=[Depends(require_token)])
+async def post_tab_attach(payload: TabAttachPayload):
+    """Reverse of /api/attach: given an iTerm tab, work out WHICH session JSONL
+    it is running, then bind it.
+
+    Pipeline (mirrors the forward matcher):
+      1. argv `--resume <uuid>` → ground truth, bind immediately.
+      2. else score the tab's screen (scrollback) against every candidate
+         JSONL in the tab's cwd; a clear winner auto-binds.
+      3. else return the top candidates for the user to pick (→ /api/attach/confirm).
+    """
+    try:
+        await bridge.ensure_connected()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
+    refs = await bridge.list_claude_tabs()
+    ref = next((r for r in refs if r.iterm_session_id == payload.iterm_session_id), None)
+    if ref is None:
+        raise HTTPException(status_code=404, detail="not a live claude tab")
+
+    # Already bound (session→tab earlier, or a prior reverse attach)? Return it.
+    existing = bindings.get_by_pid(ref.pid)
+    if existing and verify_binding(existing):
+        return {"result": "bound", "binding": _serialize_binding(existing),
+                "claude_session_id": existing.claude_session_id,
+                "tab_attach_reason": "already_bound"}
+
+    # 1. argv --resume is definitive.
+    if ref.claude_session_id:
+        jsonl = find_jsonl_for_session(ref.claude_session_id)
+        if jsonl:
+            b = _build_binding(ref.claude_session_id, ref, jsonl)
+            if b:
+                bindings.insert(b)
+                return {"result": "bound", "binding": _serialize_binding(b),
+                        "claude_session_id": ref.claude_session_id,
+                        "tab_attach_reason": "resume_argv"}
+
+    # 2. Score the tab's screen against the candidate JSONLs in its cwd.
+    candidates = _candidate_jsonls_for_cwd(ref.cwd)
+    if not candidates:
+        return {"result": "no_match", "iterm_session_id": ref.iterm_session_id, "cwd": ref.cwd}
+    try:
+        screen = await bridge.get_screen_for(ref.iterm_session_id, max_lines=200, scrollback=True)
+    except Exception:
+        screen = None
+    scored = []
+    for jl in candidates:
+        score, matched = score_screen(screen or "", pick_jsonl_fingerprints(jl))
+        scored.append({"jsonl": jl, "sid": jl.stem, "score": score})
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    top = scored[0]
+    second = scored[1]["score"] if len(scored) > 1 else 0.0
+
+    # Clear winner → bind. Decisive = decent absolute score AND clearly ahead
+    # of the runner-up (or it's the only candidate in the cwd).
+    if top["score"] >= TAB_ATTACH_MIN_SCORE and (second == 0.0 or top["score"] >= 2 * second):
+        b = _build_binding(top["sid"], ref, top["jsonl"])
+        if b:
+            bindings.insert(b)
+            return {"result": "bound", "binding": _serialize_binding(b),
+                    "claude_session_id": top["sid"], "score": top["score"],
+                    "tab_attach_reason": "screen_score"}
+
+    # Ambiguous → let the user pick (→ /api/attach/confirm with this tab).
+    titles = {e["session_id"]: e for e in load_session_index()}
+    out = []
+    for c in scored[:6]:
+        ctx = extract_recent_context(c["jsonl"], n_exchanges=1, max_user_chars=80, max_response_chars=0)
+        named = titles.get(c["sid"])
+        out.append({
+            "claude_session_id": c["sid"],
+            "title": (named.get("title") if named else ""),
+            "first_user_msg": ctx.get("first_user_msg", ""),
+            "score": c["score"],
+        })
+    return {"result": "choose", "iterm_session_id": ref.iterm_session_id,
+            "cwd": ref.cwd, "candidates": out}
+
+
 @app.post("/api/detach", dependencies=[Depends(require_token)])
 async def post_detach(payload: DetachPayload):
     bindings.remove_session(payload.claude_session_id)
@@ -2439,11 +2594,18 @@ async def get_screen(claude_session_id: str):
 
 @app.get("/api/iterm-tabs", dependencies=[Depends(require_token)])
 async def get_iterm_tabs():
-    """List every iTerm2 tab/session for the 'iTerm2 tabs' viewer."""
+    """List every iTerm2 tab/session for the 'iTerm2 tabs' viewer. Each tab is
+    annotated with `bound_to` = the claude_session_id currently bound to it via
+    the normal session→tab flow (if any live binding), so the viewer can skip
+    the per-tab reverse-attach button for already-bound tabs."""
     try:
         tabs = await bridge.list_all_tabs()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
+    bound_by_iterm = {b.iterm_session_id: b.claude_session_id
+                      for b in bindings.all() if verify_binding(b)}
+    for t in tabs:
+        t["bound_to"] = bound_by_iterm.get(t.get("iterm_session_id"))
     return {"tabs": tabs}
 
 

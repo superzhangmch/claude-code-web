@@ -9,3 +9,6 @@ deploy.sh
 
 # remote_mac_ctrl runtime artifacts (latest screencapture output)
 remote_mac_ctrl_static/cache/
+
+# requirements/handoff notes — local only (had private hosts/paths/ids)
+REQUIREMENTS.md
