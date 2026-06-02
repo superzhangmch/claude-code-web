@@ -801,6 +801,12 @@ class Binding:
     bound_at: float = field(default_factory=_time.time)
 
 
+# Bindings persist here so they survive a cc_web restart (otherwise every
+# deploy/kickstart wipes them and every attached tab reverts to "Attach").
+# Lives in ~/.claude (NOT under ~/Desktop — launchd can't read TCC dirs).
+BINDINGS_FILE = Path.home() / ".claude" / "cc_web_bindings.json"
+
+
 class BindingTable:
     def __init__(self) -> None:
         self._by_session: dict[str, Binding] = {}
@@ -823,17 +829,69 @@ class BindingTable:
             self._by_session.pop(old_by_pid.claude_session_id, None)
         self._by_session[b.claude_session_id] = b
         self._by_pid[b.pid] = b
+        self._persist()
 
     def remove_session(self, sid: str) -> None:
         b = self._by_session.pop(sid, None)
         if b:
             self._by_pid.pop(b.pid, None)
+            self._persist()
 
     def all(self) -> list[Binding]:
         return list(self._by_session.values())
 
     def bound_session_ids(self) -> set[str]:
         return set(self._by_session.keys())
+
+    def _persist(self) -> None:
+        try:
+            data = [{
+                "claude_session_id": b.claude_session_id,
+                "iterm_session_id": b.iterm_session_id,
+                "pid": b.pid, "pid_start": b.pid_start, "cwd": b.cwd,
+                "jsonl_path": str(b.jsonl_path),
+                "window_index": b.window_index, "tab_index": b.tab_index,
+                "bound_at": b.bound_at,
+            } for b in self._by_session.values()]
+            tmp = BINDINGS_FILE.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            tmp.replace(BINDINGS_FILE)
+        except OSError as e:
+            log.info("bindings persist failed: %s", e)
+
+    def load_persisted(self) -> int:
+        """Reload bindings from disk on startup, keeping only those whose pid is
+        still alive with a matching start time (verify_binding). Drops stale
+        ones (claude exited / pid reused). Returns the count kept."""
+        try:
+            raw = BINDINGS_FILE.read_text(encoding="utf-8")
+        except OSError:
+            return 0
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return 0
+        kept = 0
+        for d in data:
+            try:
+                b = Binding(
+                    claude_session_id=d["claude_session_id"],
+                    iterm_session_id=d["iterm_session_id"],
+                    pid=int(d["pid"]), pid_start=float(d["pid_start"]),
+                    cwd=d.get("cwd", ""), jsonl_path=Path(d["jsonl_path"]),
+                    window_index=int(d.get("window_index", 0)),
+                    tab_index=int(d.get("tab_index", 0)),
+                    bound_at=float(d.get("bound_at", _time.time())),
+                )
+            except (KeyError, ValueError, TypeError):
+                continue
+            if verify_binding(b):
+                self._by_session[b.claude_session_id] = b
+                self._by_pid[b.pid] = b
+                kept += 1
+        if kept != len(data):
+            self._persist()  # rewrite without the stale ones
+        return kept
 
 
 bindings = BindingTable()
@@ -1611,6 +1669,16 @@ async def _bg_initial_connect() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Restore bindings saved before the last shutdown, keeping only those whose
+    # claude pid is still alive (so an attached tab keeps showing "Enter" across
+    # a cc_web restart instead of reverting to "Attach"). Filesystem-only, safe
+    # to run synchronously here.
+    try:
+        kept = bindings.load_persisted()
+        if kept:
+            log.info("restored %d binding(s) from %s", kept, BINDINGS_FILE)
+    except Exception as e:
+        log.info("binding restore failed: %s", e)
     # Fire-and-forget the initial connect. When launched by launchd, iTerm2
     # may pop a "Allow this script to control iTerm?" dialog that no one will
     # click — synchronously awaiting connect there hangs startup forever.

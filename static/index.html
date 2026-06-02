@@ -754,7 +754,10 @@ footer button.icon {
   opacity: 0.4; cursor: not-allowed;
 }
 #tabs-modal .modal-card.tabs-card {
-  width: 95vw; max-width: 1100px; max-height: 85vh;
+  /* Fixed height (not max-height): the popup must stay a stable size so
+     swapping a tab's screen content doesn't resize the card and make the
+     centered modal jump/flash. The screen-body (flex:1) scrolls internally. */
+  width: 95vw; max-width: 1100px; height: 85vh;
   display: flex; flex-direction: column; gap: 8px;
 }
 #tabs-modal .modal-row { display: flex; align-items: center; gap: 8px; }
@@ -1522,9 +1525,10 @@ footer button.icon {
       const resp = await authedFetch("/api/iterm-tabs");
       if (!resp.ok) { tabsListEl.textContent = "Error: " + resp.status; return; }
       const j = await resp.json();
-      const tabs = j.tabs || [];
+      // Only claude tabs — plain shells aren't attachable and just clutter.
+      const tabs = (j.tabs || []).filter(t => t.is_claude);
       tabsListEl.textContent = "";
-      if (!tabs.length) { tabsListEl.textContent = "(no tabs)"; return; }
+      if (!tabs.length) { tabsListEl.textContent = "(no claude tabs)"; return; }
       for (const t of tabs) {
         const row = document.createElement("div"); row.className = "tab-row";
         const sel = document.createElement("button"); sel.className = "tab-sel";
@@ -1644,13 +1648,17 @@ footer button.icon {
   }
 
   async function loadItermScreen(sid) {
-    tabsScreenEl.textContent = "Loading…";
+    // Quiet swap: keep the current content visible until the new screen
+    // arrives — no "Loading…" black blank, so tapping through tabs doesn't
+    // flash the big black box. Only show a placeholder if it's empty.
+    if (!tabsScreenEl.textContent.trim()) tabsScreenEl.textContent = "Loading…";
     try {
       const resp = await authedFetch("/api/iterm-screen?iterm_session_id=" + encodeURIComponent(sid));
       if (!resp.ok) { tabsScreenEl.textContent = "Error: " + resp.status + " " + resp.statusText; return; }
       const j = await resp.json();
+      const atBottom = tabsScreenEl.scrollHeight - tabsScreenEl.scrollTop - tabsScreenEl.clientHeight < 24;
       tabsScreenEl.textContent = j.screen || "(empty)";
-      tabsScreenEl.scrollTop = tabsScreenEl.scrollHeight;
+      if (atBottom) tabsScreenEl.scrollTop = tabsScreenEl.scrollHeight;
     } catch (e) {
       tabsScreenEl.textContent = "Error: " + e;
     }
