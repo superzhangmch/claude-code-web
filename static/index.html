@@ -215,7 +215,12 @@ header .battery:hover { color: var(--text); }
   background: #000; border: 1px solid #4a4f5e;
   border-radius: 6px; padding: 12px; margin-bottom: 8px;
   cursor: pointer;
+  /* Collapsed cards sit indented to the right; the expanded one snaps back
+     flush-left so the session you're focused on is easy to pick out. */
+  margin-left: 14px;
+  transition: margin-left 0.12s ease;
 }
+.session-card.expanded { margin-left: 0; }
 .session-card:hover { border-color: var(--accent); }
 .session-card .title-row { display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px; }
 .session-card .title { font-weight: 500; font-size: 14px; word-break: break-word; flex: 1; }
@@ -244,7 +249,7 @@ header .battery:hover { color: var(--text); }
   margin-bottom: 8px; padding: 6px 8px;
   border-radius: 4px; word-break: break-word;
 }
-.session-card .msg-block.user { background: #000; color: #c8ccd5; border-left: 2px solid var(--accent); }
+.session-card .msg-block.user { background: #000; color: #c8ccd5; border-left: 2px solid var(--accent); margin-left: 18px; }
 .session-card .msg-block.claude { background: #000; border-left: 2px solid var(--assistant); }
 .session-card .msg-block .ts {
   font-size: 9px; color: var(--muted); margin-bottom: 2px;
@@ -264,6 +269,13 @@ header .battery:hover { color: var(--text); }
 }
 .session-card .attach-row button.detach { color: var(--muted); }
 .session-card .attach-row button.detach:hover { color: #ff8b6a; border-color: #ff6a6a; }
+.session-card .attach-row button.more { color: var(--muted); }
+.session-card .attach-row button.more:hover { border-color: var(--accent); }
+.session-card .attach-row button:disabled { opacity: 0.5; cursor: default; }
+.session-card .sid-line {
+  margin-top: 8px; font: 11px ui-monospace, Menlo, monospace;
+  color: var(--muted); word-break: break-all; user-select: all;
+}
 .session-card .chevron {
   font-size: 12px; color: var(--muted);
   transition: transform 0.15s; display: inline-block;
@@ -2246,6 +2258,35 @@ footer button.icon {
     batteryEl.title = b.on_ac ? `on AC · ${b.state}` : b.state;
   }
 
+  function fmtTs(iso) {
+    if (!iso) return "";
+    try {
+      const d = new Date(iso);
+      const pad = n => String(n).padStart(2, "0");
+      return `${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    } catch { return ""; }
+  }
+
+  // Render user+response exchange pairs into a container (replacing its
+  // contents). Shared by the picker card's initial render and "More" reloads.
+  function renderExchangesInto(container, exchanges) {
+    container.innerHTML = "";
+    for (const ex of exchanges) {
+      if (ex.user) {
+        const blk = document.createElement("div"); blk.className = "msg-block user";
+        const ts = document.createElement("div"); ts.className = "ts"; ts.textContent = "You · " + fmtTs(ex.user.ts);
+        const body = document.createElement("div"); body.className = "body"; body.textContent = ex.user.text;
+        blk.appendChild(ts); blk.appendChild(body); container.appendChild(blk);
+      }
+      if (ex.response) {
+        const blk = document.createElement("div"); blk.className = "msg-block claude";
+        const ts = document.createElement("div"); ts.className = "ts"; ts.textContent = "Claude · " + fmtTs(ex.response.ts);
+        const body = document.createElement("div"); body.className = "body"; body.textContent = ex.response.text;
+        blk.appendChild(ts); blk.appendChild(body); container.appendChild(blk);
+      }
+    }
+  }
+
   async function refreshPicker() {
     pickerListEl.innerHTML = "<div style='color:var(--muted);font-size:12px;padding:20px;text-align:center'>loading…</div>";
     const resp = await authedFetch("/api/sessions");
@@ -2307,14 +2348,6 @@ footer button.icon {
       }
       if (badges.children.length) card.appendChild(badges);
 
-      function fmtTs(iso) {
-        if (!iso) return "";
-        try {
-          const d = new Date(iso);
-          const pad = n => String(n).padStart(2, "0");
-          return `${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-        } catch { return ""; }
-      }
       // Add chevron to title row (indicate expandable)
       const chev = document.createElement("span"); chev.className = "chevron"; chev.textContent = "▸";
       titleRow.appendChild(chev);
@@ -2330,25 +2363,53 @@ footer button.icon {
         card.appendChild(prev);
       }
 
-      // Expanded: last 3 exchanges (user + response pair each) + Attach button
+      // Expanded: last few exchanges (user + response pair each) + Attach button
       const expanded = document.createElement("div");
       expanded.className = "expanded-area";
-      const exchanges = s.exchanges || [];
-      for (const ex of exchanges) {
-        if (ex.user) {
-          const blk = document.createElement("div"); blk.className = "msg-block user";
-          const ts = document.createElement("div"); ts.className = "ts"; ts.textContent = "You · " + fmtTs(ex.user.ts);
-          const body = document.createElement("div"); body.className = "body"; body.textContent = ex.user.text;
-          blk.appendChild(ts); blk.appendChild(body); expanded.appendChild(blk);
-        }
-        if (ex.response) {
-          const blk = document.createElement("div"); blk.className = "msg-block claude";
-          const ts = document.createElement("div"); ts.className = "ts"; ts.textContent = "Claude · " + fmtTs(ex.response.ts);
-          const body = document.createElement("div"); body.className = "body"; body.textContent = ex.response.text;
-          blk.appendChild(ts); blk.appendChild(body); expanded.appendChild(blk);
-        }
-      }
+      const exDiv = document.createElement("div");
+      renderExchangesInto(exDiv, s.exchanges || []);
+      expanded.appendChild(exDiv);
+
       const attachRow = document.createElement("div"); attachRow.className = "attach-row";
+      // "More" — load further-back history so you can identify the session.
+      let loadedN = (s.exchanges || []).length;
+      const moreBtn = document.createElement("button");
+      moreBtn.textContent = "More";
+      moreBtn.className = "more";
+      moreBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        card.classList.add("expanded");
+        moreBtn.disabled = true; moreBtn.textContent = "Loading…";
+        const want = loadedN + 10;
+        try {
+          const r = await authedFetch("/api/session-history?claude_session_id="
+            + encodeURIComponent(s.claude_session_id) + "&n=" + want);
+          if (r.ok) {
+            const j = await r.json();
+            const exs = j.exchanges || [];
+            renderExchangesInto(exDiv, exs);
+            // If we got fewer than asked, we've hit the start of the session.
+            if (exs.length <= loadedN) { moreBtn.textContent = "(start of session)"; moreBtn.disabled = true; return; }
+            loadedN = exs.length;
+          }
+        } catch {}
+        moreBtn.disabled = false; moreBtn.textContent = "More";
+      });
+      attachRow.appendChild(moreBtn);
+      // "Collapse" — drop the loaded history and return to the compact card.
+      const collapseBtn = document.createElement("button");
+      collapseBtn.textContent = "Collapse";
+      collapseBtn.className = "more";
+      collapseBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        renderExchangesInto(exDiv, s.exchanges || []);
+        loadedN = (s.exchanges || []).length;
+        moreBtn.disabled = false; moreBtn.textContent = "More";
+        card.classList.remove("expanded");
+      });
+      attachRow.appendChild(collapseBtn);
+      const spacer = document.createElement("span"); spacer.style.flex = "1";
+      attachRow.appendChild(spacer);
       if (s.bound) {
         const detachBtn = document.createElement("button");
         detachBtn.textContent = "Detach";
@@ -2381,11 +2442,21 @@ footer button.icon {
       });
       attachRow.appendChild(attachBtn);
       expanded.appendChild(attachRow);
+      // Full session id on its own line below the buttons (only visible while
+      // expanded, since it lives inside .expanded-area). Tap-select to copy.
+      const sidLine = document.createElement("div");
+      sidLine.className = "sid-line";
+      sidLine.textContent = s.claude_session_id;
+      expanded.appendChild(sidLine);
       card.appendChild(expanded);
 
-      // Click card to expand/collapse (not to attach)
+      // Click card to expand/collapse (not to attach). Accordion: expanding
+      // one collapses any other — only a single card stays open at a time.
       card.addEventListener("click", () => {
-        card.classList.toggle("expanded");
+        const wasOpen = card.classList.contains("expanded");
+        pickerListEl.querySelectorAll(".session-card.expanded")
+          .forEach(c => c.classList.remove("expanded"));
+        if (!wasOpen) card.classList.add("expanded");
       });
       pickerListEl.appendChild(card);
     }

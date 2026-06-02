@@ -136,6 +136,24 @@ def _extract_user_msgs(jsonl_path: Path, max_chars: int = 160) -> tuple[str, str
     return (first["text"], first["ts"], last["text"], last["ts"])
 
 
+# Slash-command bookkeeping that claude-code records as "user" messages —
+# e.g. /exit writes <command-name>/exit</command-name> + <command-message>…
+# and the command's <local-command-stdout>See ya!</local-command-stdout>.
+# These aren't real conversation, so we skip them in previews, context
+# extraction, and fingerprinting (otherwise a session shows "<local-command-
+# stdout>See ya!" as its preview, which tells you nothing).
+_COMMAND_NOISE_TAGS = (
+    "<command-name>", "<command-message>", "<command-args>",
+    "<local-command-stdout>", "<local-command-stderr>",
+    "<bash-input>", "<bash-stdout>", "<bash-stderr>",
+    "<task-notification>",
+)
+
+
+def _is_command_noise(text: str) -> bool:
+    return text.lstrip().startswith(_COMMAND_NOISE_TAGS)
+
+
 def extract_recent_context(
     jsonl_path: Path,
     n_exchanges: int = 3,
@@ -168,7 +186,7 @@ def extract_recent_context(
                             if isinstance(p, dict) and p.get("type") == "text" and p.get("text"):
                                 text = p["text"].strip()
                                 break
-                    if not text:
+                    if not text or _is_command_noise(text):
                         continue
                     # Close out the previous exchange's response (if any) before starting new one
                     if exchanges and exchanges[-1]["response"] is None and pending_response_text:
@@ -314,6 +332,8 @@ def pick_jsonl_fingerprints(jsonl_path: Path, k: int = FINGERPRINT_COUNT) -> lis
                             texts.append(p["text"])
                 for t_text in texts:
                     for raw in t_text.splitlines():
+                        if _is_command_noise(raw):
+                            continue
                         s = _normalize_for_match(raw)
                         if len(s) < 15 if is_user else len(s) < 25:
                             continue
@@ -2002,7 +2022,7 @@ async def post_attach(payload: AttachPayload):
     # No new marker is sent here. Candidate selection stays unchanged.
     for r in candidates_refs:
         try:
-            screen = await bridge.get_screen_for(r.iterm_session_id, max_lines=400)
+            screen = await bridge.get_screen_for(r.iterm_session_id, max_lines=400, scrollback=True)
         except Exception:
             screen = None
         if not screen:
@@ -2039,7 +2059,7 @@ async def post_attach(payload: AttachPayload):
     scored = []
     for r in candidates_refs:
         try:
-            screen = await bridge.get_screen_for(r.iterm_session_id, max_lines=200)
+            screen = await bridge.get_screen_for(r.iterm_session_id, max_lines=200, scrollback=True)
         except Exception:
             screen = None
         score, matched = score_screen(screen or "", fingerprints)
@@ -2336,6 +2356,20 @@ def _ps_descendants(root_pid: int) -> list[dict]:
     # Sort: claude root first, then by parent chain; within same ppid by pid.
     rows.sort(key=lambda r: (0 if r["pid"] == root_pid else 1, r["ppid"], r["pid"]))
     return rows
+
+
+@app.get("/api/session-history", dependencies=[Depends(require_token)])
+async def get_session_history(claude_session_id: str, n: int = 10):
+    """Last `n` user+response exchanges for a session — backs the picker's
+    'More' button so you can read further back to identify a session before
+    attaching. Command-noise messages are already filtered upstream."""
+    jsonl_path = find_jsonl_for_session(claude_session_id)
+    if jsonl_path is None:
+        raise HTTPException(status_code=404, detail="unknown session_id")
+    n = max(1, min(n, 100))
+    ctx = extract_recent_context(jsonl_path, n_exchanges=n,
+                                 max_user_chars=200, max_response_chars=300)
+    return {"exchanges": ctx["exchanges"]}
 
 
 @app.get("/api/session-info", dependencies=[Depends(require_token)])

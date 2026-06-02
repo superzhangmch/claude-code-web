@@ -269,7 +269,8 @@ class ItermBridge:
 
     async def get_screen_for(self, iterm_session_id: str, max_lines: int = 80,
                              refresh: bool = False,
-                             strip_input: bool = True) -> Optional[str]:
+                             strip_input: bool = True,
+                             scrollback: bool = False) -> Optional[str]:
         """Read the current screen tail from `iterm_session_id`.
 
         When `refresh=True`, send Ctrl+L (form feed) first and wait
@@ -281,6 +282,13 @@ class ItermBridge:
         `strip_input` (default True) removes the Ink input box + footer at
         the bottom — wanted for attach scoring, but the "iTerm screen"
         viewer passes False to show the full screen including those lines.
+
+        `scrollback` (default False) reads only the CURRENT visible grid
+        (~30-50 rows) — what you want for the live screen view and pending-
+        choice detection. Attach matching passes True to also read up to
+        `max_lines` of SCROLLBACK: when a menu/long output fills the screen
+        the conversation scrolls out of the grid, so fingerprint scoring
+        would otherwise see none of it and score 0.
         """
         if not self.app:
             return None
@@ -293,27 +301,24 @@ class ItermBridge:
                 await asyncio.sleep(0.25)
             except Exception:
                 pass
-        # Read up to `max_lines` INCLUDING scrollback. The visible grid alone
-        # is only ~30-50 rows, so when a menu/selector or long tool output
-        # fills the screen the conversation scrolls out of view — and attach
-        # scoring (which matches JSONL fingerprints against the screen) then
-        # sees none of it and scores 0. async_get_contents() reads an
+        # Scrollback read (attach only): async_get_contents() reads an
         # arbitrary absolute line range; async_get_line_info() gives the
         # bounds (oldest available line = overflow; total = history + grid).
-        # Fall back to the visible-only read if the range read fails.
+        # Falls back to the visible-only read if the range read fails.
         lines = None
-        try:
-            info = await session.async_get_line_info()
-            grid = info.mutable_area_height
-            history = info.scrollback_buffer_height
-            overflow = info.overflow
-            avail = history + grid
-            want = min(max_lines, avail)
-            first = overflow + avail - want
-            line_contents = await session.async_get_contents(first, want)
-            lines = [lc.string.replace("\x00", " ").rstrip() for lc in line_contents]
-        except Exception:
-            lines = None
+        if scrollback:
+            try:
+                info = await session.async_get_line_info()
+                grid = info.mutable_area_height
+                history = info.scrollback_buffer_height
+                overflow = info.overflow
+                avail = history + grid
+                want = min(max_lines, avail)
+                first = overflow + avail - want
+                line_contents = await session.async_get_contents(first, want)
+                lines = [lc.string.replace("\x00", " ").rstrip() for lc in line_contents]
+            except Exception:
+                lines = None
         if lines is None:
             contents = await session.async_get_screen_contents()
             lines = []
