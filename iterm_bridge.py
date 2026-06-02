@@ -293,17 +293,39 @@ class ItermBridge:
                 await asyncio.sleep(0.25)
             except Exception:
                 pass
-        contents = await session.async_get_screen_contents()
-        lines = []
-        for y in range(contents.number_of_lines):
-            line = contents.line(y)
-            # iTerm pads wide chars (CJK, emoji) and some rendered text
-            # with NULL bytes between glyphs. They render as nothing, so
-            # screen text appears with words mashed together. Fold NULLs
-            # to space here so every caller of this method gets readable
-            # output without each having to remember the workaround.
-            s = line.string.replace("\x00", " ").rstrip()
-            lines.append(s)
+        # Read up to `max_lines` INCLUDING scrollback. The visible grid alone
+        # is only ~30-50 rows, so when a menu/selector or long tool output
+        # fills the screen the conversation scrolls out of view — and attach
+        # scoring (which matches JSONL fingerprints against the screen) then
+        # sees none of it and scores 0. async_get_contents() reads an
+        # arbitrary absolute line range; async_get_line_info() gives the
+        # bounds (oldest available line = overflow; total = history + grid).
+        # Fall back to the visible-only read if the range read fails.
+        lines = None
+        try:
+            info = await session.async_get_line_info()
+            grid = info.mutable_area_height
+            history = info.scrollback_buffer_height
+            overflow = info.overflow
+            avail = history + grid
+            want = min(max_lines, avail)
+            first = overflow + avail - want
+            line_contents = await session.async_get_contents(first, want)
+            lines = [lc.string.replace("\x00", " ").rstrip() for lc in line_contents]
+        except Exception:
+            lines = None
+        if lines is None:
+            contents = await session.async_get_screen_contents()
+            lines = []
+            for y in range(contents.number_of_lines):
+                line = contents.line(y)
+                # iTerm pads wide chars (CJK, emoji) and some rendered text
+                # with NULL bytes between glyphs. They render as nothing, so
+                # screen text appears with words mashed together. Fold NULLs
+                # to space here so every caller of this method gets readable
+                # output without each having to remember the workaround.
+                s = line.string.replace("\x00", " ").rstrip()
+                lines.append(s)
         if strip_input:
             lines = _strip_input_area(lines)
         while lines and not lines[-1]:

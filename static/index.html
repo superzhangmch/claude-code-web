@@ -506,6 +506,21 @@ footer .prompt-row .pq {
   font-size: 12px; color: #f0d050; font-weight: 600;
   white-space: pre-wrap; word-break: break-word;
 }
+#choice-banner {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; margin: 0 0 4px;
+  background: #2a2410; border: 1px solid var(--accent);
+  border-radius: 8px;
+}
+#choice-banner #choice-banner-text {
+  flex: 1; min-width: 0;
+  font-size: 12px; color: #f0d050; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#choice-banner #choice-banner-btn {
+  flex-shrink: 0;
+  border-color: var(--accent); background: #28311a; color: var(--text);
+}
 footer .prompt-row .pchoices {
   display: flex; flex-wrap: wrap; gap: 6px;
 }
@@ -716,6 +731,9 @@ footer button.icon {
 #screen-modal .screen-actions {
   display: flex; flex-wrap: wrap; gap: 6px;
   justify-content: flex-end;
+}
+#screen-modal .screen-actions .btn:disabled {
+  opacity: 0.4; cursor: not-allowed;
 }
 #tabs-modal .modal-card.tabs-card {
   width: 95vw; max-width: 1100px; max-height: 85vh;
@@ -996,9 +1014,9 @@ footer button.icon {
         <pre id="screen-body" class="screen-body">…</pre>
         <div class="modal-row screen-actions">
           <button id="key-esc" class="btn" title="Send ESC">ESC</button>
-          <button id="key-opt1" class="btn" title="Send Enter (selects option 1 / current)">ENTER (opt1)</button>
-          <button id="key-opt2" class="btn" title="Down + Enter (option 2)">OPT2</button>
-          <button id="key-opt3" class="btn" title="Down ×2 + Enter (option 3)">OPT3</button>
+          <button id="key-up" class="btn" title="Arrow Up — move selection up">↑</button>
+          <button id="key-down" class="btn" title="Arrow Down — move selection down">↓</button>
+          <button id="key-enter" class="btn" title="Enter — confirm">⏎ Enter</button>
         </div>
       </div>
       <!-- Info tab: just a table, only horizontal scroll. -->
@@ -1028,6 +1046,10 @@ footer button.icon {
   </main>
 
   <footer id="footer" class="hidden">
+    <div id="choice-banner" style="display:none">
+      <span id="choice-banner-text">Claude is waiting for your choice</span>
+      <button id="choice-banner-btn" class="btn">🖥 Open screen</button>
+    </div>
     <div id="prompt-row" class="prompt-row" style="display:none">
       <div id="prompt-question" class="pq"></div>
       <div id="prompt-choices" class="pchoices"></div>
@@ -1238,6 +1260,9 @@ footer button.icon {
   const promptRowEl = document.getElementById("prompt-row");
   const promptQuestionEl = document.getElementById("prompt-question");
   const promptChoicesEl = document.getElementById("prompt-choices");
+  const choiceBanner = document.getElementById("choice-banner");
+  const choiceBannerText = document.getElementById("choice-banner-text");
+  const choiceBannerBtn = document.getElementById("choice-banner-btn");
   const screenBtn = document.getElementById("screen-btn");
   const screenModal = document.getElementById("screen-modal");
   const screenBody = document.getElementById("screen-body");
@@ -1281,6 +1306,10 @@ footer button.icon {
   let shouldAutoscroll = true;
 
   const POLL_INTERVAL_MS = 5000;
+  // Keep polling (slower) even when claude is idle — that's exactly when a
+  // choice/question is pending and the banner needs to appear. Stops anyway
+  // once ACTIVITY_TIMEOUT_MS of no interaction trips the timeout pause.
+  const IDLE_POLL_INTERVAL_MS = 6000;
   const ACTIVITY_TIMEOUT_MS = 2 * 60 * 1000;
 
   mainEl.addEventListener("scroll", () => {
@@ -1331,7 +1360,20 @@ footer button.icon {
   }
 
   function updatePromptRow(pending) {
-    if (!pending || !pending.choices || pending.choices.length < 2) {
+    const numbered = pending && pending.choices && pending.choices.length >= 2;
+    // Chat-area banner: shown whenever claude is waiting on you — a numbered
+    // menu, an interactive selector, prose choices, or a trailing question.
+    const hasBanner = pending && (pending.question || numbered);
+    if (hasBanner) {
+      choiceBannerText.textContent = pending.question || "Claude is waiting for your choice";
+      choiceBanner.style.display = "";
+    } else {
+      choiceBanner.style.display = "none";
+    }
+    // Footer quick-reply number buttons only make sense for a numbered menu
+    // (idx → DownArrows+Enter). Selectors/prose/questions don't get them —
+    // the banner + screen view (↑/↓/Enter or typing) handle those.
+    if (!numbered || pending.kind !== "menu") {
       promptRowEl.style.display = "none";
       lastPromptKey = "";
       return;
@@ -1371,6 +1413,7 @@ footer button.icon {
     metaEl.textContent = "";
     setStatus("off");
     promptRowEl.style.display = "none";
+    choiceBanner.style.display = "none";
     lastPromptKey = "";
     _lastBottomToolUse = null;
     refreshPicker();
@@ -1392,21 +1435,26 @@ footer button.icon {
     setStatus("ok");
   }
 
-  async function loadScreen() {
+  // quiet=true: in-place refresh used after ↑/↓/Enter — skip the "Loading…"
+  // placeholder (which collapses the <pre> and makes the box jump) and only
+  // re-pin to the bottom if we were already there, so the view stays steady.
+  async function loadScreen(quiet) {
     if (!attachedSid) return;
-    screenBody.textContent = "Loading…";
+    if (!quiet) screenBody.textContent = "Loading…";
     try {
       const resp = await authedFetch("/api/screen?claude_session_id=" + encodeURIComponent(attachedSid));
       if (!resp.ok) {
-        screenBody.textContent = "Error: " + resp.status + " " + resp.statusText;
+        if (!quiet) screenBody.textContent = "Error: " + resp.status + " " + resp.statusText;
         return;
       }
       const j = await resp.json();
+      const atBottom = screenBody.scrollHeight - screenBody.scrollTop - screenBody.clientHeight < 24;
       screenBody.textContent = j.screen || "(empty)";
       // Scroll to bottom — most recent output is what the user usually wants.
-      screenBody.scrollTop = screenBody.scrollHeight;
+      // On a quiet refresh keep the user's position unless they were at bottom.
+      if (!quiet || atBottom) screenBody.scrollTop = screenBody.scrollHeight;
     } catch (e) {
-      screenBody.textContent = "Error: " + e;
+      if (!quiet) screenBody.textContent = "Error: " + e;
     }
   }
   const screenPane = document.getElementById("screen-pane");
@@ -1428,6 +1476,7 @@ footer button.icon {
     loadInfo();
   }
   screenBtn.addEventListener("click", openScreenInfo);
+  choiceBannerBtn.addEventListener("click", openScreenInfo);
   screenRefresh.addEventListener("click", () => { loadScreen(); loadInfo(); });
   screenClose.addEventListener("click", () => screenModal.classList.remove("show"));
   screenModal.addEventListener("click", (e) => {
@@ -1828,8 +1877,19 @@ footer button.icon {
   // refresh the screen view so the user can see what happened.
   // press_enter:false because we encode \r ourselves when needed — that
   // way we can send a bare ESC without an extra Enter sneaking in.
-  async function sendRaw(text) {
+  const screenKeyBtns = ["key-esc", "key-up", "key-down", "key-enter"]
+    .map(id => document.getElementById(id));
+  function setScreenKeysDisabled(on) {
+    for (const b of screenKeyBtns) b.disabled = on;
+  }
+  // pressEnter:true sends a carriage return via the server's press_enter path.
+  // (A bare "\r" in `text` gets rstrip()'d off server-side, so Enter must go
+  // through press_enter, not the raw text — that's why ⏎ did nothing before.)
+  async function sendRaw(text, pressEnter) {
     if (!attachedSid) return;
+    // Lock the four screen keys until the post + refresh settle, so a second
+    // click can't fire mid-flight (would queue extra arrows / double-Enter).
+    setScreenKeysDisabled(true);
     try {
       await authedFetch("/api/input", {
         method: "POST",
@@ -1837,17 +1897,22 @@ footer button.icon {
         body: JSON.stringify({
           claude_session_id: attachedSid,
           text,
-          press_enter: false,
+          press_enter: !!pressEnter,
         }),
       });
     } catch {}
-    // Brief grace so claude can process and redraw, then refresh.
-    setTimeout(loadScreen, 300);
+    // Brief grace so claude can process and redraw, then refresh — twice,
+    // since the TUI redraw sometimes lags the keypress, and the user wants
+    // to see the screen change as feedback for ↑/↓/Enter. Quiet refresh so
+    // the box doesn't flicker/jump (no "Loading…" collapse). Re-enable the
+    // keys only after the final refresh lands.
+    setTimeout(() => loadScreen(true), 250);
+    setTimeout(async () => { await loadScreen(true); setScreenKeysDisabled(false); }, 650);
   }
   document.getElementById("key-esc").addEventListener("click", () => sendRaw("\x1b"));
-  document.getElementById("key-opt1").addEventListener("click", () => sendRaw("\r"));
-  document.getElementById("key-opt2").addEventListener("click", () => sendRaw("\x1b[B\r"));
-  document.getElementById("key-opt3").addEventListener("click", () => sendRaw("\x1b[B\x1b[B\r"));
+  document.getElementById("key-up").addEventListener("click", () => sendRaw("\x1b[A"));
+  document.getElementById("key-down").addEventListener("click", () => sendRaw("\x1b[B"));
+  document.getElementById("key-enter").addEventListener("click", () => sendRaw("", true));
 
   // CPU history modal — opened by clicking the battery in the picker.
   // Renders a simple line chart (no chart library) of each active pid's
@@ -3159,15 +3224,17 @@ footer button.icon {
       // pollOnce's finally block. Nothing to do.
       return;
     }
-    // Nothing new — restore the prior red state.
+    // Nothing new — restore the prior state. When idle (not timed out),
+    // pollOnce's finally keeps a slow poll running so a pending prompt still
+    // surfaces; we just refresh the label.
     if (wasTimeoutPause) setPaused(true, "timeout");
-    else updateAutoload();  // claudeIdle stays true; polling is naturally stopped
+    else updateAutoload();
   });
   function updateAutoload() {
     autoloadEl.classList.toggle("show", !!attachedSid);
     autoloadEl.classList.toggle("paused", isPaused || claudeIdle);
     autoloadLabel.textContent = isPaused ? "paused · tap to continue"
-      : (claudeIdle ? "claude idle · tap to refresh"
+      : (claudeIdle ? "claude idle · watching for prompts"
       : "auto-refreshing · tap to stop");
   }
   function setPaused(p, reason) {
@@ -3239,7 +3306,7 @@ footer button.icon {
       polling = false;
       if (isPaused) {}
       else if (Date.now() > activityDeadline) setPaused(true, "timeout");
-      else if (attachedSid && !claudeIdle) schedulePoll(POLL_INTERVAL_MS);
+      else if (attachedSid) schedulePoll(claudeIdle ? IDLE_POLL_INTERVAL_MS : POLL_INTERVAL_MS);
     }
   }
 

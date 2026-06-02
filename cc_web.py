@@ -453,6 +453,10 @@ LLM_PICK_CACHE_MAX_ENTRIES = 256
 # Min length of an LLM evidence pair's common core to count as real proof.
 # Short generic project tokens (pocketchat, CHAT_PASSWORD) fall below this.
 MIN_EVIDENCE_LEN = 16
+# How much of each candidate's (now long, scrollback-backed) screen capture to
+# hand the LLM and re-verify evidence against. Larger than one viewport so a
+# match that scrolled a bit above the fold is still visible to the model.
+LLM_SCREEN_CHARS = 4000
 
 
 def _llm_pick_cache_key(jsonl_path: Path, scored: list[dict]) -> tuple:
@@ -546,7 +550,7 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
     screen_by_tab: dict[int, str] = {}
     for i, c in enumerate(scored, 1):
         ref = c["ref"]
-        tail = (c.get("screen") or "")[-1500:]
+        tail = (c.get("screen") or "")[-LLM_SCREEN_CHARS:]
         screen_by_tab[i] = tail
         tabs.append(f"### Tab {i} (pid={ref.pid}, cwd={ref.cwd})\n{tail}")
     tabs_text = "\n\n".join(tabs)
@@ -560,6 +564,13 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
         "last transcript message we have. So the latest transcript message\n"
         "may not literally appear on screen anymore. You must use the WHOLE\n"
         "recent transcript (5 exchanges) to find evidence.\n"
+        "\n"
+        "Each tab's screen is a long scrollback capture and may contain text\n"
+        "that is NOT part of the Claude Code conversation — a shell prompt,\n"
+        "raw command output, git/build logs, another program's output left\n"
+        "over before `claude` started. IGNORE those regions. Only conversation\n"
+        "content (the user's messages and Claude's replies / tool activity)\n"
+        "counts as evidence for matching.\n"
         "\n"
         "DECISION PROCEDURE:\n"
         "1. From the WHOLE recent transcript (latest + older), extract\n"
@@ -729,14 +740,20 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
         })
     # Need real proof: at least 2 OK pairs, OR a single OK pair whose core is
     # clearly long (>= 30 chars). One short-ish match is not enough.
+    #
+    # We do NOT require EVERY pair to verify. The model often emits one solid
+    # pair plus a couple it copied imperfectly (a path that wrapped across
+    # screen lines fails the literal substring check, etc.). A genuine strong
+    # OK pair is decisive on its own — and the argv `--resume` short-circuit
+    # upstream already removes tabs proven to be running a *different* session,
+    # so a stray FAKE sibling pair shouldn't veto an otherwise-strong match.
     ok_pairs = [v for v in verified if v["verdict"] == "OK"]
     strong_single = any(
         len(_normalize_for_match(v["transcript"])) >= 30
         or len(_normalize_for_match(v["screen"])) >= 30
         for v in ok_pairs
     )
-    all_ok = bool(verified) and all(v["verdict"] == "OK" for v in verified) \
-        and (len(ok_pairs) >= 2 or strong_single)
+    all_ok = len(ok_pairs) >= 2 or strong_single
     result = {
         "pick": pick_iterm_id,
         "matches": verified,
@@ -817,11 +834,32 @@ MARKER_RE = re.compile(r"test_alive_marker=[a-f0-9]+")
 _PROMPT_OPT_RE = re.compile(r"^\s*([❯>])?\s*(\d)\.\s+(.+?)\s*$")
 _ESC_HINT_RE = re.compile(r"\s*\(esc\)\s*$", re.I)
 
+# Prose options: Claude FINISHED its turn and listed choices in plain text
+# using circled numbers ("① 直接实现 …② 先 replay …③ 暂时 triage"). This is
+# NOT an interactive menu — the user replies by typing, not arrow keys — but
+# we still surface it so the UI can flag "a choice is waiting". Circled
+# numbers are distinctive enough that we don't fire on ordinary lists.
+_CIRCLED_RE = re.compile(r"[①②③④⑤⑥⑦⑧⑨]")
+_CHOICE_KW_RE = re.compile(
+    r"选项|选择|哪个|哪种|要不要|是否|怎么办|which|choose|option|pick|prefer", re.I
+)
+# Claude's interactive list selectors (resume picker, file picker, custom
+# menus) don't use "1. 2. 3." — they show a highlighted row plus a hint line
+# like "Enter to select · ↑/↓ to navigate · Esc to cancel". That hint is a
+# strong, specific signal the session is BLOCKED waiting on a keyboard choice.
+_SELECTOR_HINT_RE = re.compile(
+    r"enter to select|↑/↓ to navigate|to navigate|esc to cancel", re.I
+)
+# Lines that are claude's chrome, not content — skipped when hunting for the
+# last "real" line (input box rules, the empty prompt, status/spinner rows).
+_CHROME_PREFIXES = ("❯", "│", "─", "╭", "╰", "✻", "✶", "✳", "·", "*", "⏵")
+_CHROME_SUBSTR = ("auto mode", "new task?", "esc to interrupt", "tokens", "/clear")
+
 # Per-session last-input timestamp. Used to gate confirmation-prompt
 # detection: we only scan the screen when claude has been quiet AND the
 # user hasn't typed anything recently (so a prompt is plausible).
 _last_input_ts: dict[str, float] = {}
-PENDING_CONFIRM_IDLE_SEC = 15.0
+PENDING_CONFIRM_IDLE_SEC = 6.0
 
 
 def _detect_pending_confirm_from_screen(screen: str) -> Optional[dict]:
@@ -866,7 +904,7 @@ def _detect_pending_confirm_from_screen(screen: str) -> Optional[dict]:
             choices[-1]["text"] += " " + ln.strip()
             last_i = i
     if len(choices) < 2 or not has_cursor:
-        return None
+        return _detect_fallbacks(lines)
     question = ""
     look_from = max(0, first_abs_idx - 12)
     for j in range(first_abs_idx - 1, look_from - 1, -1):
@@ -876,7 +914,90 @@ def _detect_pending_confirm_from_screen(screen: str) -> Optional[dict]:
         if ln.endswith("?"):
             question = ln
             break
-    return {"question": question, "choices": choices}
+    return {"question": question, "choices": choices, "kind": "menu"}
+
+
+def _detect_fallbacks(lines: list[str]) -> Optional[dict]:
+    """Non-"1. 2. 3." ways Claude waits on you, in confidence order:
+    an interactive selector, circled-number prose, then a trailing question."""
+    return (_detect_selector(lines)
+            or _detect_prose_choices(lines)
+            or _detect_trailing_question(lines))
+
+
+def _last_content_line(lines: list[str]) -> str:
+    """The last 'real' line above claude's input box — skips box rules, the
+    empty prompt, and status/spinner rows."""
+    for ln in reversed(lines):
+        s = ln.strip()
+        if not s or s[:1] in _CHROME_PREFIXES:
+            continue
+        low = s.lower()
+        if any(sub in low for sub in _CHROME_SUBSTR):
+            continue
+        return s
+    return ""
+
+
+def _detect_selector(lines: list[str]) -> Optional[dict]:
+    """Interactive list selector — blocked on ↑/↓ + Enter. High confidence."""
+    tail = "\n".join(lines[-6:])
+    if not _SELECTOR_HINT_RE.search(tail):
+        return None
+    question = ""
+    for ln in reversed(lines[-15:]):
+        s = ln.strip()
+        if s.endswith(("?", "？")):
+            question = s
+            break
+    return {"question": question or "Claude is showing a selection menu",
+            "choices": [], "kind": "menu"}
+
+
+def _detect_trailing_question(lines: list[str]) -> Optional[dict]:
+    """Claude finished its turn and the last content line is a question — it's
+    idle, waiting for your typed answer. choices=[] (you reply by typing)."""
+    s = _last_content_line(lines)
+    if not s.endswith(("?", "？")):
+        return None
+    # Keep just the final question clause, not the whole paragraph.
+    qs = re.findall(r"[^。！!?？\n]*[?？]", s)
+    q = (qs[-1].strip() if qs else s)
+    return {"question": q[:160], "choices": [], "kind": "question"}
+
+
+def _detect_prose_choices(lines: list[str]) -> Optional[dict]:
+    """Fallback for non-interactive, prose-style choices written with circled
+    numbers (①②③). Returns {"question", "choices", "kind": "prose"} or None.
+
+    Conservative on purpose: the LAST content line must itself carry a circled
+    marker (so the options sit at the bottom of the screen, i.e. they're the
+    current ask — not stale ①②③ that scrolled up while claude moved on), plus
+    ≥2 markers total and a question mark / choice keyword nearby.
+    """
+    if not _CIRCLED_RE.search(_last_content_line(lines)):
+        return None
+    tail = "\n".join(lines[-12:])
+    if len(_CIRCLED_RE.findall(tail)) < 2:
+        return None
+    if "?" not in tail and "？" not in tail and not _CHOICE_KW_RE.search(tail):
+        return None
+    # Split on the circled markers: seg[0] is the lead-in, seg[1:] are options.
+    segs = _CIRCLED_RE.split(tail)
+    opts = [s.strip() for s in segs[1:] if s.strip()]
+    if len(opts) < 2:
+        return None
+    choices: list[dict] = []
+    for i, o in enumerate(opts, 1):
+        # Keep each option short: first clause, single line.
+        t = re.split(r"[;；。\n]", o, 1)[0].strip()
+        choices.append({"idx": i, "text": t[:80]})
+    # Question = last "?"-terminated sentence in the lead-in text (a run that
+    # doesn't cross another sentence terminator, so we get just the ask).
+    lead = segs[0].replace("\n", " ")
+    qs = re.findall(r"[^。？?！!\n]*[?？]", lead)
+    question = qs[-1].strip() if qs else ""
+    return {"question": question, "choices": choices, "kind": "prose"}
 
 
 async def _detect_pending_confirm(b: Binding, screen: Optional[str]) -> Optional[dict]:
@@ -1922,7 +2043,7 @@ async def post_attach(payload: AttachPayload):
         except Exception:
             screen = None
         score, matched = score_screen(screen or "", fingerprints)
-        scored.append({"ref": r, "score": score, "matched": matched, "screen": (screen or "")[-1500:]})
+        scored.append({"ref": r, "score": score, "matched": matched, "screen": (screen or "")[-LLM_SCREEN_CHARS:]})
     scored.sort(key=lambda x: x["score"], reverse=True)
 
     top = scored[0] if scored else None
@@ -2093,8 +2214,11 @@ async def get_state(
 
     has_more = bool(transcript and transcript[0].get("_idx", 0) > 1)
 
+    # strip_input=False: the confirmation menus we detect (numbered menus,
+    # ↑/↓ selectors, prose options) live in the very input/footer area that
+    # _strip_input_area() drops — so detection MUST see the raw screen.
     try:
-        screen = await bridge.get_screen_for(b.iterm_session_id)
+        screen = await bridge.get_screen_for(b.iterm_session_id, strip_input=False)
     except Exception:
         screen = None
 
