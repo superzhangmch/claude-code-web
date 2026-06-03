@@ -1716,6 +1716,13 @@ class TabAttachPayload(BaseModel):
     iterm_session_id: str
 
 
+class ItermInputPayload(BaseModel):
+    iterm_session_id: str
+    text: str = ""
+    press_enter: bool = False
+    raw: bool = False   # raw=True: send text verbatim (control keys), no rstrip
+
+
 class DetachPayload(BaseModel):
     claude_session_id: str
 
@@ -2691,6 +2698,29 @@ async def get_iterm_screen(iterm_session_id: str):
     if screen is None:
         raise HTTPException(status_code=404, detail="iterm session not found")
     return {"screen": screen}
+
+
+@app.post("/api/iterm-input", dependencies=[Depends(require_token)])
+async def post_iterm_input(payload: ItermInputPayload):
+    """Send keys/text to an arbitrary iTerm2 tab by its session id — backs the
+    tabs viewer's control panel (no binding required). raw=True sends the text
+    verbatim (control sequences like ESC/arrows/^C); otherwise it's treated as
+    typed text (multi-line → bracketed paste) with an optional trailing Enter."""
+    try:
+        await bridge.ensure_connected()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
+    if payload.raw:
+        final = payload.text
+    else:
+        body = payload.text.replace("\r\n", "\n").rstrip("\r\n")
+        if "\n" in body:
+            body = "\x1b[200~" + body + "\x1b[201~"
+        final = body + ("\r" if payload.press_enter else "")
+    ok = await bridge.send_text_to(payload.iterm_session_id, final)
+    if not ok:
+        raise HTTPException(status_code=404, detail="iterm session not found")
+    return {"ok": True}
 
 
 _FS_TEXT_EXT = {".md", ".markdown", ".txt", ".log", ".json", ".yaml", ".yml",

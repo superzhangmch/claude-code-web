@@ -787,10 +787,30 @@ footer button.icon {
   flex: 1; min-height: 0;
   background: #000; color: var(--text);
   font: 12px ui-monospace, Menlo, monospace;
-  border: 1px solid var(--border); border-radius: 4px;
+  border: 2px solid var(--accent); border-radius: 4px;
   padding: 8px 10px; margin: 0;
   overflow: auto; white-space: pre;
 }
+#tabs-modal .tabs-keys {
+  display: flex; flex-wrap: wrap; gap: 5px; flex-shrink: 0;
+}
+#tabs-modal .tabs-keys .tk {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 9px; font-size: 12px; cursor: pointer;
+}
+#tabs-modal .tabs-keys .tk:hover { border-color: var(--accent); }
+#tabs-modal .tabs-keys .tk-sep {
+  align-self: center; color: var(--border); user-select: none; padding: 0 2px;
+}
+#tabs-modal .tabs-input-row { display: flex; gap: 6px; flex-shrink: 0; }
+#tabs-modal #tabs-input {
+  flex: 1; min-width: 0;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 7px 10px; font-size: 13px;
+}
+#tabs-modal #tabs-input:focus { outline: none; border-color: var(--accent); }
 
 #files-modal .modal-card.files-card {
   width: 95vw; max-width: 1100px; height: 85vh;
@@ -997,6 +1017,30 @@ footer button.icon {
       </div>
       <div id="tabs-list" class="tabs-list"></div>
       <pre id="tabs-screen" class="screen-body">Pick a tab above to view its screen.</pre>
+      <div id="tabs-keys" class="tabs-keys">
+        <button class="tk" data-raw="&#13;">⏎ Enter</button>
+        <button class="tk" data-raw="&#27;">Esc</button>
+        <button class="tk" data-raw="&#9;">Tab</button>
+        <span class="tk-sep">|</span>
+        <button class="tk" data-raw="&#27;[A">↑</button>
+        <button class="tk" data-raw="&#27;[B">↓</button>
+        <button class="tk" data-raw="&#27;[D">←</button>
+        <button class="tk" data-raw="&#27;[C">→</button>
+        <span class="tk-sep">|</span>
+        <button class="tk" data-raw="&#3;" title="Ctrl+C — interrupt">^C</button>
+        <button class="tk" data-raw="&#4;" title="Ctrl+D — EOF / exit">^D</button>
+        <button class="tk" data-raw="&#12;" title="Ctrl+L — clear / redraw">^L</button>
+        <button class="tk" data-raw="&#21;&#11;" title="Delete whole line (Ctrl+U then Ctrl+K)">DelLine</button>
+        <span class="tk-sep">|</span>
+        <button class="tk" data-raw="&#26;" title="Ctrl+Z — suspend the foreground job">^Z</button>
+        <button class="tk" data-cmd="jobs" title="list suspended/background jobs">jobs</button>
+        <button class="tk" data-cmd="fg" title="resume a job in the foreground">fg</button>
+        <button class="tk" data-cmd="bg" title="resume a job in the background">bg</button>
+      </div>
+      <div id="tabs-input-row" class="tabs-input-row">
+        <input id="tabs-input" type="text" placeholder="Send a prompt to this tab…" autocomplete="off">
+        <button id="tabs-send" class="btn">Send</button>
+      </div>
     </div>
   </div>
 
@@ -1525,10 +1569,11 @@ footer button.icon {
       const resp = await authedFetch("/api/iterm-tabs");
       if (!resp.ok) { tabsListEl.textContent = "Error: " + resp.status; return; }
       const j = await resp.json();
-      // Only claude tabs — plain shells aren't attachable and just clutter.
-      const tabs = (j.tabs || []).filter(t => t.is_claude);
+      // All tabs — claude tabs get a green dot + Attach/Enter; plain shells are
+      // selectable too (view + drive via the control panel), just no Attach.
+      const tabs = j.tabs || [];
       tabsListEl.textContent = "";
-      if (!tabs.length) { tabsListEl.textContent = "(no claude tabs)"; return; }
+      if (!tabs.length) { tabsListEl.textContent = "(no tabs)"; return; }
       for (const t of tabs) {
         const row = document.createElement("div"); row.className = "tab-row";
         const sel = document.createElement("button"); sel.className = "tab-sel";
@@ -1677,6 +1722,41 @@ footer button.icon {
   tabsClose.addEventListener("click", () => tabsModal.classList.remove("show"));
   tabsModal.addEventListener("click", (e) => {
     if (e.target === tabsModal) tabsModal.classList.remove("show");
+  });
+
+  // ---- tabs control panel: send keys/text to the selected tab ----
+  const tabsInput = document.getElementById("tabs-input");
+  const tabsSendBtn = document.getElementById("tabs-send");
+  async function tabsSendInput(text, opts) {
+    opts = opts || {};
+    if (!tabsSelectedId) { alert("Select a tab above first."); return; }
+    try {
+      await authedFetch("/api/iterm-input", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          iterm_session_id: tabsSelectedId, text,
+          press_enter: !!opts.pressEnter, raw: !!opts.raw,
+        }),
+      });
+    } catch {}
+    // Refresh the screen so the user sees the result (quiet swap, no flash).
+    setTimeout(() => { if (tabsSelectedId) loadItermScreen(tabsSelectedId); }, 250);
+    setTimeout(() => { if (tabsSelectedId) loadItermScreen(tabsSelectedId); }, 650);
+  }
+  document.querySelectorAll("#tabs-keys .tk").forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (btn.dataset.raw != null) tabsSendInput(btn.dataset.raw, { raw: true });
+      else if (btn.dataset.cmd != null) tabsSendInput(btn.dataset.cmd, { pressEnter: true });
+    });
+  });
+  tabsSendBtn.addEventListener("click", () => {
+    const v = tabsInput.value;
+    if (!v.trim()) return;
+    tabsSendInput(v, { pressEnter: true });
+    tabsInput.value = "";
+  });
+  tabsInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); tabsSendBtn.click(); }
   });
 
   // ---------- local file browser (picker page) ----------
