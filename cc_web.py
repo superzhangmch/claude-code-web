@@ -946,6 +946,28 @@ def _is_dash_run(s: str) -> bool:
     return len(s) >= 8 and set(s) <= {"─", "-"}
 
 
+def _screen_tail(screen: str, context: int = 7) -> str:
+    """Server-side tail slice for the 'tail screen' peek — so we ship ~a dozen
+    short lines instead of the whole (full-width) screen. Locates the input box
+    (`────` rule whose next non-blank line starts with ❯/>, may be multi-line
+    inside) and returns `context` lines above it through the bottom of the
+    screen. Right-trims every line and shrinks the full-width guide rules to a
+    tidy 8-dash marker. No input box found → last `context` lines."""
+    lines = re.sub(r"[\s\n]+$", "", screen or "").split("\n")
+    top = -1
+    for i in range(len(lines) - 1, -1, -1):
+        if not _is_dash_run(lines[i]):
+            continue
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        if j < len(lines) and lines[j].lstrip()[:1] in ("❯", ">"):
+            top = i
+            break
+    out = lines[-context:] if top < 0 else lines[max(0, top - context):]
+    return "\n".join("────────" if _is_dash_run(l) else l.rstrip() for l in out)
+
+
 def _strip_prompt_box(lines: list[str]) -> list[str]:
     """Drop claude's free-text input box so TYPED text isn't matched as a menu.
 
@@ -1130,23 +1152,19 @@ def _detect_prose_choices(lines: list[str]) -> Optional[dict]:
     return {"question": question, "choices": choices, "kind": "prose"}
 
 
-async def _detect_pending_confirm(b: Binding, screen: Optional[str]) -> Optional[dict]:
-    """Gate + detect. Returns the prompt dict only if BOTH:
-      - JSONL hasn't been written for ≥ PENDING_CONFIRM_IDLE_SEC
-      - last user /api/input on this sid was ≥ PENDING_CONFIRM_IDLE_SEC ago
-    Either condition false → return None without touching the screen.
-    """
+def _pending_confirm_gate_open(b: Binding) -> bool:
+    """True only if BOTH the JSONL and the user's last /api/input have been
+    quiet for ≥ PENDING_CONFIRM_IDLE_SEC (so a prompt is plausible). Checked
+    BEFORE touching the screen so the snapshot poll skips the iTerm read (and
+    the bytes) entirely while claude is actively working."""
     now = _time.time()
-    last_in = _last_input_ts.get(b.claude_session_id, 0.0)
-    if now - last_in < PENDING_CONFIRM_IDLE_SEC:
-        return None
+    if now - _last_input_ts.get(b.claude_session_id, 0.0) < PENDING_CONFIRM_IDLE_SEC:
+        return False
     try:
         jsonl_mtime = b.jsonl_path.stat().st_mtime if b.jsonl_path else 0.0
     except OSError:
         jsonl_mtime = 0.0
-    if now - jsonl_mtime < PENDING_CONFIRM_IDLE_SEC:
-        return None
-    return _detect_pending_confirm_from_screen(screen or "")
+    return now - jsonl_mtime >= PENDING_CONFIRM_IDLE_SEC
 
 
 def _pid_alive_with_start(pid: int, expected_start: float, tolerance: float = 1.5) -> bool:
@@ -1570,7 +1588,7 @@ def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
             op = e.get("operation")
             content = e.get("content")
             if op in ("enqueue", "popAll") and isinstance(content, str) and content.strip():
-                out.append({
+                qe = {
                     "uuid": e.get("uuid"),
                     "type": "user",
                     "_idx": e.get("_idx"),
@@ -1579,7 +1597,10 @@ def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
                     "sid": e.get("sessionId"),
                     "_queued": True,
                     "message": {"content": content},
-                })
+                }
+                if _is_command_noise(content):
+                    qe["_system"] = True
+                out.append(qe)
             continue
         if t not in ("user", "assistant"):
             continue
@@ -1594,8 +1615,30 @@ def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
         else:
             trimmed = _trim_all(e)
         if trimmed:
+            if t == "user" and _is_system_user_entry(e):
+                trimmed["_system"] = True
             out.append(trimmed)
     return out
+
+
+def _is_system_user_entry(e: dict) -> bool:
+    """A type=user JSONL entry that is actually SYSTEM/tool-injected, not real
+    user input: a <task-notification>/<command-*>/<local-command-*>/<bash-*>
+    wrapper, or a tool result (toolUseResult, or tool_result content). The
+    transcript labels these 'System' instead of 'You'."""
+    if e.get("toolUseResult"):
+        return True
+    msg = e.get("message") or {}
+    c = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(c, str):
+        return _is_command_noise(c)
+    if isinstance(c, list):
+        if any(isinstance(p, dict) and p.get("type") == "tool_result" for p in c):
+            return True
+        return any(isinstance(p, dict) and p.get("type") == "text"
+                   and isinstance(p.get("text"), str) and _is_command_noise(p["text"])
+                   for p in c)
+    return False
 
 
 def _is_user_msg(e: dict) -> bool:
@@ -2464,15 +2507,19 @@ async def get_state(
 
     has_more = bool(transcript and transcript[0].get("_idx", 0) > 1)
 
-    # strip_input=False: the confirmation menus we detect (numbered menus,
-    # ↑/↓ selectors, prose options) live in the very input/footer area that
-    # _strip_input_area() drops — so detection MUST see the raw screen.
-    try:
-        screen = await bridge.get_screen_for(b.iterm_session_id, strip_input=False)
-    except Exception:
-        screen = None
-
-    pending_confirm = await _detect_pending_confirm(b, screen)
+    # Only read the screen (an iTerm RPC) when the idle-gate is open — while
+    # claude is actively working we skip it every poll. strip_input=False: the
+    # menus we detect live in the input/footer area _strip_input_area() drops.
+    # We do NOT return the screen text itself — the poll only needs
+    # pending_confirm; shipping the full-width screen every 5-6s wasted phone
+    # bandwidth and battery for nothing.
+    pending_confirm = None
+    if _pending_confirm_gate_open(b):
+        try:
+            screen = await bridge.get_screen_for(b.iterm_session_id, strip_input=False)
+        except Exception:
+            screen = None
+        pending_confirm = _detect_pending_confirm_from_screen(screen or "")
 
     return {
         "binding": _serialize_binding(b),
@@ -2481,7 +2528,6 @@ async def get_state(
         "has_more_history": has_more,
         "gap_before_idx": gap_before_idx,
         "claude_idle": _is_claude_idle(all_entries),
-        "screen": screen,
         "pending_confirm": pending_confirm,
     }
 
@@ -2643,9 +2689,14 @@ async def get_session_info(claude_session_id: str):
 
 
 @app.get("/api/screen", dependencies=[Depends(require_token)])
-async def get_screen(claude_session_id: str):
+async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0):
     """Return the current iTerm screen tail for a bound session. Used by
-    the 'Load screen' button so the user can peek at the live tab any time."""
+    the 'Load screen' button so the user can peek at the live tab any time.
+    tail>0 → slice to the input box + `tail` lines above it SERVER-SIDE and
+    return just that (saves a lot of bytes vs shipping the full-width screen).
+    refresh=True sends Ctrl+L first for a clean redraw (the full modal);
+    the lightweight 'tail screen' peek passes refresh=false to avoid
+    disturbing the tab on every click."""
     b = bindings.get_by_session(claude_session_id)
     if b is None:
         raise HTTPException(status_code=409, detail="session not bound")
@@ -2661,9 +2712,11 @@ async def get_screen(claude_session_id: str):
         # and footer at the bottom (the attach flow strips those, but here
         # the user wants to see everything that's actually on the tab).
         screen = await bridge.get_screen_for(b.iterm_session_id, max_lines=200,
-                                             refresh=True, strip_input=False)
+                                             refresh=refresh, strip_input=False)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
+    if tail > 0:
+        return {"screen": _screen_tail(screen or "", tail)}
     return {"screen": screen or ""}
 
 

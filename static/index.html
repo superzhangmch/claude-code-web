@@ -316,6 +316,14 @@ header .battery:hover { color: var(--text); }
 .msg.user .markdown { color: #9aa0ab; }
 .msg.assistant { background: #000; }
 .msg.tool { border-left-color: #4ec9b0; background: #1a211f; }
+/* System/tool-injected entries recorded as type=user (task notifications,
+   slash-command bookkeeping, tool results) — NOT real user input. Muted, no
+   left indent, so they're clearly distinct from "You". */
+.msg.system {
+  border-left-color: #6b7280; background: #14161b; color: #7e8490;
+  margin-left: 0;
+}
+.msg.system .markdown { color: #7e8490; }
 .msg.thinking { border-left-color: #7a7a7a; background: #1a1a22; font-style: italic; color: var(--muted); }
 .msg .role {
   text-transform: uppercase; font-size: 10px;
@@ -450,9 +458,36 @@ header .battery:hover { color: var(--text); }
 #load-earlier.show { display: block; }
 
 #autoload {
-  display: none; justify-content: center;
+  display: none; justify-content: center; align-items: center; gap: 8px;
   padding: 10px 0 4px 0; cursor: pointer;
 }
+#autoload #tail-screen-btn {
+  background: var(--panel); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 6px 12px; font-size: 11px; cursor: pointer; white-space: nowrap;
+}
+#autoload #tail-screen-btn:hover { border-color: var(--accent); color: var(--text); }
+/* Bottom-left peek at the last lines of the live terminal. */
+#tail-box {
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: 76px; z-index: 60;
+  max-width: 86vw; max-height: 40vh;
+  background: rgba(0,0,0,0.94); border: 1px solid var(--accent);
+  border-radius: 6px; padding: 6px 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+#tail-box #tail-pre {
+  margin: 0; font: 11px ui-monospace, Menlo, monospace; color: var(--text);
+  white-space: pre; overflow: auto; max-height: calc(40vh - 16px);
+}
+#tail-box #tail-close, #tail-box #tail-refresh {
+  position: absolute; top: -10px;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); cursor: pointer; font-size: 12px; line-height: 1;
+}
+#tail-box #tail-close { right: -10px; }
+#tail-box #tail-refresh { left: -10px; }
+#tail-box #tail-refresh:hover, #tail-box #tail-close:hover { border-color: var(--accent); }
 #autoload.show { display: flex; }
 #autoload .indicator {
   display: inline-flex; gap: 4px;
@@ -851,10 +886,15 @@ footer button.icon {
 }
 #files-modal .files-favs .fav.dir .fav-nm { color: var(--accent); }
 #files-modal .files-favs .fav .fav-x {
-  border: none; background: transparent; color: var(--muted);
-  cursor: pointer; font-size: 13px; padding: 0 4px; border-radius: 50%;
+  flex-shrink: 0; align-self: center;
+  border: 1px solid var(--border); background: var(--bg); color: var(--muted);
+  cursor: pointer; font-size: 12px; line-height: 1; padding: 2px 6px; border-radius: 8px;
 }
-#files-modal .files-favs .fav .fav-x:hover { color: var(--err); }
+#files-modal .files-favs .fav .fav-x:hover { color: #fff; background: var(--err); border-color: var(--err); }
+#files-modal .files-favs .favs-label {
+  align-self: center; color: var(--muted); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.05em; margin-right: 2px;
+}
 #files-modal .files-list .row .star {
   flex-shrink: 0; background: transparent; border: none;
   color: var(--muted); cursor: pointer; font-size: 13px;
@@ -1055,6 +1095,7 @@ footer button.icon {
         <input id="files-path" class="files-path" placeholder="/path/to/dir — Enter to go" />
         <button id="files-go" class="btn">Go</button>
         <button id="files-fav-dir" class="btn" title="Favorite this directory">☆</button>
+        <button id="files-path-clear" class="btn" title="Clear the path box">✕</button>
       </div>
       <div class="files-bar">
         <input id="files-filter" class="files-path" placeholder="filter this page — or Search whole dir" />
@@ -1113,7 +1154,13 @@ footer button.icon {
           <span class="dot"></span><span class="dot"></span><span class="dot"></span>
           <span id="autoload-label" style="margin-left:6px">auto-refreshing · tap to stop</span>
         </span>
+        <button id="tail-screen-btn" title="Peek at the last lines of the live terminal">tail screen</button>
       </div>
+    </div>
+    <div id="tail-box" style="display:none">
+      <button id="tail-refresh" title="refresh">↻</button>
+      <button id="tail-close" title="close">✕</button>
+      <pre id="tail-pre"></pre>
     </div>
   </main>
 
@@ -1486,6 +1533,8 @@ footer button.icon {
     setStatus("off");
     promptRowEl.style.display = "none";
     choiceBanner.style.display = "none";
+    const _tb = document.getElementById("tail-box");
+    if (_tb) _tb.style.display = "none";
     lastPromptKey = "";
     _lastBottomToolUse = null;
     refreshPicker();
@@ -1764,6 +1813,14 @@ footer button.icon {
   const filesListEl = document.getElementById("files-list");
   const filesPreviewEl = document.getElementById("files-preview");
   const filesPathEl = document.getElementById("files-path");
+  // Set the path box and scroll it to the END, so a long path shows its
+  // deepest segment (where you are) rather than just "/Users/…". Full path
+  // stays in the value + title; scroll left to see the start.
+  function setPathBox(p) {
+    filesPathEl.value = p || "";
+    filesPathEl.title = p || "";
+    requestAnimationFrame(() => { filesPathEl.scrollLeft = filesPathEl.scrollWidth; });
+  }
   const filesUp = document.getElementById("files-up");
   const filesGo = document.getElementById("files-go");
   const filesClose = document.getElementById("files-close");
@@ -1830,7 +1887,7 @@ footer button.icon {
   function openFav(f) {
     if (f.is_dir) {
       // Fill the dir box + navigate there.
-      filesPathEl.value = f.path;
+      setPathBox(f.path);
       filesFilterEl.value = "";
       loadFilesDir(f.path, 0, "");
     } else {
@@ -1854,6 +1911,9 @@ footer button.icon {
     if (!a.length) { filesFavsEl.style.display = "none"; filesFavsEl.innerHTML = ""; return; }
     filesFavsEl.style.display = "flex";
     filesFavsEl.innerHTML = "";
+    const lbl = document.createElement("span");
+    lbl.className = "favs-label"; lbl.textContent = "Favorites";
+    filesFavsEl.appendChild(lbl);
     for (const f of a) {
       const chip = document.createElement("span");
       chip.className = "fav" + (f.is_dir ? " dir" : "");
@@ -1903,7 +1963,7 @@ footer button.icon {
       filesTotal = j.total;
       filesLimit = j.limit;
       filesActiveQ = q;
-      filesPathEl.value = j.path;
+      setPathBox(j.path);
       filesLastEntries = j.entries;
       refreshDirFavBtn();
       renderFilesPage();
@@ -2037,13 +2097,16 @@ footer button.icon {
     const idx = norm.lastIndexOf("/");
     const dir = idx > 0 ? norm.slice(0, idx) : "/";
     const base = norm.slice(idx + 1);
-    filesPathEl.value = dir;
+    setPathBox(dir);
     filesFilterEl.value = base;
     await loadFilesDir(dir, 0, base);   // server search → file shows on page 1
     const ent = filesLastEntries.find(e => !e.is_dir && e.name === base);
     if (ent) previewFile(dir.replace(/\/$/, "") + "/" + base, ent.kind);
   }
   filesGo.addEventListener("click", filesGoSubmit);
+  document.getElementById("files-path-clear").addEventListener("click", () => {
+    filesPathEl.value = ""; filesPathEl.focus();
+  });
   document.getElementById("files-fav-dir").addEventListener("click", () => {
     if (!filesCurDir) return;
     const name = filesCurDir.replace(/\/+$/, "").split("/").pop() || filesCurDir;
@@ -3123,12 +3186,12 @@ footer button.icon {
       else if (Array.isArray(content)) {
         text = content.filter(p => p && p.type === "text" && p.text).map(p => p.text).join("\n\n");
       }
-      if (text.trim()) yield { kind: "text", role, text, idx, round, ts, sid, queued: !!entry._queued };
+      if (text.trim()) yield { kind: "text", role, text, idx, round, ts, sid, queued: !!entry._queued, system: !!entry._system };
       return;
     }
     // all mode
     if (typeof content === "string") {
-      if (content.trim()) yield { kind: "text", role, text: content, idx, round, ts, sid };
+      if (content.trim()) yield { kind: "text", role, text: content, idx, round, ts, sid, system: !!entry._system };
       return;
     }
     if (!Array.isArray(content)) return;
@@ -3267,8 +3330,8 @@ footer button.icon {
     // and add buttons afterwards.
 
     if (b.kind === "text") {
-      div.className = "msg " + b.role;
-      label.textContent = b.role === "user" ? "You" : "Claude";
+      div.className = "msg " + (b.system ? "system" : b.role);
+      label.textContent = b.system ? "System" : (b.role === "user" ? "You" : "Claude");
       const md = document.createElement("div"); md.className = "markdown";
       md.innerHTML = renderMarkdown(b.text);
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
@@ -3460,6 +3523,30 @@ footer button.icon {
   //                  tap → one-shot fetch; stay paused if nothing new
   //   claudeIdle   → "claude idle · tap to refresh"       (red)
   //                  tap → one-shot fetch; stay idle if nothing new
+  // "tail screen" pill — peek at the last few lines of the live terminal in a
+  // small bottom-left box (refresh=false → no Ctrl+L, doesn't disturb the tab).
+  const tailBtn = document.getElementById("tail-screen-btn");
+  const tailBox = document.getElementById("tail-box");
+  const tailPre = document.getElementById("tail-pre");
+  const tailClose = document.getElementById("tail-close");
+  const TAIL_CONTEXT = 7;   // content lines to show ABOVE the input box
+  // The slice is done SERVER-SIDE (tail=N) so only the ~dozen short lines are
+  // sent, not the whole full-width screen — saves phone bandwidth.
+  async function tailScreen() {
+    if (!attachedSid) return;
+    tailBox.style.display = "block";
+    try {
+      const resp = await authedFetch("/api/screen?refresh=false&tail=" + TAIL_CONTEXT
+        + "&claude_session_id=" + encodeURIComponent(attachedSid));
+      if (!resp.ok) { tailPre.textContent = "Error: " + resp.status; return; }
+      const j = await resp.json();
+      tailPre.textContent = j.screen || "(empty)";
+    } catch (e) { tailPre.textContent = "Error: " + e; }
+  }
+  tailBtn.addEventListener("click", (e) => { e.stopPropagation(); tailScreen(); });
+  document.getElementById("tail-refresh").addEventListener("click", (e) => { e.stopPropagation(); tailScreen(); });
+  tailClose.addEventListener("click", (e) => { e.stopPropagation(); tailBox.style.display = "none"; });
+
   autoloadEl.addEventListener("click", async (e) => {
     e.stopPropagation();
     if (!isPaused && !claudeIdle) {
