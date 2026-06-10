@@ -459,14 +459,27 @@ header .battery:hover { color: var(--text); }
 
 #autoload {
   display: none; justify-content: center; align-items: center; gap: 8px;
-  padding: 10px 0 4px 0; cursor: pointer;
+  flex-wrap: wrap; padding: 10px 0 4px 0; cursor: pointer;
 }
-#autoload #tail-screen-btn {
-  background: var(--panel); color: var(--muted);
-  border: 1px solid var(--border); border-radius: 999px;
-  padding: 6px 12px; font-size: 11px; cursor: pointer; white-space: nowrap;
+/* Combined segmented pill: [ tail screen | A+ | A− ] — saves space. */
+#autoload #tail-controls {
+  display: inline-flex; align-items: center;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 999px;
 }
-#autoload #tail-screen-btn:hover { border-color: var(--accent); color: var(--text); }
+#autoload #tail-controls button {
+  background: transparent; border: none; color: var(--muted);
+  padding: 6px 11px; font-size: 11px; line-height: 1; cursor: pointer;
+  white-space: nowrap; border-radius: 999px;
+}
+/* Highlight only the active SEGMENT (orange outline on that button), not the
+   whole pill — the container border stays neutral. */
+#autoload #tail-controls button:hover,
+#autoload #tail-controls button:focus,
+#autoload #tail-controls button:active {
+  color: var(--text); background: var(--panel2);
+  box-shadow: inset 0 0 0 1px var(--accent); outline: none;
+}
+#autoload #tail-controls .tc-sep { color: var(--border); font-size: 11px; user-select: none; }
 /* Bottom-left peek at the last lines of the live terminal. */
 #tail-box {
   position: fixed; left: 50%; transform: translateX(-50%); bottom: 76px; z-index: 60;
@@ -1154,7 +1167,13 @@ footer button.icon {
           <span class="dot"></span><span class="dot"></span><span class="dot"></span>
           <span id="autoload-label" style="margin-left:6px">auto-refreshing · tap to stop</span>
         </span>
-        <button id="tail-screen-btn" title="Peek at the last lines of the live terminal">tail screen</button>
+        <span id="tail-controls">
+          <button id="tail-screen-btn" title="Peek at the last lines of the live terminal">tailScr</button>
+          <span class="tc-sep">|</span>
+          <button id="tail-fontup" title="bigger chat font">A</button>
+          <span class="tc-sep">|</span>
+          <button id="tail-fontdown" title="smaller chat font">a</button>
+        </span>
       </div>
     </div>
     <div id="tail-box" style="display:none">
@@ -1518,6 +1537,7 @@ footer button.icon {
 
   // ---------- views ----------
   function showPicker() {
+    clearSessionHash();
     pickerEl.classList.add("show");
     tvEl.classList.remove("show");
     footerEl.classList.add("hidden");
@@ -2794,9 +2814,31 @@ footer button.icon {
     alert("Unexpected: " + JSON.stringify(data));
   }
 
+  // Reflect the open session in the URL hash (#s=<sid>) so a refresh re-opens
+  // it instead of dropping back to the picker.
+  function setSessionHash(sid) {
+    try { history.replaceState(null, "", "#s=" + encodeURIComponent(sid)); } catch {}
+  }
+  function clearSessionHash() {
+    try { history.replaceState(null, "", location.pathname + location.search); } catch {}
+  }
+  function sessionFromHash() {
+    const m = (location.hash || "").match(/[#&]s=([^&]+)/);
+    return m ? decodeURIComponent(m[1]) : "";
+  }
+  // After login: if the URL points at a session, re-open it; else the picker.
+  // Show the picker first as a safe base (so a stale/failed attach doesn't
+  // leave a blank page), then re-attach over it.
+  function openFromHash() {
+    const sid = sessionFromHash();   // capture before showPicker clears the hash
+    showPicker();
+    if (sid) attachSession(sid, "");
+  }
+
   function enterTranscript(sid, label) {
     attachedSid = sid;
     attachedShort = (sid || "").slice(0, 4);
+    setSessionHash(sid);
     metaEl.textContent = label || sid.slice(0, 8);
     entryCache = []; lastIdx = null; earliestIdxLoaded = null; hasMoreHistory = false;
     claudeIdle = false; isPaused = false;
@@ -3537,6 +3579,20 @@ footer button.icon {
   const TAIL_CONTEXT = 7;   // content lines to show ABOVE the input box
   // The slice is done SERVER-SIDE (tail=N) so only the ~dozen short lines are
   // sent, not the whole full-width screen — saves phone bandwidth.
+  // A+/A− resize the CHAT MESSAGES (the transcript), scaled + persisted.
+  let chatScale = parseFloat(localStorage.getItem("cc_web_chat_scale") || "1") || 1;
+  function applyChatScale(scroll) {
+    chatScale = Math.round(Math.max(0.7, Math.min(2.0, chatScale)) * 10) / 10;
+    // zoom (not font-size): messages use fixed-px fonts, so font-size wouldn't
+    // cascade — zoom scales the whole transcript proportionally. Supported in
+    // Safari/Chrome (the targets).
+    transcriptEl.style.zoom = chatScale;
+    localStorage.setItem("cc_web_chat_scale", String(chatScale));
+    // After a resize, jump to the bottom (latest message). The pill row lives
+    // at the very bottom of the scroll area, so it stays exposed.
+    if (scroll) requestAnimationFrame(() => { mainEl.scrollTop = mainEl.scrollHeight; });
+  }
+  applyChatScale();
   async function tailScreen() {
     if (!attachedSid) return;
     tailBox.style.display = "block";
@@ -3548,9 +3604,12 @@ footer button.icon {
       tailPre.textContent = j.screen || "(empty)";
     } catch (e) { tailPre.textContent = "Error: " + e; }
   }
+  document.getElementById("tail-controls").addEventListener("click", (e) => e.stopPropagation());
   tailBtn.addEventListener("click", (e) => { e.stopPropagation(); tailScreen(); });
   document.getElementById("tail-refresh").addEventListener("click", (e) => { e.stopPropagation(); tailScreen(); });
   tailClose.addEventListener("click", (e) => { e.stopPropagation(); tailBox.style.display = "none"; });
+  document.getElementById("tail-fontup").addEventListener("click", (e) => { e.stopPropagation(); chatScale += 0.1; applyChatScale(true); });
+  document.getElementById("tail-fontdown").addEventListener("click", (e) => { e.stopPropagation(); chatScale -= 0.1; applyChatScale(true); });
 
   autoloadEl.addEventListener("click", async (e) => {
     e.stopPropagation();
@@ -3901,7 +3960,7 @@ footer button.icon {
     if (!await tryLogin(authToken)) {
       authToken = ""; localStorage.removeItem(TOKEN_KEY); showLogin(false); return;
     }
-    showPicker();
+    openFromHash();
   }
   start();
 })();
