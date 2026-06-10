@@ -1623,10 +1623,15 @@ footer button.icon {
       const tabs = j.tabs || [];
       tabsListEl.textContent = "";
       if (!tabs.length) { tabsListEl.textContent = "(no tabs)"; return; }
+      // Totals for "wN/total·tM/total" labels: count of windows, and tabs per window.
+      const totalW = new Set(tabs.map(t => t.window_index)).size;
+      const tabsPerWin = {};
+      for (const t of tabs) tabsPerWin[t.window_index] = (tabsPerWin[t.window_index] || 0) + 1;
       for (const t of tabs) {
         const row = document.createElement("div"); row.className = "tab-row";
         const sel = document.createElement("button"); sel.className = "tab-sel";
-        const label = `w${t.window_index}·t${t.tab_index}  ${t.name || "(unnamed)"}`;
+        const wPart = totalW > 1 ? `w${t.window_index + 1}/${totalW}·` : "";
+        const label = `${wPart}t${t.tab_index + 1}/${tabsPerWin[t.window_index]}  ${t.name || "(unnamed)"}`;
         if (t.is_claude) {
           const dot = document.createElement("span");
           dot.className = "claude-dot"; dot.textContent = "●";
@@ -2461,7 +2466,7 @@ footer button.icon {
       appendInfoRow(infoBody, "named", j.named ? "yes" : "no");
       if (j.binding) {
         appendInfoRow(infoBody, "pid", j.binding.pid);
-        appendInfoRow(infoBody, "iterm tab", "win " + j.binding.window_index + " · tab " + j.binding.tab_index);
+        appendInfoRow(infoBody, "iterm tab", "win " + (j.binding.window_index + 1) + " · tab " + (j.binding.tab_index + 1));
         appendInfoRow(infoBody, "iterm sid", j.binding.iterm_session_id);
         if (j.binding.bound_at) {
           const d = new Date(j.binding.bound_at * 1000);

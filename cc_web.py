@@ -1295,9 +1295,11 @@ NAMED_TOP_N = 5
 UNNAMED_TOP_N = 5
 
 
-def build_picker_sessions() -> list[dict]:
-    """Top 5 named (by JSONL mtime) + up to 5 recent unnamed (within 24h).
-    Pure filesystem, no iTerm2."""
+def build_picker_sessions(min_unnamed: int = UNNAMED_TOP_N) -> list[dict]:
+    """Top 5 named (by JSONL mtime) + recent unnamed (within 24h). Pure
+    filesystem, no iTerm2. `min_unnamed` raises the unnamed cap to at least that
+    many (the caller passes the open-claude-tab count, so every running unnamed
+    session — the most-recently-written ones — is reachable from the picker)."""
     import datetime as _dt
     titles = {e["session_id"]: e for e in load_session_index()}
     cutoff = _time.time() - ACTIVE_WITHIN_SEC
@@ -1323,7 +1325,7 @@ def build_picker_sessions() -> list[dict]:
     items: list[tuple[float, Path, Optional[dict]]] = []
     for mtime, jsonl, named in named_items[:NAMED_TOP_N]:
         items.append((mtime, jsonl, named))
-    for mtime, jsonl in unnamed_items[:UNNAMED_TOP_N]:
+    for mtime, jsonl in unnamed_items[:max(UNNAMED_TOP_N, min_unnamed)]:
         items.append((mtime, jsonl, None))
     items.sort(key=lambda x: x[0], reverse=True)
     bound_ids = bindings.bound_session_ids()
@@ -1966,10 +1968,16 @@ def _get_battery() -> Optional[dict]:
 
 @app.get("/api/sessions", dependencies=[Depends(require_token)])
 async def get_sessions():
-    """Picker list — pure filesystem. Each entry has 'bound' = True iff there's
-    an active pid binding for that session_id."""
+    """Picker list. Each entry has 'bound' = True iff there's an active pid
+    binding for that session_id. We surface at least as many unnamed sessions
+    as there are open claude tabs, so every running session is reachable."""
+    try:
+        await bridge.ensure_connected()
+        n_claude_tabs = len(await bridge.list_claude_tabs())
+    except Exception:
+        n_claude_tabs = 0
     return {
-        "sessions": build_picker_sessions(),
+        "sessions": build_picker_sessions(min_unnamed=n_claude_tabs),
         "battery": _get_battery(),
     }
 
