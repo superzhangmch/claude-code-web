@@ -140,7 +140,7 @@ main {
   background: #2a1a14; border: 1px solid #ff8b6a; color: #ffb499;
   font-size: 12px; line-height: 1.4;
 }
-/* Group delimiter between session groups (Attached / Recent / Named). */
+/* Group delimiter between session groups (Tabs / Recent / Named). */
 #picker-list .group-delim {
   display: flex; align-items: center; gap: 8px;
   margin: 14px 2px 6px; color: var(--muted);
@@ -2647,7 +2647,11 @@ footer button.icon {
       return;
     }
     pickerListEl.innerHTML = "";
-    const GROUP_TITLES = { attached: "Attached", recent: "Recent", named: "Named" };
+    const GROUP_TITLES = { tabs: "Tabs", recent: "Recent", named: "Named" };
+    // Single-window? then the "tabs" title can omit the wX part (just tY).
+    const tabWins = new Set(sessions.filter(s => s.group === "tabs")
+      .map(s => s.window_index || 0));
+    const tabsSingleWin = tabWins.size <= 1;
     let lastGroup = null;
     for (const s of sessions) {
       if (s.group !== lastGroup) {
@@ -2664,10 +2668,17 @@ footer button.icon {
       const title = document.createElement("span");
       title.className = "title";
       const sidPrefix = `[${s.claude_session_id.slice(0, 4)}] `;
-      // Attached: show the iTerm tab name. Otherwise: title / last / first msg.
-      title.textContent = sidPrefix + ((s.group === "attached" && s.tab_name)
-        ? s.tab_name
-        : (s.title || (s.last_user_msg || s.first_user_msg || "(no messages yet)").slice(0, 80)));
+      // Tabs group: [sid] wXtY (omit wX when there's a single window).
+      // Otherwise: title / last / first msg.
+      if (s.group === "tabs") {
+        const wt = tabsSingleWin
+          ? `t${(s.tab_index || 0) + 1}`
+          : `w${(s.window_index || 0) + 1}t${(s.tab_index || 0) + 1}`;
+        title.textContent = sidPrefix + wt + (s.tab_name ? ` ${s.tab_name}` : "");
+      } else {
+        title.textContent = sidPrefix + (s.title
+          || (s.last_user_msg || s.first_user_msg || "(no messages yet)").slice(0, 80));
+      }
       const time = document.createElement("span");
       time.className = "time";
       time.textContent = s.last_visit;
@@ -2783,6 +2794,29 @@ footer button.icon {
           refreshPicker();
         });
         attachRow.appendChild(detachBtn);
+      }
+      // Close: only on live tabs (we have the iTerm session id). Detaches,
+      // exits claude, and closes the tab when no background jobs remain.
+      if (s.group === "tabs" && s.iterm_session_id) {
+        const closeBtn = document.createElement("button");
+        closeBtn.textContent = "Close";
+        closeBtn.className = "detach";
+        closeBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          if (!confirm("Close this tab? Exits claude, then closes the iTerm tab if no background jobs are running.")) return;
+          closeBtn.disabled = true; closeBtn.textContent = "Closing…";
+          const r = await authedFetch("/api/close-tab", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ claude_session_id: s.claude_session_id,
+                                   iterm_session_id: s.iterm_session_id }),
+          });
+          if (!r.ok) { alert("Close failed: " + await r.text()); closeBtn.disabled = false; closeBtn.textContent = "Close"; return; }
+          const j = await r.json().catch(() => ({}));
+          if (j && j.tab_closed === false && j.detail) alert(j.detail);
+          refreshPicker();
+        });
+        attachRow.appendChild(closeBtn);
       }
       const attachBtn = document.createElement("button");
       attachBtn.textContent = s.bound ? "Enter" : "Attach";

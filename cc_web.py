@@ -1387,7 +1387,7 @@ UNNAMED_TOP_N = 5
 
 
 def _session_dict(jsonl: Path, mtime: float, named: Optional[dict],
-                  group: str, tab_info: dict) -> dict:
+                  group: str, live_tab: Optional[dict] = None) -> dict:
     import datetime as _dt
     sid = jsonl.stem
     try:
@@ -1403,7 +1403,7 @@ def _session_dict(jsonl: Path, mtime: float, named: Optional[dict],
         "claude_session_id": sid,
         "title": (named.get("title") if named else ""),
         "project_path": (named.get("project_path") if named else "") or _project_path_from_jsonl(jsonl) or "",
-        "last_visit": _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M"),
+        "last_visit": _dt.datetime.fromtimestamp(mtime).strftime("%m-%d %H:%M"),
         "file_size": file_size,
         "first_user_msg": ctx["first_user_msg"],
         "first_ts": ctx["first_ts"],
@@ -1415,24 +1415,25 @@ def _session_dict(jsonl: Path, mtime: float, named: Optional[dict],
         "binding": _serialize_binding(binding_info) if (binding_info and is_bound) else None,
         "group": group,
     }
-    # Attached cards show the live iTerm tab name + window/tab (for sort/display).
-    if group == "attached" and binding_info:
-        info = tab_info.get(binding_info.iterm_session_id) or {}
-        d["tab_name"] = info.get("name", "")
-        d["window_index"] = info.get("window_index", binding_info.window_index)
-        d["tab_index"] = info.get("tab_index", binding_info.tab_index)
+    # "tabs" cards carry the live iTerm tab name + window/tab (title + sort)
+    # and the iterm session id so the frontend can Close the tab directly.
+    if group == "tabs" and live_tab:
+        d["tab_name"] = live_tab.get("name", "")
+        d["window_index"] = live_tab.get("window_index", 0)
+        d["tab_index"] = live_tab.get("tab_index", 0)
+        d["iterm_session_id"] = live_tab.get("iterm_session_id", "")
     return d
 
 
-def build_picker_sessions(tab_info: Optional[dict] = None,
+def build_picker_sessions(live_tabs: Optional[list[dict]] = None,
                           recent_n: int = 10, named_n: int = 5) -> list[dict]:
     """Three groups, in order, each session tagged with `group`:
-      (1) attached — bound & alive sessions, sorted by live window/tab, with the
-          iTerm tab name;
-      (2) recent  — up to `recent_n` most-recent sessions (excl. attached);
+      (1) tabs    — every live iTerm2 claude tab (resolved to a session-id via
+                    the claude session store), sorted by window/tab;
+      (2) recent  — up to `recent_n` most-recent sessions (excl. tabs);
       (3) named   — up to `named_n` most-recent named sessions (excl. the above).
     The frontend draws a delimiter when `group` changes."""
-    tab_info = tab_info or {}
+    live_tabs = live_tabs or []
     titles = {e["session_id"]: e for e in load_session_index()}
     all_items: list[tuple[float, Path, str]] = []
     if PROJECTS_ROOT.exists():
@@ -1446,34 +1447,40 @@ def build_picker_sessions(tab_info: Optional[dict] = None,
                     continue
                 all_items.append((mtime, jsonl, jsonl.stem))
     all_items.sort(key=lambda x: x[0], reverse=True)
+    mtime_by_sid = {sid: mt for mt, _, sid in all_items}
 
-    bound_ids = {b.claude_session_id for b in bindings.all() if verify_binding(b)}
     seen: set[str] = set()
     out: list[dict] = []
 
-    # (1) attached — sorted by live window/tab (fallback to binding's stored).
-    def _wt(item: tuple) -> tuple:
-        b = bindings.get_by_session(item[2])
-        info = tab_info.get(b.iterm_session_id, {}) if b else {}
-        return (info.get("window_index", b.window_index if b else 0),
-                info.get("tab_index", b.tab_index if b else 0))
-    for mtime, jsonl, sid in sorted([it for it in all_items if it[2] in bound_ids], key=_wt):
-        out.append(_session_dict(jsonl, mtime, titles.get(sid), "attached", tab_info))
+    # (1) tabs — EVERY live claude tab, sorted by window/tab. The store gives us
+    # the ground-truth pid->session-id map, so we list them directly (a tab may
+    # have no transcript yet — fresh claude only writes the JSONL on first msg).
+    def _encode_cwd(cwd: str) -> str:
+        return cwd.rstrip("/").replace("/", "-").replace("_", "-")
+    for lt in sorted(live_tabs, key=lambda x: (x.get("window_index", 0),
+                                               x.get("tab_index", 0))):
+        sid = lt.get("sid")
+        if not sid or sid in seen:
+            continue
+        jsonl = find_jsonl_for_session(sid) or (
+            PROJECTS_ROOT / _encode_cwd(lt.get("cwd", "")) / f"{sid}.jsonl")
+        mtime = mtime_by_sid.get(sid, 0.0)
+        out.append(_session_dict(jsonl, mtime, titles.get(sid), "tabs", live_tab=lt))
         seen.add(sid)
 
     # Browse groups skip "empty" sessions (<=1 round) — declutters the list of
-    # just-spawned / abandoned sessions. Attached (live/bound) is never filtered.
+    # just-spawned / abandoned sessions. The tabs group (live) is never filtered.
     def _empty(d: dict) -> bool:
         return len(d.get("exchanges") or []) <= 1
 
-    # (2) recent — most recent non-empty, excluding attached.
+    # (2) recent — most recent non-empty, excluding live tabs.
     n = 0
     for mtime, jsonl, sid in all_items:
         if n >= recent_n:
             break
         if sid in seen:
             continue
-        d = _session_dict(jsonl, mtime, titles.get(sid), "recent", tab_info)
+        d = _session_dict(jsonl, mtime, titles.get(sid), "recent")
         seen.add(sid)
         if _empty(d):
             continue
@@ -1486,7 +1493,7 @@ def build_picker_sessions(tab_info: Optional[dict] = None,
             break
         if sid in seen or titles.get(sid) is None:
             continue
-        d = _session_dict(jsonl, mtime, titles.get(sid), "named", tab_info)
+        d = _session_dict(jsonl, mtime, titles.get(sid), "named")
         seen.add(sid)
         if _empty(d):
             continue
@@ -1903,6 +1910,11 @@ class DetachPayload(BaseModel):
     claude_session_id: str
 
 
+class CloseTabPayload(BaseModel):
+    claude_session_id: str
+    iterm_session_id: Optional[str] = None
+
+
 class InputPayload(BaseModel):
     claude_session_id: str
     text: str
@@ -2100,24 +2112,34 @@ def _get_battery() -> Optional[dict]:
 
 @app.get("/api/sessions", dependencies=[Depends(require_token)])
 async def get_sessions():
-    """Picker list, grouped: attached / recent / named. Looks up live iTerm tabs
-    so attached sessions can show their tab name and sort by window/tab. Recent
-    is at least the open-claude-tab count, so every running session is reachable."""
-    tab_info: dict = {}
-    n_claude_tabs = 0
+    """Picker list, grouped: tabs / recent / named. The "tabs" group lists EVERY
+    live iTerm2 claude tab, resolved to its session-id via the claude session
+    store (ground-truth pid->session map); recent/named browse the transcripts."""
+    live_tabs: list[dict] = []
     try:
         await bridge.ensure_connected()
-        for t in await bridge.list_all_tabs():
-            tab_info[t.get("iterm_session_id")] = t
-            if t.get("is_claude"):
-                n_claude_tabs += 1
+        for t in await bridge.list_claude_tabs():
+            meta = _claude_session_meta(t.pid)
+            sid = (meta or {}).get("sessionId") or (t.claude_session_id or "")
+            if not sid:
+                continue
+            live_tabs.append({
+                "sid": sid,
+                "name": t.name,
+                "pid": t.pid,
+                "cwd": t.cwd or "",
+                "iterm_session_id": t.iterm_session_id,
+                "window_index": t.window_index,
+                "tab_index": t.tab_index,
+            })
     except Exception:
         pass
+    n_claude_tabs = len(live_tabs)
     store = _claude_store_health(n_claude_tabs)
     if store.get("ok") is False:
         log.warning("claude session-store changed? %s", store.get("detail"))
     return {
-        "sessions": build_picker_sessions(tab_info=tab_info,
+        "sessions": build_picker_sessions(live_tabs=live_tabs,
                                           recent_n=max(10, n_claude_tabs)),
         "battery": _get_battery(),
         "claude_store": store,
@@ -2630,6 +2652,62 @@ async def post_tab_attach(payload: TabAttachPayload):
 async def post_detach(payload: DetachPayload):
     bindings.remove_session(payload.claude_session_id)
     return {"ok": True}
+
+
+@app.post("/api/close-tab", dependencies=[Depends(require_token)])
+async def post_close_tab(payload: CloseTabPayload):
+    """Close the iTerm2 tab for a session, the safe way:
+      1. detach (drop our binding);
+      2. send `/exit`+Enter so claude tears down cleanly -> back to the shell;
+      3. ask the shell for its background-job count (sentinel echo);
+      4. only if there are NO background jobs, send `exit` to close the tab.
+    If we can't read the job count, or jobs remain, we leave the tab open and
+    say so — never close a tab that still has work running behind it."""
+    sid = payload.claude_session_id
+    b = bindings.get_by_session(sid)
+    iterm_id = payload.iterm_session_id or (b.iterm_session_id if b else None)
+
+    # 1. detach
+    bindings.remove_session(sid)
+    if not iterm_id:
+        return {"ok": True, "detached": True, "tab_closed": False,
+                "detail": "no iTerm session id — detached only"}
+
+    try:
+        await bridge.ensure_connected()
+        # 2. exit claude -> shell prompt
+        await bridge.send_text_to(iterm_id, "/exit\r")
+        await asyncio.sleep(1.3)  # let claude tear down and the shell redraw
+
+        # 3. background-job count via a sentinel the echo'd command can't match
+        #    (command line shows `=$(...)`, the OUTPUT line shows `=<digits>`).
+        marker = "CCWEB_JOBS"
+        await bridge.send_text_to(
+            iterm_id, f"echo {marker}=$(jobs 2>/dev/null | wc -l | tr -d ' ')\r")
+        await asyncio.sleep(0.6)
+        # NB: refresh=False — we're in a plain shell now, not claude's TUI, so
+        # a Ctrl+L "refresh" would CLEAR the screen and wipe the marker output.
+        screen = await bridge.get_screen_for(iterm_id, max_lines=80,
+                                             refresh=False, strip_input=False)
+        njobs = None
+        for line in reversed((screen or "").splitlines()):
+            m = re.search(rf"{marker}=(\d+)", line)
+            if m:
+                njobs = int(m.group(1)); break
+
+        if njobs is None:
+            return {"ok": True, "detached": True, "tab_closed": False,
+                    "detail": "claude exited; couldn't read job count — tab left open"}
+        if njobs > 0:
+            return {"ok": True, "detached": True, "tab_closed": False, "jobs": njobs,
+                    "detail": f"{njobs} background job(s) running — tab left open"}
+
+        # 4. clean shell, no jobs -> close the tab
+        await bridge.send_text_to(iterm_id, "exit\r")
+        return {"ok": True, "detached": True, "tab_closed": True, "jobs": 0}
+    except Exception as e:
+        return {"ok": True, "detached": True, "tab_closed": False,
+                "detail": f"detached; close failed: {e}"}
 
 
 @app.post("/api/reverify", dependencies=[Depends(require_token)])
