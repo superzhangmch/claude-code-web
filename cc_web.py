@@ -44,6 +44,14 @@ log = logging.getLogger("ccweb")
 STATIC_DIR = Path(__file__).parent / "static"
 SESSION_INDEX_PATH = Path.home() / ".claude" / "session_index.json"
 PROJECTS_ROOT = Path.home() / ".claude" / "projects"
+# claude-code's OWN per-process state, written by each running `claude`:
+#   ~/.claude/sessions/<pid>.json = {pid, sessionId, cwd, procStart, status,
+#                                    name, kind, version, ...}
+# This is an authoritative pid <-> sessionId map — our PRIMARY binding resolver.
+# It's claude-internal (version-dependent), so every use degrades gracefully to
+# the legacy pipeline (argv --resume / marker / fingerprint / LLM) if the dir or
+# a file is missing/changed.
+CLAUDE_SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 CONF_PATH = Path.home() / ".claude" / "cc_web.conf"
 UPLOAD_DIR = Path.home() / ".claude" / "cc_web_uploads"
 UPLOAD_MAX_BYTES = 15 * 1024 * 1024
@@ -291,6 +299,72 @@ def find_jsonl_for_session(session_id: str) -> Optional[Path]:
         if candidate.exists():
             return candidate
     return None
+
+
+def _claude_session_meta(pid: int) -> Optional[dict]:
+    """claude's own record for `pid` (~/.claude/sessions/<pid>.json), or None.
+    Authoritative pid → sessionId. Caller must treat None as 'fall back to the
+    legacy resolver' (the file is claude-version-dependent)."""
+    try:
+        d = json.loads((CLAUDE_SESSIONS_DIR / f"{pid}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) and d.get("sessionId") else None
+
+
+def _claude_store_health(n_claude_tabs: int) -> dict:
+    """cc_web's binding now leans on claude's UNDOCUMENTED ~/.claude/sessions/
+    store. Principle: don't silently depend on claude internals — detect when
+    they change and surface it. Returns {ok, detail}: ok=False means claude is
+    running but the store yields no usable live entry (dir moved / renamed /
+    schema changed in a claude update) → we've fallen back to heuristics.
+    `ok` is None when we can't assess (no claude tabs)."""
+    if n_claude_tabs <= 0:
+        return {"ok": None, "detail": "no running claude tabs to check against"}
+    if not CLAUDE_SESSIONS_DIR.exists():
+        return {"ok": False, "detail": f"{CLAUDE_SESSIONS_DIR} is gone — claude no longer writes it"}
+    live_valid = 0
+    try:
+        files = list(CLAUDE_SESSIONS_DIR.glob("*.json"))
+    except OSError:
+        files = []
+    for f in files:
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict) and d.get("sessionId") and isinstance(d.get("pid"), int):
+            try:
+                os.kill(d["pid"], 0)
+                live_valid += 1
+            except OSError:
+                pass
+    if live_valid == 0:
+        return {"ok": False,
+                "detail": f"{n_claude_tabs} claude tab(s) running but the session "
+                          "store has no live entry — its format likely changed; "
+                          "binding fell back to heuristics"}
+    return {"ok": True, "detail": f"{live_valid} live store entr(ies)"}
+
+
+def _pids_for_session(sid: str) -> list[int]:
+    """Reverse-scan claude's session store for pid(s) running `sid`, most
+    recently-updated first (a session can have several — parent + current).
+    Empty if the session isn't currently running (→ caller resumes)."""
+    out: list[tuple[float, int]] = []
+    try:
+        files = list(CLAUDE_SESSIONS_DIR.glob("*.json"))
+    except OSError:
+        return []
+    for f in files:
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict) and d.get("sessionId") == sid and isinstance(d.get("pid"), int):
+            out.append((d.get("updatedAt", 0) or 0, d["pid"]))
+    out.sort(reverse=True)
+    return [pid for _, pid in out]
 
 
 # ---------- fingerprint scoring (the heart of attach verification) ----------
@@ -940,6 +1014,23 @@ _last_input_ts: dict[str, float] = {}
 PENDING_CONFIRM_IDLE_SEC = 6.0
 
 
+def _collapse_blanks(text: str) -> str:
+    """Collapse runs of blank lines to a single blank line — for the screen
+    viewers (claude's TUI leaves lots of vertical padding)."""
+    out: list[str] = []
+    blank = False
+    for ln in (text or "").split("\n"):
+        if ln.strip() == "":
+            if blank:
+                continue
+            blank = True
+            out.append("")
+        else:
+            blank = False
+            out.append(ln)
+    return "\n".join(out)
+
+
 def _is_dash_run(s: str) -> bool:
     """A horizontal rule line — a run of >=8 box/ascii dashes, nothing else."""
     s = s.strip()
@@ -965,7 +1056,7 @@ def _screen_tail(screen: str, context: int = 7) -> str:
             top = i
             break
     out = lines[-context:] if top < 0 else lines[max(0, top - context):]
-    return "\n".join("────────" if _is_dash_run(l) else l.rstrip() for l in out)
+    return _collapse_blanks("\n".join("────────" if _is_dash_run(l) else l.rstrip() for l in out))
 
 
 def _strip_prompt_box(lines: list[str]) -> list[str]:
@@ -1370,25 +1461,36 @@ def build_picker_sessions(tab_info: Optional[dict] = None,
         out.append(_session_dict(jsonl, mtime, titles.get(sid), "attached", tab_info))
         seen.add(sid)
 
-    # (2) recent — most recent, excluding attached.
+    # Browse groups skip "empty" sessions (<=1 round) — declutters the list of
+    # just-spawned / abandoned sessions. Attached (live/bound) is never filtered.
+    def _empty(d: dict) -> bool:
+        return len(d.get("exchanges") or []) <= 1
+
+    # (2) recent — most recent non-empty, excluding attached.
     n = 0
     for mtime, jsonl, sid in all_items:
         if n >= recent_n:
             break
         if sid in seen:
             continue
-        out.append(_session_dict(jsonl, mtime, titles.get(sid), "recent", tab_info))
-        seen.add(sid); n += 1
+        d = _session_dict(jsonl, mtime, titles.get(sid), "recent", tab_info)
+        seen.add(sid)
+        if _empty(d):
+            continue
+        out.append(d); n += 1
 
-    # (3) named — most recent named, excluding the above.
+    # (3) named — most recent non-empty named, excluding the above.
     n = 0
     for mtime, jsonl, sid in all_items:
         if n >= named_n:
             break
         if sid in seen or titles.get(sid) is None:
             continue
-        out.append(_session_dict(jsonl, mtime, titles.get(sid), "named", tab_info))
-        seen.add(sid); n += 1
+        d = _session_dict(jsonl, mtime, titles.get(sid), "named", tab_info)
+        seen.add(sid)
+        if _empty(d):
+            continue
+        out.append(d); n += 1
 
     return out
 
@@ -1809,6 +1911,7 @@ class InputPayload(BaseModel):
 
 class NewSessionPayload(BaseModel):
     cwd: str
+    name: str = ""
 
 
 class UploadFileItem(BaseModel):
@@ -2010,10 +2113,14 @@ async def get_sessions():
                 n_claude_tabs += 1
     except Exception:
         pass
+    store = _claude_store_health(n_claude_tabs)
+    if store.get("ok") is False:
+        log.warning("claude session-store changed? %s", store.get("detail"))
     return {
         "sessions": build_picker_sessions(tab_info=tab_info,
                                           recent_n=max(10, n_claude_tabs)),
         "battery": _get_battery(),
+        "claude_store": store,
     }
 
 
@@ -2200,6 +2307,20 @@ async def post_attach(payload: AttachPayload):
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
 
     refs = await bridge.list_claude_tabs()
+
+    # PRIMARY resolver: claude's own pid<->session store. If claude reports a
+    # live pid running this session, the tab with that pid IS it — authoritative,
+    # no cwd/argv/screen/LLM guessing. (Empty when the session isn't running →
+    # fall through to the legacy pipeline, which ends in not_running → resume.)
+    for store_pid in _pids_for_session(sid):
+        store_ref = next((r for r in refs if r.pid == store_pid), None)
+        if store_ref:
+            b = _build_binding(sid, store_ref, jsonl)
+            if b:
+                bindings.insert(b)
+                return {"result": "bound", "binding": _serialize_binding(b),
+                        "auto_bind_reason": "claude_session_store"}
+
     # Restrict to candidates whose cwd is one the session has used. Match
     # against ALL cwds seen in the JSONL (not just the latest) because a
     # session can move between dirs — the live tab may sit in any of them.
@@ -2438,6 +2559,20 @@ async def post_tab_attach(payload: TabAttachPayload):
                 "claude_session_id": existing.claude_session_id,
                 "tab_attach_reason": "already_bound"}
 
+    # 0. PRIMARY: claude's own pid→session store. For a live tab pid this is
+    # authoritative — no argv/screen/LLM needed. (None → fall through.)
+    meta = _claude_session_meta(ref.pid)
+    if meta and meta.get("sessionId"):
+        sid = meta["sessionId"]
+        jsonl = find_jsonl_for_session(sid)
+        if jsonl:
+            b = _build_binding(sid, ref, jsonl)
+            if b:
+                bindings.insert(b)
+                return {"result": "bound", "binding": _serialize_binding(b),
+                        "claude_session_id": sid,
+                        "tab_attach_reason": "claude_session_store"}
+
     # 1. argv --resume is definitive.
     if ref.claude_session_id:
         jsonl = find_jsonl_for_session(ref.claude_session_id)
@@ -2522,6 +2657,15 @@ async def get_state(
     if not verify_binding(b):
         bindings.remove_session(claude_session_id)
         raise HTTPException(status_code=410, detail="tab/pid is gone")
+
+    # Self-heal: if the bound JSONL path doesn't exist (e.g. it was bound to an
+    # expected path before claude wrote the file, or an encoding guess was off),
+    # re-resolve the real one by session id and update the binding.
+    if b.jsonl_path is None or not b.jsonl_path.exists():
+        real = find_jsonl_for_session(claude_session_id)
+        if real is not None and real != b.jsonl_path:
+            b.jsonl_path = real
+            bindings._persist()
 
     all_entries = jsonl_cache.entries(b.jsonl_path)
 
@@ -2760,7 +2904,7 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
     if tail > 0:
         return {"screen": _screen_tail(screen or "", tail)}
-    return {"screen": screen or ""}
+    return {"screen": _collapse_blanks(screen or "")}
 
 
 @app.get("/api/iterm-tabs", dependencies=[Depends(require_token)])
@@ -2793,7 +2937,7 @@ async def get_iterm_screen(iterm_session_id: str):
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
     if screen is None:
         raise HTTPException(status_code=404, detail="iterm session not found")
-    return {"screen": screen}
+    return {"screen": _collapse_blanks(screen)}
 
 
 @app.post("/api/iterm-input", dependencies=[Depends(require_token)])
@@ -3031,48 +3175,50 @@ async def post_new_session(payload: NewSessionPayload):
     if not iterm_id:
         raise HTTPException(status_code=500, detail="failed to open new tab")
 
-    # Send a unique marker to claude as a probe message. Claude writes user
-    # messages straight into JSONL, so once we see the marker in any JSONL
-    # under the encoded-cwd dir, that file is OUR session. This is more
-    # reliable than birthtime-based matching (no race with concurrent fresh
-    # tabs in same cwd) and gives definitive identification.
-    marker = f"test_alive_marker={secrets.token_hex(6)}"
-    probe = f"echo {marker}"
-    try:
-        await bridge.send_text_to(iterm_id, probe + "\r")
-    except Exception as e:
-        log.info("probe send failed: %s", e)
-
-    encoded = cwd.replace("/", "-").replace("_", "-")
-    proj_dir = PROJECTS_ROOT / encoded
+    # Resolve the new tab purely from claude's pid→session store — NO marker
+    # injection. Once the fresh `claude` starts it writes ~/.claude/sessions/
+    # <pid>.json with its sessionId; we bind by pid as soon as it appears. We
+    # bind even before the transcript JSONL exists (use its expected path — it
+    # shows up moments later), so there's nothing to probe and no echo in the
+    # new session's chat.
+    # Strip a trailing slash first — claude normalizes the cwd before encoding
+    # the project dir, so "…/tmp_code/" must encode to "…-tmp-code" (no trailing
+    # dash), or the expected JSONL path is wrong and the transcript stays empty.
+    encoded = cwd.rstrip("/").replace("/", "-").replace("_", "-")
     deadline = _time.time() + 30.0
     bound: Optional[Binding] = None
-    while _time.time() < deadline:
+    while _time.time() < deadline and bound is None:
         await asyncio.sleep(0.6)
         try:
             refs = await bridge.list_claude_tabs()
         except Exception:
             continue
         match = next((r for r in refs if r.iterm_session_id == iterm_id), None)
-        if match is None or not proj_dir.exists():
+        if match is None:
             continue
-        # Find the JSONL whose contents include our marker.
-        marker_jsonl: Optional[Path] = None
-        for jsonl in proj_dir.glob("*.jsonl"):
-            try:
-                if marker in jsonl.read_text(encoding="utf-8", errors="replace"):
-                    marker_jsonl = jsonl
-                    break
-            except OSError:
-                continue
-        if marker_jsonl is None:
-            continue
-        sid = marker_jsonl.stem
-        b = _build_binding(sid, match, marker_jsonl)
-        if b:
-            bindings.insert(b)
-            bound = b
-            break
+        meta = _claude_session_meta(match.pid)
+        if meta and meta.get("sessionId"):
+            sid = meta["sessionId"]
+            # claude only creates the transcript JSONL on the FIRST message, so
+            # for a brand-new tab it doesn't exist yet. We don't need it to bind:
+            # bind by the store's sessionId + the expected path (claude encodes
+            # the project dir as cwd with /,_ → -). The file appears at exactly
+            # that path when the user sends their first message — no marker, no
+            # injected echo; the user's own message writes the JSONL.
+            jl = find_jsonl_for_session(sid) or (PROJECTS_ROOT / encoded / f"{sid}.jsonl")
+            b = _build_binding(sid, match, jl)
+            if b:
+                bindings.insert(b); bound = b; break
+
+    # Optional: name the new session via claude's own `/rename` so the name
+    # shows on the prompt bar and in claude's session store. (Also creates the
+    # transcript JSONL, since it's the first command.)
+    name = (payload.name or "").strip().replace("\n", " ")
+    if name:
+        try:
+            await bridge.send_text_to(iterm_id, f"/rename {name}\r")
+        except Exception as e:
+            log.info("/rename send failed: %s", e)
 
     if bound:
         return {

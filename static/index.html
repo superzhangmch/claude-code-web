@@ -129,6 +129,17 @@ main {
   padding: 4px 12px; font-size: 12px; cursor: pointer; line-height: 1;
 }
 #picker-font button:hover { border-color: var(--accent); color: var(--text); }
+#newdlg-name {
+  width: 100%; box-sizing: border-box; margin-top: 10px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 13px;
+}
+#newdlg-name:focus { outline: none; border-color: var(--accent); }
+#picker-warn {
+  margin: 8px 2px; padding: 8px 10px; border-radius: 6px;
+  background: #2a1a14; border: 1px solid #ff8b6a; color: #ffb499;
+  font-size: 12px; line-height: 1.4;
+}
 /* Group delimiter between session groups (Attached / Recent / Named). */
 #picker-list .group-delim {
   display: flex; align-items: center; gap: 8px;
@@ -1181,6 +1192,7 @@ footer button.icon {
           <button id="picker-fontdown" title="smaller list font">a</button>
         </span>
       </div>
+      <div id="picker-warn" style="display:none"></div>
       <div id="picker-list"></div>
     </div>
     <div id="transcript-view">
@@ -1240,6 +1252,7 @@ footer button.icon {
       <h2>New Claude session</h2>
       <p>Pick a working directory. Opens a new iTerm2 tab on the server.</p>
       <div id="newdlg-cwds"></div>
+      <input id="newdlg-name" type="text" placeholder="session name (optional) — runs /rename" autocomplete="off">
       <div class="modal-actions">
         <button id="newdlg-cancel">Cancel</button>
         <button id="newdlg-ok" class="primary" disabled>Confirm</button>
@@ -2616,6 +2629,18 @@ footer button.icon {
     }
     const data = await resp.json();
     renderBattery(data.battery);
+    // Surface it if claude's (undocumented) pid↔session store stopped working
+    // — cc_web depends on it for binding, so a claude update changing it should
+    // be visible, not silent (we've fallen back to heuristics).
+    const pw = document.getElementById("picker-warn");
+    if (pw) {
+      const cs = data.claude_store;
+      if (cs && cs.ok === false) {
+        pw.textContent = "⚠ claude session-store binding looks broken (claude may have changed): "
+          + (cs.detail || "") + " — using fallback heuristics.";
+        pw.style.display = "";
+      } else { pw.style.display = "none"; }
+    }
     const sessions = data.sessions || [];
     if (!sessions.length) {
       pickerListEl.innerHTML = "<div style='color:var(--muted);font-size:12px;padding:20px;text-align:center'>No sessions yet. Start <code>claude</code> in iTerm2 and use the <em>session-name</em> skill to name it.</div>";
@@ -2801,7 +2826,7 @@ footer button.icon {
   function hideLoading() { loadingEl.classList.remove("show"); }
 
   async function attachSession(sid, label) {
-    showLoading("Attaching… (resolving tab via LLM)");
+    showLoading("Attaching… (resolving tab)");
     let resp;
     try {
       resp = await authedFetch("/api/attach", {
@@ -3975,6 +4000,7 @@ footer button.icon {
 
   newBtn.addEventListener("click", async () => {
     selectedCwd = null; newDlgOk.disabled = true; newDlgOk.textContent = "Confirm";
+    document.getElementById("newdlg-name").value = "";
     newDlgCwds.innerHTML = "<div style='color:var(--muted);font-size:12px'>loading…</div>";
     newDlg.classList.add("show");
     const r = await authedFetch("/api/cwds");
@@ -3998,12 +4024,13 @@ footer button.icon {
   newDlgCancel.addEventListener("click", () => newDlg.classList.remove("show"));
   newDlgOk.addEventListener("click", async () => {
     if (!selectedCwd) return;
+    const newName = (document.getElementById("newdlg-name").value || "").trim();
     newDlg.classList.remove("show");
     showLoading("Opening new claude tab…");
     const r = await authedFetch("/api/new-session", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ cwd: selectedCwd }),
+      body: JSON.stringify({ cwd: selectedCwd, name: newName }),
     });
     hideLoading();
     if (!r.ok) { alert("Failed: " + (await r.text())); return; }
