@@ -1295,16 +1295,55 @@ NAMED_TOP_N = 5
 UNNAMED_TOP_N = 5
 
 
-def build_picker_sessions(min_unnamed: int = UNNAMED_TOP_N) -> list[dict]:
-    """Top 5 named (by JSONL mtime) + recent unnamed (within 24h). Pure
-    filesystem, no iTerm2. `min_unnamed` raises the unnamed cap to at least that
-    many (the caller passes the open-claude-tab count, so every running unnamed
-    session — the most-recently-written ones — is reachable from the picker)."""
+def _session_dict(jsonl: Path, mtime: float, named: Optional[dict],
+                  group: str, tab_info: dict) -> dict:
     import datetime as _dt
+    sid = jsonl.stem
+    try:
+        file_size = jsonl.stat().st_size
+    except OSError:
+        file_size = 0
+    binding_info = bindings.get_by_session(sid)
+    is_bound = binding_info is not None and verify_binding(binding_info)
+    ctx = extract_recent_context(jsonl, n_exchanges=3, max_user_chars=64, max_response_chars=100)
+    exs = ctx["exchanges"]
+    last_user = exs[-1]["user"] if exs else None
+    d = {
+        "claude_session_id": sid,
+        "title": (named.get("title") if named else ""),
+        "project_path": (named.get("project_path") if named else "") or _project_path_from_jsonl(jsonl) or "",
+        "last_visit": _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M"),
+        "file_size": file_size,
+        "first_user_msg": ctx["first_user_msg"],
+        "first_ts": ctx["first_ts"],
+        "last_user_msg": last_user["text"] if last_user else "",
+        "last_ts": last_user["ts"] if last_user else "",
+        "exchanges": exs,
+        "named": named is not None,
+        "bound": is_bound,
+        "binding": _serialize_binding(binding_info) if (binding_info and is_bound) else None,
+        "group": group,
+    }
+    # Attached cards show the live iTerm tab name + window/tab (for sort/display).
+    if group == "attached" and binding_info:
+        info = tab_info.get(binding_info.iterm_session_id) or {}
+        d["tab_name"] = info.get("name", "")
+        d["window_index"] = info.get("window_index", binding_info.window_index)
+        d["tab_index"] = info.get("tab_index", binding_info.tab_index)
+    return d
+
+
+def build_picker_sessions(tab_info: Optional[dict] = None,
+                          recent_n: int = 10, named_n: int = 5) -> list[dict]:
+    """Three groups, in order, each session tagged with `group`:
+      (1) attached — bound & alive sessions, sorted by live window/tab, with the
+          iTerm tab name;
+      (2) recent  — up to `recent_n` most-recent sessions (excl. attached);
+      (3) named   — up to `named_n` most-recent named sessions (excl. the above).
+    The frontend draws a delimiter when `group` changes."""
+    tab_info = tab_info or {}
     titles = {e["session_id"]: e for e in load_session_index()}
-    cutoff = _time.time() - ACTIVE_WITHIN_SEC
-    named_items: list[tuple[float, Path, dict]] = []
-    unnamed_items: list[tuple[float, Path]] = []
+    all_items: list[tuple[float, Path, str]] = []
     if PROJECTS_ROOT.exists():
         for proj in PROJECTS_ROOT.iterdir():
             if not proj.is_dir():
@@ -1314,53 +1353,43 @@ def build_picker_sessions(min_unnamed: int = UNNAMED_TOP_N) -> list[dict]:
                     mtime = jsonl.stat().st_mtime
                 except OSError:
                     continue
-                sid = jsonl.stem
-                named = titles.get(sid)
-                if named is not None:
-                    named_items.append((mtime, jsonl, named))
-                elif mtime >= cutoff:
-                    unnamed_items.append((mtime, jsonl))
-    named_items.sort(key=lambda x: x[0], reverse=True)
-    unnamed_items.sort(key=lambda x: x[0], reverse=True)
-    items: list[tuple[float, Path, Optional[dict]]] = []
-    for mtime, jsonl, named in named_items[:NAMED_TOP_N]:
-        items.append((mtime, jsonl, named))
-    for mtime, jsonl in unnamed_items[:max(UNNAMED_TOP_N, min_unnamed)]:
-        items.append((mtime, jsonl, None))
-    items.sort(key=lambda x: x[0], reverse=True)
-    bound_ids = bindings.bound_session_ids()
+                all_items.append((mtime, jsonl, jsonl.stem))
+    all_items.sort(key=lambda x: x[0], reverse=True)
+
+    bound_ids = {b.claude_session_id for b in bindings.all() if verify_binding(b)}
+    seen: set[str] = set()
     out: list[dict] = []
-    for mtime, jsonl, named in items:
-        sid = jsonl.stem
-        last_visit = _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
-        try:
-            file_size = jsonl.stat().st_size
-        except OSError:
-            file_size = 0
-        is_bound = sid in bound_ids
-        binding_info = bindings.get_by_session(sid) if is_bound else None
-        # last_user_msg / first_user_msg / last_visit derived from JSONL on
-        # every request (the index intentionally only stores title +
-        # project_path + first_user_msg snapshot).
-        ctx = extract_recent_context(jsonl, n_exchanges=3, max_user_chars=64, max_response_chars=100)
-        exs = ctx["exchanges"]
-        last_ex = exs[-1] if exs else None
-        last_user = last_ex["user"] if last_ex else None
-        out.append({
-            "claude_session_id": sid,
-            "title": (named.get("title") if named else ""),
-            "project_path": (named.get("project_path") if named else "") or _project_path_from_jsonl(jsonl) or "",
-            "last_visit": last_visit,
-            "file_size": file_size,
-            "first_user_msg": ctx["first_user_msg"],
-            "first_ts": ctx["first_ts"],
-            "last_user_msg": last_user["text"] if last_user else "",
-            "last_ts": last_user["ts"] if last_user else "",
-            "exchanges": exs,        # last 3 user+response pairs
-            "named": named is not None,
-            "bound": is_bound,
-            "binding": _serialize_binding(binding_info) if binding_info else None,
-        })
+
+    # (1) attached — sorted by live window/tab (fallback to binding's stored).
+    def _wt(item: tuple) -> tuple:
+        b = bindings.get_by_session(item[2])
+        info = tab_info.get(b.iterm_session_id, {}) if b else {}
+        return (info.get("window_index", b.window_index if b else 0),
+                info.get("tab_index", b.tab_index if b else 0))
+    for mtime, jsonl, sid in sorted([it for it in all_items if it[2] in bound_ids], key=_wt):
+        out.append(_session_dict(jsonl, mtime, titles.get(sid), "attached", tab_info))
+        seen.add(sid)
+
+    # (2) recent — most recent, excluding attached.
+    n = 0
+    for mtime, jsonl, sid in all_items:
+        if n >= recent_n:
+            break
+        if sid in seen:
+            continue
+        out.append(_session_dict(jsonl, mtime, titles.get(sid), "recent", tab_info))
+        seen.add(sid); n += 1
+
+    # (3) named — most recent named, excluding the above.
+    n = 0
+    for mtime, jsonl, sid in all_items:
+        if n >= named_n:
+            break
+        if sid in seen or titles.get(sid) is None:
+            continue
+        out.append(_session_dict(jsonl, mtime, titles.get(sid), "named", tab_info))
+        seen.add(sid); n += 1
+
     return out
 
 
@@ -1968,16 +1997,22 @@ def _get_battery() -> Optional[dict]:
 
 @app.get("/api/sessions", dependencies=[Depends(require_token)])
 async def get_sessions():
-    """Picker list. Each entry has 'bound' = True iff there's an active pid
-    binding for that session_id. We surface at least as many unnamed sessions
-    as there are open claude tabs, so every running session is reachable."""
+    """Picker list, grouped: attached / recent / named. Looks up live iTerm tabs
+    so attached sessions can show their tab name and sort by window/tab. Recent
+    is at least the open-claude-tab count, so every running session is reachable."""
+    tab_info: dict = {}
+    n_claude_tabs = 0
     try:
         await bridge.ensure_connected()
-        n_claude_tabs = len(await bridge.list_claude_tabs())
+        for t in await bridge.list_all_tabs():
+            tab_info[t.get("iterm_session_id")] = t
+            if t.get("is_claude"):
+                n_claude_tabs += 1
     except Exception:
-        n_claude_tabs = 0
+        pass
     return {
-        "sessions": build_picker_sessions(min_unnamed=n_claude_tabs),
+        "sessions": build_picker_sessions(tab_info=tab_info,
+                                          recent_n=max(10, n_claude_tabs)),
         "battery": _get_battery(),
     }
 

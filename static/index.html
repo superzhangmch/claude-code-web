@@ -129,6 +129,16 @@ main {
   padding: 4px 12px; font-size: 12px; cursor: pointer; line-height: 1;
 }
 #picker-font button:hover { border-color: var(--accent); color: var(--text); }
+/* Group delimiter between session groups (Attached / Recent / Named). */
+#picker-list .group-delim {
+  display: flex; align-items: center; gap: 8px;
+  margin: 14px 2px 6px; color: var(--muted);
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+}
+#picker-list .group-delim::after {
+  content: ""; flex: 1; height: 1px; background: var(--border);
+}
+#picker-list .group-delim:first-child { margin-top: 0; }
 header .battery {
   font: 12px ui-monospace, Menlo, monospace;
   color: var(--muted);
@@ -1165,7 +1175,7 @@ footer button.icon {
   <main id="main">
     <div id="picker">
       <div id="picker-head">
-        <h2 id="picker-title">Recent sessions</h2>
+        <h2 id="picker-title">Sessions</h2>
         <span id="picker-font">
           <button id="picker-fontup" title="bigger list font">A</button>
           <button id="picker-fontdown" title="smaller list font">a</button>
@@ -2612,7 +2622,16 @@ footer button.icon {
       return;
     }
     pickerListEl.innerHTML = "";
+    const GROUP_TITLES = { attached: "Attached", recent: "Recent", named: "Named" };
+    let lastGroup = null;
     for (const s of sessions) {
+      if (s.group !== lastGroup) {
+        lastGroup = s.group;
+        const hdr = document.createElement("div");
+        hdr.className = "group-delim";
+        hdr.textContent = GROUP_TITLES[s.group] || s.group;
+        pickerListEl.appendChild(hdr);
+      }
       const card = document.createElement("div");
       card.className = "session-card" + (s.named ? "" : " unnamed");
       const titleRow = document.createElement("div");
@@ -2620,7 +2639,10 @@ footer button.icon {
       const title = document.createElement("span");
       title.className = "title";
       const sidPrefix = `[${s.claude_session_id.slice(0, 4)}] `;
-      title.textContent = sidPrefix + (s.title || (s.last_user_msg || s.first_user_msg || "(no messages yet)").slice(0, 80));
+      // Attached: show the iTerm tab name. Otherwise: title / last / first msg.
+      title.textContent = sidPrefix + ((s.group === "attached" && s.tab_name)
+        ? s.tab_name
+        : (s.title || (s.last_user_msg || s.first_user_msg || "(no messages yet)").slice(0, 80)));
       const time = document.createElement("span");
       time.className = "time";
       time.textContent = s.last_visit;
