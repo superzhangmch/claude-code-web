@@ -25,6 +25,38 @@
   --code-bg: #0f1017;
   --warn: #ff8b6a;
 }
+/* Light theme — gruvbox-ish cream (米黄) background + near-black text.
+   Overrides the CSS vars globally; the few hardcoded #000 surfaces are
+   flipped to var(--bg) below so they don't stay black on cream. */
+body.light {
+  --bg: #fdf6e3;
+  --panel: #f5edd6;
+  --panel2: #ece3c8;
+  --text: #1d2021;
+  --muted: #7c6f64;
+  --accent: #af3a03;
+  --assistant: #8f3f71;
+  --border: #e2d8bc;
+  --code-bg: #f3ebd2;
+  --warn: #9d0006;
+}
+body.light header, body.light footer { background: var(--bg); }
+body.light .session-card { background: var(--panel); border-color: var(--border); }
+body.light .session-card .msg-block.user,
+body.light .session-card .msg-block.claude { background: var(--code-bg); color: var(--text); }
+body.light .msg.assistant { background: var(--bg); }
+body.light .msg.user { background: #eaeef6; }
+body.light .msg.user, body.light .msg.user .markdown { color: var(--text); }
+body.light .msg.tool { background: var(--panel); }
+body.light .msg.system { background: var(--panel); color: var(--muted); }
+body.light .msg.system .markdown { color: var(--muted); }
+body.light .msg.thinking { background: var(--panel); }
+body.light .candidate .screen-tail,
+body.light #screen-modal .screen-body,
+body.light #tabs-modal .screen-body { background: #d7d6d0; color: var(--text); }
+body.light #tail-box { background: #d7d6d0; }
+body.light .session-card .badge.bound { background: #d7ecc6; color: #2f6b2e; }
+body.light .session-card .badge.unnamed { background: var(--panel2); color: var(--muted); }
 * { box-sizing: border-box; }
 html, body {
   margin: 0; padding: 0;
@@ -339,7 +371,7 @@ header .battery:hover { color: var(--text); }
 }
 .msg.user {
   border-left-color: var(--accent);
-  background: #000; color: #9aa0ab;
+  background: #14171f; color: #9aa0ab;
   margin-left: 32px;
 }
 .msg.user .markdown { color: #9aa0ab; }
@@ -1188,6 +1220,7 @@ footer button.icon {
       <div id="picker-head">
         <h2 id="picker-title">Sessions</h2>
         <span id="picker-font">
+          <button id="picker-mode" title="toggle light / dark">◐</button>
           <button id="picker-fontup" title="bigger list font">A</button>
           <button id="picker-fontdown" title="smaller list font">a</button>
         </span>
@@ -1434,6 +1467,22 @@ footer button.icon {
   document.getElementById("picker-fontup").addEventListener("click", () => { pickerScale += 0.1; applyPickerScale(); });
   document.getElementById("picker-fontdown").addEventListener("click", () => { pickerScale -= 0.1; applyPickerScale(); });
   applyPickerScale();
+
+  // Light / dark theme toggle (persisted). Dark is the default.
+  function applyTheme() {
+    const light = localStorage.getItem("cc_web_theme") === "light";
+    document.body.classList.toggle("light", light);
+    const btn = document.getElementById("picker-mode");
+    if (btn) btn.textContent = light ? "☀" : "◐";
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", light ? "#fdf6e3" : "#000000");
+  }
+  document.getElementById("picker-mode").addEventListener("click", () => {
+    const light = localStorage.getItem("cc_web_theme") === "light";
+    localStorage.setItem("cc_web_theme", light ? "dark" : "light");
+    applyTheme();
+  });
+  applyTheme();
   const tvEl = document.getElementById("transcript-view");
   const transcriptEl = document.getElementById("transcript");
   const autoloadEl = document.getElementById("autoload");
