@@ -121,6 +121,14 @@ main {
 }
 
 #picker { display: none; }
+#picker-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#picker-font { display: inline-flex; gap: 6px; flex-shrink: 0; }
+#picker-font button {
+  background: var(--panel2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 4px 12px; font-size: 12px; cursor: pointer; line-height: 1;
+}
+#picker-font button:hover { border-color: var(--accent); color: var(--text); }
 header .battery {
   font: 12px ui-monospace, Menlo, monospace;
   color: var(--muted);
@@ -1156,7 +1164,13 @@ footer button.icon {
 
   <main id="main">
     <div id="picker">
-      <h2 id="picker-title">Recent sessions</h2>
+      <div id="picker-head">
+        <h2 id="picker-title">Recent sessions</h2>
+        <span id="picker-font">
+          <button id="picker-fontup" title="bigger list font">A</button>
+          <button id="picker-fontdown" title="smaller list font">a</button>
+        </span>
+      </div>
       <div id="picker-list"></div>
     </div>
     <div id="transcript-view">
@@ -1385,6 +1399,18 @@ footer button.icon {
   const warnEl = document.getElementById("warn");
   const pickerEl = document.getElementById("picker");
   const pickerListEl = document.getElementById("picker-list");
+  // A / a resize ALL session-list text (zoom the list, persisted). Default is
+  // 1.1 (one notch bigger than the base). Fresh key so the previous build's
+  // auto-saved 1.0 doesn't pin it to the old default.
+  let pickerScale = parseFloat(localStorage.getItem("cc_web_list_scale") || "1.1") || 1.1;
+  function applyPickerScale() {
+    pickerScale = Math.round(Math.max(0.7, Math.min(2.0, pickerScale)) * 10) / 10;
+    pickerListEl.style.zoom = pickerScale;
+    localStorage.setItem("cc_web_list_scale", String(pickerScale));
+  }
+  document.getElementById("picker-fontup").addEventListener("click", () => { pickerScale += 0.1; applyPickerScale(); });
+  document.getElementById("picker-fontdown").addEventListener("click", () => { pickerScale -= 0.1; applyPickerScale(); });
+  applyPickerScale();
   const tvEl = document.getElementById("transcript-view");
   const transcriptEl = document.getElementById("transcript");
   const autoloadEl = document.getElementById("autoload");
@@ -3771,7 +3797,21 @@ footer button.icon {
   }
   sendBtn.addEventListener("click", send);
   inputEl.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); }
+    if (e.key !== "Enter") return;
+    // Don't submit while an IME is composing (e.g. confirming Chinese input).
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.altKey) {
+      // Opt+Enter → newline (the browser default inserts nothing for Alt+Enter,
+      // so do it manually), then re-autosize.
+      e.preventDefault();
+      const s = inputEl.selectionStart, en = inputEl.selectionEnd;
+      inputEl.value = inputEl.value.slice(0, s) + "\n" + inputEl.value.slice(en);
+      inputEl.selectionStart = inputEl.selectionEnd = s + 1;
+      inputEl.dispatchEvent(new Event("input"));
+      return;
+    }
+    if (e.shiftKey) return;            // Shift+Enter → default newline
+    e.preventDefault(); send();        // Enter (or Cmd/Ctrl+Enter) → submit
   });
   inputEl.addEventListener("input", () => {
     inputEl.style.height = "auto";
