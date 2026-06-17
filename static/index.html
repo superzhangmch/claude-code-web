@@ -53,8 +53,13 @@ body.light .msg.system .markdown { color: var(--muted); }
 body.light .msg.thinking { background: var(--panel); }
 body.light .candidate .screen-tail,
 body.light #screen-modal .screen-body,
-body.light #tabs-modal .screen-body { background: #d7d6d0; color: var(--text); }
+body.light #tabs-modal .screen-body,
+body.light #tabscr-modal .screen-body { background: #d7d6d0; color: var(--text); }
 body.light #tail-box { background: #d7d6d0; }
+#picker-list .session-card .title.tab-clickable { cursor: pointer; }
+#picker-list .session-card .title.tab-clickable:hover {
+  text-decoration: underline; text-decoration-color: var(--accent);
+}
 body.light .session-card .badge.bound { background: #d7ecc6; color: #2f6b2e; }
 body.light .session-card .badge.unnamed { background: var(--panel2); color: var(--muted); }
 * { box-sizing: border-box; }
@@ -161,6 +166,50 @@ main {
   padding: 4px 12px; font-size: 12px; cursor: pointer; line-height: 1;
 }
 #picker-font button:hover { border-color: var(--accent); color: var(--text); }
+/* Quick filter (client-side, filters the loaded list) — pinned at the top. */
+#picker-quickfilter {
+  width: 100%; box-sizing: border-box; margin: 10px 0 4px;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 7px 14px; font-size: 13px; -webkit-appearance: none;
+}
+#picker-quickfilter:focus { outline: none; border-color: var(--accent); }
+/* Full backend search — pinned below the list. */
+#picker-search {
+  margin: 18px 0 6px; padding: 10px; border-radius: 8px;
+  background: var(--panel); border: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 7px;
+}
+#picker-search .ps-head {
+  color: var(--muted); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+#picker-search input, #picker-search select {
+  box-sizing: border-box; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 7px 10px; font-size: 13px; -webkit-appearance: none;
+}
+#picker-search input { width: 100%; }
+#picker-search input:focus, #picker-search select:focus {
+  outline: none; border-color: var(--accent);
+}
+#picker-search .ps-row { display: flex; gap: 7px; align-items: center; }
+#picker-search .ps-row select { flex: 1; min-width: 0; }
+#picker-search #ps-go, #picker-search #ps-clear {
+  background: var(--accent); color: #1b1b1b; border: 0; border-radius: 6px;
+  padding: 7px 16px; font-size: 13px; cursor: pointer; font-weight: 600;
+}
+#picker-search #ps-clear { background: var(--panel2); color: var(--muted); }
+#picker-search #ps-status { color: var(--muted); font-size: 11px; margin-left: auto; }
+.hl { color: #ff4d4d; font-weight: 700; }
+body.light .hl { color: #c81e1e; }
+#picker-list .session-card .match-snip .more-count { color: var(--muted); font-weight: 400; }
+#picker-list .session-card .match-snip {
+  margin-top: 6px; font-size: 12px; color: var(--text);
+  background: var(--code-bg); border-left: 2px solid var(--accent);
+  border-radius: 0 4px 4px 0; padding: 5px 8px; line-height: 1.4;
+  word-break: break-word;
+}
 #newdlg-name {
   width: 100%; box-sizing: border-box; margin-top: 10px;
   background: var(--bg); color: var(--text);
@@ -326,8 +375,15 @@ header .battery:hover { color: var(--text); }
   font-size: 12px; line-height: 1.45;
   white-space: pre-wrap;
 }
+/* Request-only compact row: tight, no "You" label, inline mm-dd HH:MM prefix. */
+.session-card .msg-block.user.compact { margin: 3px 0 3px 18px; padding: 3px 8px; }
+.session-card .msg-block.user.compact .body { white-space: normal; }
+.session-card .msg-block .ts-inline {
+  color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums;
+}
 .session-card .attach-row {
   margin-top: 10px; display: flex; gap: 6px; justify-content: flex-end;
+  flex-wrap: wrap; row-gap: 6px;
 }
 .session-card .attach-row button {
   background: var(--bg); color: var(--text);
@@ -855,6 +911,20 @@ footer button.icon {
   padding: 8px 10px; margin: 0;
   overflow: auto; white-space: pre;
 }
+#tabscr-modal .modal-card.screen-card {
+  width: 95vw; max-width: 1100px; max-height: 85vh;
+  display: flex; flex-direction: column; gap: 8px;
+}
+#tabscr-modal .modal-row { display: flex; align-items: center; gap: 8px; }
+#tabscr-modal .modal-row h3 { margin: 0; flex: 1; font-size: 14px; word-break: break-all; }
+#tabscr-modal .screen-body {
+  flex: 1; min-height: 0;
+  background: #000; color: var(--text);
+  font: 12px ui-monospace, Menlo, monospace;
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 8px 10px; margin: 0;
+  overflow: auto; white-space: pre;
+}
 #screen-modal .screen-actions {
   display: flex; flex-wrap: wrap; gap: 6px;
   justify-content: flex-end;
@@ -1213,6 +1283,18 @@ footer button.icon {
     </div>
   </div>
 
+  <!-- Lightweight popup: live screen of a TABS-group session (click its title). -->
+  <div id="tabscr-modal" class="modal">
+    <div class="modal-card screen-card">
+      <div class="modal-row">
+        <h3 id="tabscr-title">screen</h3>
+        <button id="tabscr-refresh" class="btn">↻</button>
+        <button id="tabscr-close" class="btn">close</button>
+      </div>
+      <pre id="tabscr-body" class="screen-body">…</pre>
+    </div>
+  </div>
+
   <div id="warn" title="tap to re-verify"></div>
 
   <main id="main">
@@ -1220,13 +1302,46 @@ footer button.icon {
       <div id="picker-head">
         <h2 id="picker-title">Sessions</h2>
         <span id="picker-font">
+          <button id="picker-reqmode" title="show user requests only / requests + responses">Q</button>
           <button id="picker-mode" title="toggle light / dark">◐</button>
           <button id="picker-fontup" title="bigger list font">A</button>
           <button id="picker-fontdown" title="smaller list font">a</button>
         </span>
       </div>
+      <input id="picker-quickfilter" type="search" autocomplete="off"
+             placeholder="Quick filter…  a &amp; b (AND) · a | b (OR)" />
       <div id="picker-warn" style="display:none"></div>
       <div id="picker-list"></div>
+      <div id="picker-search">
+        <div class="ps-head">Full search — all sessions</div>
+        <input id="ps-content" type="search" autocomplete="off"
+               placeholder="user request:  a &amp; b (AND) · a | b (OR)" />
+        <input id="ps-cwd" type="search" autocomplete="off"
+               placeholder="working dir contains…" />
+        <div class="ps-row">
+          <select id="ps-size">
+            <option value="">any size</option>
+            <option value="lt50k">&lt; 50 KB</option>
+            <option value="50k-500k">50 KB – 500 KB</option>
+            <option value="500k-5m">500 KB – 5 MB</option>
+            <option value="gt5m">&gt; 5 MB</option>
+          </select>
+          <select id="ps-days">
+            <option value="">any time</option>
+            <option value="1">1 day</option>
+            <option value="3">3 days</option>
+            <option value="7" selected>1 week</option>
+            <option value="14">2 weeks</option>
+            <option value="30">1 month</option>
+            <option value="60">2 months</option>
+          </select>
+        </div>
+        <div class="ps-row">
+          <button id="ps-go">Search</button>
+          <button id="ps-clear">Clear</button>
+          <span id="ps-status"></span>
+        </div>
+      </div>
     </div>
     <div id="transcript-view">
       <div id="load-earlier"><button id="load-earlier-btn" class="btn">Load earlier rounds</button></div>
@@ -1455,6 +1570,83 @@ footer button.icon {
   const warnEl = document.getElementById("warn");
   const pickerEl = document.getElementById("picker");
   const pickerListEl = document.getElementById("picker-list");
+  // Picker state: `pickerBase` = the 3-group list from /api/sessions;
+  // `searchResults` = full-search results (group "search") or null;
+  // `quickText` = the top client-side filter string applied to whichever is shown.
+  let pickerBase = [];
+  let searchResults = null;
+  let quickText = "";
+  let searchTerm = "";   // full-search content query, for match highlighting
+  // Card exchange display: "user" = requests only, "both" = requests + responses.
+  let cardMode = localStorage.getItem("cc_web_card_mode") || "user";
+
+  // Set `el`'s text with any case-insensitive occurrences of `terms` wrapped in
+  // <span class="hl"> (the red "飘红" highlight). Builds DOM, so it's XSS-safe.
+  function hlInto(el, text, terms) {
+    el.textContent = "";
+    const t = String(text || "");
+    const valid = (terms || []).filter(x => x && x.trim()).map(x => x.toLowerCase());
+    if (!valid.length) { el.textContent = t; return; }
+    const lower = t.toLowerCase();
+    let i = 0;
+    while (i < t.length) {
+      let best = -1, bestLen = 0;
+      for (const term of valid) {
+        const idx = lower.indexOf(term, i);
+        if (idx !== -1 && (best === -1 || idx < best)) { best = idx; bestLen = term.length; }
+      }
+      if (best === -1) { el.appendChild(document.createTextNode(t.slice(i))); break; }
+      if (best > i) el.appendChild(document.createTextNode(t.slice(i, best)));
+      const span = document.createElement("span"); span.className = "hl";
+      span.textContent = t.slice(best, best + bestLen);
+      el.appendChild(span);
+      i = best + bestLen;
+    }
+  }
+  // Highlight terms: split BOTH the full-search query and the quick-filter text
+  // on & / | so every keyword lights up independently.
+  function hlTerms() {
+    const out = [];
+    const push = (s) => { if (s) out.push(...s.split(/[&|]/).map(x => x.trim()).filter(Boolean)); };
+    push(searchTerm);
+    push(quickText);
+    return out;
+  }
+
+  // A one-line snippet of `text` centered on the first occurrence of any term.
+  function hitSnippetFrom(text, terms, width) {
+    const t = String(text || "").replace(/\s+/g, " ").trim();
+    const tl = t.toLowerCase();
+    let best = -1, len = 0;
+    for (const term of terms) {
+      const i = tl.indexOf(term.toLowerCase());
+      if (i !== -1 && (best === -1 || i < best)) { best = i; len = term.length; }
+    }
+    if (best === -1) return null;
+    const w = width || 60;
+    const start = Math.max(0, best - w), end = Math.min(t.length, best + len + w);
+    return (start > 0 ? "…" : "") + t.slice(start, end) + (end < t.length ? "…" : "");
+  }
+
+  // The matched user requests to summarize under the LAST line (when filtering)
+  // — up to the LAST 3 hits, plus how many more exist. Full search gives server
+  // snippets; quick filter computes them from the displayed requests / preview.
+  function hitSummaries(s) {
+    const terms = hlTerms();
+    if (!terms.length) return { snips: [], more: 0 };
+    if (s.match && Array.isArray(s.match.snippets)) {
+      const total = s.match.count || s.match.snippets.length;
+      return { snips: s.match.snippets, more: Math.max(0, total - s.match.snippets.length) };
+    }
+    const hits = (txt) => terms.some(t => txt.toLowerCase().includes(t.toLowerCase()));
+    let pool = (s.exchanges || []).map(e => e && e.user && e.user.text)
+                 .filter(Boolean).filter(hits);
+    if (!pool.length)
+      pool = [s.last_user_msg, s.first_user_msg, s.title].filter(Boolean).filter(hits);
+    const last3 = pool.slice(-3);
+    const snips = last3.map(t => hitSnippetFrom(t, terms)).filter(Boolean);
+    return { snips, more: Math.max(0, pool.length - snips.length) };
+  }
   // A / a resize ALL session-list text (zoom the list, persisted). Default is
   // 1.1 (one notch bigger than the base). Fresh key so the previous build's
   // auto-saved 1.0 doesn't pin it to the old default.
@@ -1483,6 +1675,85 @@ footer button.icon {
     applyTheme();
   });
   applyTheme();
+
+  // Card display switch: user requests only ("Q") vs requests + responses ("Q+A").
+  function applyCardMode() {
+    const btn = document.getElementById("picker-reqmode");
+    if (btn) btn.textContent = cardMode === "both" ? "Q+A" : "Q";
+    localStorage.setItem("cc_web_card_mode", cardMode);
+  }
+  document.getElementById("picker-reqmode").addEventListener("click", () => {
+    cardMode = cardMode === "both" ? "user" : "both";
+    applyCardMode();
+    // Data differs per mode (request-only returns more, content-weighted
+    // rounds), so refetch rather than just re-render.
+    if (searchResults !== null) runFullSearch();
+    else refreshPicker();
+  });
+  applyCardMode();
+
+  // ---- quick filter (client-side) + full search (backend) ----
+  const quickEl = document.getElementById("picker-quickfilter");
+  let _qfTimer = null;
+  quickEl.addEventListener("input", () => {
+    quickText = quickEl.value || "";
+    clearTimeout(_qfTimer);
+    _qfTimer = setTimeout(renderPicker, 120);
+  });
+
+  const psStatus = document.getElementById("ps-status");
+  const psGo = document.getElementById("ps-go");
+  async function runFullSearch() {
+    const q = document.getElementById("ps-content").value.trim();
+    const cwd = document.getElementById("ps-cwd").value.trim();
+    const size = document.getElementById("ps-size").value;
+    const days = document.getElementById("ps-days").value;
+    if (!q && !cwd && !size && !days) { psStatus.textContent = "set a filter first"; return; }
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (cwd) params.set("cwd", cwd);
+    if (size) params.set("size", size);
+    if (days) params.set("days", days);
+    params.set("card", cardMode);
+    psGo.disabled = true; psStatus.textContent = "searching…";
+    try {
+      const r = await authedFetch("/api/search?" + params.toString());
+      if (!r.ok) { psStatus.textContent = "search failed"; psGo.disabled = false; return; }
+      const j = await r.json();
+      if (j.error) { psStatus.textContent = j.error; psGo.disabled = false; return; }
+      searchResults = j.sessions || [];
+      searchTerm = q;
+      // A full search supersedes the quick filter — clear it so results aren't
+      // hidden by a leftover quick-filter term.
+      quickText = ""; if (quickEl) quickEl.value = "";
+      let st = j.total_matched + " match" + (j.total_matched === 1 ? "" : "es");
+      if (j.truncated) st += " (showing " + searchResults.length + ")";
+      if (q && !j.rg) st += " · ripgrep missing";
+      psStatus.textContent = st;
+      renderPicker();
+      pickerListEl.scrollIntoView({ block: "start" });
+    } catch (e) {
+      psStatus.textContent = "error";
+    }
+    psGo.disabled = false;
+  }
+  psGo.addEventListener("click", runFullSearch);
+  ["ps-content", "ps-cwd"].forEach(id => {
+    document.getElementById(id).addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); runFullSearch(); }
+    });
+  });
+  document.getElementById("ps-clear").addEventListener("click", () => {
+    searchResults = null;
+    searchTerm = "";
+    document.getElementById("ps-content").value = "";
+    document.getElementById("ps-cwd").value = "";
+    document.getElementById("ps-size").value = "";
+    document.getElementById("ps-days").value = "7";   // default back to 1 week
+    psStatus.textContent = "";
+    renderPicker();
+  });
+
   const tvEl = document.getElementById("transcript-view");
   const transcriptEl = document.getElementById("transcript");
   const autoloadEl = document.getElementById("autoload");
@@ -1655,6 +1926,12 @@ footer button.icon {
     if (_tb) _tb.style.display = "none";
     lastPromptKey = "";
     _lastBottomToolUse = null;
+    // Reset search/quick-filter state each time we enter the picker.
+    searchResults = null;
+    searchTerm = "";
+    quickText = "";
+    if (quickEl) quickEl.value = "";
+    if (psStatus) psStatus.textContent = "";
     refreshPicker();
   }
 
@@ -1880,6 +2157,34 @@ footer button.icon {
       tabsScreenEl.textContent = "Error: " + e;
     }
   }
+
+  // Tabs-group title click → popup the live screen of that iTerm tab.
+  const tabscrModal = document.getElementById("tabscr-modal");
+  const tabscrBody = document.getElementById("tabscr-body");
+  const tabscrTitle = document.getElementById("tabscr-title");
+  let _tabscrId = null;
+  async function loadTabScreen() {
+    if (!_tabscrId) return;
+    try {
+      const r = await authedFetch("/api/iterm-screen?iterm_session_id=" + encodeURIComponent(_tabscrId));
+      if (!r.ok) { tabscrBody.textContent = "Error: " + r.status + " " + r.statusText; return; }
+      const j = await r.json();
+      const atBottom = tabscrBody.scrollHeight - tabscrBody.scrollTop - tabscrBody.clientHeight < 24;
+      tabscrBody.textContent = j.screen || "(empty)";
+      if (atBottom) tabscrBody.scrollTop = tabscrBody.scrollHeight;
+    } catch (e) { tabscrBody.textContent = "Error: " + e; }
+  }
+  function openTabScreen(itermId, label) {
+    _tabscrId = itermId;
+    tabscrTitle.textContent = label || "screen";
+    tabscrBody.textContent = "Loading…";
+    tabscrModal.classList.add("show");
+    loadTabScreen();
+  }
+  function closeTabScreen() { tabscrModal.classList.remove("show"); _tabscrId = null; }
+  document.getElementById("tabscr-refresh").addEventListener("click", loadTabScreen);
+  document.getElementById("tabscr-close").addEventListener("click", closeTabScreen);
+  tabscrModal.addEventListener("click", (e) => { if (e.target === tabscrModal) closeTabScreen(); });
 
   tabsBtn.addEventListener("click", () => {
     tabsModal.classList.add("show");
@@ -2655,15 +2960,29 @@ footer button.icon {
     container.innerHTML = "";
     for (const ex of exchanges) {
       if (ex.user) {
-        const blk = document.createElement("div"); blk.className = "msg-block user";
-        const ts = document.createElement("div"); ts.className = "ts"; ts.textContent = "You · " + fmtTs(ex.user.ts);
-        const body = document.createElement("div"); body.className = "body"; body.textContent = ex.user.text;
-        blk.appendChild(ts); blk.appendChild(body); container.appendChild(blk);
+        const blk = document.createElement("div");
+        if (cardMode === "user") {
+          // Compact: no "You", just  mm-dd HH:MM  followed inline by the text.
+          blk.className = "msg-block user compact";
+          const body = document.createElement("div"); body.className = "body";
+          const tsi = document.createElement("span"); tsi.className = "ts-inline";
+          tsi.textContent = fmtTs(ex.user.ts) + "  ";
+          const txt = document.createElement("span");
+          hlInto(txt, ex.user.text, hlTerms());
+          body.appendChild(tsi); body.appendChild(txt);
+          blk.appendChild(body);
+        } else {
+          blk.className = "msg-block user";
+          const ts = document.createElement("div"); ts.className = "ts"; ts.textContent = "You · " + fmtTs(ex.user.ts);
+          const body = document.createElement("div"); body.className = "body"; hlInto(body, ex.user.text, hlTerms());
+          blk.appendChild(ts); blk.appendChild(body);
+        }
+        container.appendChild(blk);
       }
-      if (ex.response) {
+      if (ex.response && cardMode === "both") {
         const blk = document.createElement("div"); blk.className = "msg-block claude";
         const ts = document.createElement("div"); ts.className = "ts"; ts.textContent = "Claude · " + fmtTs(ex.response.ts);
-        const body = document.createElement("div"); body.className = "body"; body.textContent = ex.response.text;
+        const body = document.createElement("div"); body.className = "body"; hlInto(body, ex.response.text, hlTerms());
         blk.appendChild(ts); blk.appendChild(body); container.appendChild(blk);
       }
     }
@@ -2671,7 +2990,7 @@ footer button.icon {
 
   async function refreshPicker() {
     pickerListEl.innerHTML = "<div style='color:var(--muted);font-size:12px;padding:20px;text-align:center'>loading…</div>";
-    const resp = await authedFetch("/api/sessions");
+    const resp = await authedFetch("/api/sessions?card=" + cardMode);
     if (!resp.ok) {
       pickerListEl.innerHTML = "<div style='color:#ff6a6a;font-size:12px'>failed to load</div>";
       return;
@@ -2690,13 +3009,52 @@ footer button.icon {
         pw.style.display = "";
       } else { pw.style.display = "none"; }
     }
-    const sessions = data.sessions || [];
+    pickerBase = data.sessions || [];
+    renderPicker();
+  }
+
+  // The list actually shown = search results (if any) else the 3 groups,
+  // then narrowed by the top quick-filter box (client-side substring).
+  // Multi-keyword match (same rules as full search): `a & b` = AND, `a | b` =
+  // OR, no mixing (a mixed string falls back to a literal substring match).
+  function quickMatches(hay, q) {
+    q = q.trim().toLowerCase();
+    if (!q) return true;
+    const hasAnd = q.includes("&"), hasOr = q.includes("|");
+    if (hasAnd && !hasOr)
+      return q.split("&").map(t => t.trim()).filter(Boolean).every(t => hay.includes(t));
+    if (hasOr && !hasAnd)
+      return q.split("|").map(t => t.trim()).filter(Boolean).some(t => hay.includes(t));
+    return hay.includes(q);
+  }
+  function visibleSessions() {
+    const base = searchResults || pickerBase || [];
+    const q = quickText.trim().toLowerCase();
+    if (!q) return base;
+    return base.filter(s => {
+      // Also match the user requests actually shown on the card (the recent
+      // exchanges), not just the title/preview metadata.
+      const exTexts = (s.exchanges || []).map(e => e && e.user && e.user.text);
+      const hay = [s.title, s.project_path, s.claude_session_id, s.tab_name,
+                   s.last_user_msg, s.first_user_msg,
+                   s.match && s.match.snippet, ...exTexts]
+                   .filter(Boolean).join(" ").toLowerCase();
+      return quickMatches(hay, q);
+    });
+  }
+
+  function renderPicker() {
+    const searching = searchResults !== null;
+    const sessions = visibleSessions();
     if (!sessions.length) {
-      pickerListEl.innerHTML = "<div style='color:var(--muted);font-size:12px;padding:20px;text-align:center'>No sessions yet. Start <code>claude</code> in iTerm2 and use the <em>session-name</em> skill to name it.</div>";
+      const msg = searching ? "No sessions match this search."
+        : (quickText.trim() ? "No sessions match the quick filter."
+          : "No sessions yet. Start <code>claude</code> in iTerm2 and use the <em>session-name</em> skill to name it.");
+      pickerListEl.innerHTML = "<div style='color:var(--muted);font-size:12px;padding:20px;text-align:center'>" + msg + "</div>";
       return;
     }
     pickerListEl.innerHTML = "";
-    const GROUP_TITLES = { tabs: "Tabs", recent: "Recent", named: "Named" };
+    const GROUP_TITLES = { tabs: "Tabs", recent: "Recent", named: "Named", search: "Search results" };
     // Single-window? then the "tabs" title can omit the wX part (just tY).
     const tabWins = new Set(sessions.filter(s => s.group === "tabs")
       .map(s => s.window_index || 0));
@@ -2723,10 +3081,28 @@ footer button.icon {
         const wt = tabsSingleWin
           ? `t${(s.tab_index || 0) + 1}`
           : `w${(s.window_index || 0) + 1}t${(s.tab_index || 0) + 1}`;
-        title.textContent = sidPrefix + wt + (s.tab_name ? ` ${s.tab_name}` : "");
+        title.textContent = sidPrefix + wt + (s.tab_name ? " " : "");
+        if (s.tab_name) {
+          const tn = document.createElement("span");
+          hlInto(tn, s.tab_name, hlTerms());
+          title.appendChild(tn);
+        }
+        // Clickable → popup the live screen of this tab.
+        if (s.iterm_session_id) {
+          title.classList.add("tab-clickable");
+          title.title = "tap to view this tab's live screen";
+          title.addEventListener("click", (e) => {
+            e.stopPropagation();
+            openTabScreen(s.iterm_session_id, sidPrefix + wt + (s.tab_name ? ` ${s.tab_name}` : ""));
+          });
+        }
       } else {
-        title.textContent = sidPrefix + (s.title
-          || (s.last_user_msg || s.first_user_msg || "(no messages yet)").slice(0, 80));
+        const titleText = s.title
+          || (s.last_user_msg || s.first_user_msg || "(no messages yet)").slice(0, 80);
+        title.textContent = sidPrefix;
+        const tspan = document.createElement("span");
+        hlInto(tspan, titleText, hlTerms());
+        title.appendChild(tspan);
       }
       const time = document.createElement("span");
       time.className = "time";
@@ -2776,9 +3152,27 @@ footer button.icon {
         const lbl = document.createElement("span"); lbl.className = "label";
         lbl.textContent = "Last " + fmtTs(s.last_ts);
         prev.appendChild(lbl);
-        prev.appendChild(document.createTextNode((s.last_user_msg || "").slice(0, 100)));
+        const pspan = document.createElement("span");
+        hlInto(pspan, (s.last_user_msg || "").slice(0, 100), hlTerms());
+        prev.appendChild(pspan);
         card.appendChild(prev);
       }
+
+      // When filtering (quick or full), summarize the matched requests right
+      // under the LAST line — highlighted, up to the last 3 — so you can spot
+      // the right session.
+      const hits = hitSummaries(s);
+      hits.snips.forEach((snip, i) => {
+        const hs = document.createElement("div");
+        hs.className = "match-snip";
+        hlInto(hs, snip, hlTerms());
+        if (i === hits.snips.length - 1 && hits.more > 0) {
+          const more = document.createElement("span"); more.className = "more-count";
+          more.textContent = `  (+${hits.more} more)`;
+          hs.appendChild(more);
+        }
+        card.appendChild(hs);
+      });
 
       // Expanded: last few exchanges (user + response pair each) + Attach button
       const expanded = document.createElement("div");

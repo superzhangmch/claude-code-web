@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import time as _time
 import urllib.error
@@ -162,16 +163,39 @@ def _is_command_noise(text: str) -> bool:
     return text.lstrip().startswith(_COMMAND_NOISE_TAGS)
 
 
+def _round_weight(text: str) -> float:
+    """How much a user request counts toward the request-only "rounds" budget.
+    Trivial turns (very short, or a bare 1-2 word command) count 0.2 so the
+    budget fills with INFORMATIVE requests. Char-length is the primary gate
+    (CJK has no spaces, so word-count alone would mark every Chinese request
+    trivial); the word-count rule applies only to ASCII text."""
+    s = (text or "").strip().rstrip("…").strip()
+    if len(s) < 5:
+        return 0.2
+    has_cjk = any('一' <= c <= '鿿' or '぀' <= c <= 'ヿ'
+                  or '가' <= c <= '힣' for c in s)
+    if not has_cjk and len(s.split()) <= 2:
+        return 0.2
+    return 1.0
+
+
 def extract_recent_context(
     jsonl_path: Path,
     n_exchanges: int = 3,
     max_user_chars: int = 100,
     max_response_chars: int = 200,
+    weighted_target: Optional[float] = None,
+    max_rounds: int = 12,
 ) -> dict:
     """Walk JSONL once, build a list of "exchanges" — each is a real user msg
     paired with the LAST assistant text that came before the NEXT user msg
-    (which is what the user actually saw as 'the reply'). Returns last
-    n_exchanges, plus first_user_msg/ts for header preview."""
+    (which is what the user actually saw as 'the reply').
+
+    Default: return the last `n_exchanges` (user+response).
+    Request-only (`weighted_target` set): return the most recent user requests,
+    dropping responses, accumulating by `_round_weight` until the budget is hit
+    (so trivial turns don't crowd out informative ones), capped at `max_rounds`.
+    Always also returns first_user_msg/ts for the header preview."""
     exchanges: list[dict] = []  # [{user: {text, ts}, response: {text, ts}|None}]
     pending_response_text: str = ""
     pending_response_ts: str = ""
@@ -229,8 +253,21 @@ def extract_recent_context(
     if exchanges and exchanges[-1]["response"] is None and pending_response_text:
         exchanges[-1]["response"] = _trunc_msg(pending_response_text, pending_response_ts, max_response_chars)
 
+    if weighted_target is not None:
+        picked: list[dict] = []
+        total = 0.0
+        for ex in reversed(exchanges):
+            picked.append({"user": ex["user"], "response": None})  # drop responses
+            total += _round_weight(ex["user"]["text"])
+            if total >= weighted_target or len(picked) >= max_rounds:
+                break
+        picked.reverse()
+        out_exchanges = picked
+    else:
+        out_exchanges = exchanges[-n_exchanges:] if n_exchanges > 0 else exchanges
+
     return {
-        "exchanges": exchanges[-n_exchanges:] if n_exchanges > 0 else exchanges,
+        "exchanges": out_exchanges,
         "first_user_msg": exchanges[0]["user"]["text"] if exchanges else "",
         "first_ts": exchanges[0]["user"]["ts"] if exchanges else "",
     }
@@ -1387,7 +1424,8 @@ UNNAMED_TOP_N = 5
 
 
 def _session_dict(jsonl: Path, mtime: float, named: Optional[dict],
-                  group: str, live_tab: Optional[dict] = None) -> dict:
+                  group: str, live_tab: Optional[dict] = None,
+                  card_mode: str = "both") -> dict:
     import datetime as _dt
     sid = jsonl.stem
     try:
@@ -1396,7 +1434,14 @@ def _session_dict(jsonl: Path, mtime: float, named: Optional[dict],
         file_size = 0
     binding_info = bindings.get_by_session(sid)
     is_bound = binding_info is not None and verify_binding(binding_info)
-    ctx = extract_recent_context(jsonl, n_exchanges=3, max_user_chars=64, max_response_chars=100)
+    # Request-only ("user"): ~5 content-weighted rounds, responses dropped.
+    # Both: last 3 user+response exchanges.
+    if card_mode == "user":
+        ctx = extract_recent_context(jsonl, max_user_chars=64,
+                                     weighted_target=5.0, max_rounds=12)
+    else:
+        ctx = extract_recent_context(jsonl, n_exchanges=3, max_user_chars=64,
+                                     max_response_chars=100)
     exs = ctx["exchanges"]
     last_user = exs[-1]["user"] if exs else None
     d = {
@@ -1426,7 +1471,8 @@ def _session_dict(jsonl: Path, mtime: float, named: Optional[dict],
 
 
 def build_picker_sessions(live_tabs: Optional[list[dict]] = None,
-                          recent_n: int = 10, named_n: int = 5) -> list[dict]:
+                          recent_n: int = 10, named_n: int = 5,
+                          card_mode: str = "both") -> list[dict]:
     """Three groups, in order, each session tagged with `group`:
       (1) tabs    — every live iTerm2 claude tab (resolved to a session-id via
                     the claude session store), sorted by window/tab;
@@ -1465,7 +1511,8 @@ def build_picker_sessions(live_tabs: Optional[list[dict]] = None,
         jsonl = find_jsonl_for_session(sid) or (
             PROJECTS_ROOT / _encode_cwd(lt.get("cwd", "")) / f"{sid}.jsonl")
         mtime = mtime_by_sid.get(sid, 0.0)
-        out.append(_session_dict(jsonl, mtime, titles.get(sid), "tabs", live_tab=lt))
+        out.append(_session_dict(jsonl, mtime, titles.get(sid), "tabs",
+                                 live_tab=lt, card_mode=card_mode))
         seen.add(sid)
 
     # Browse groups skip "empty" sessions (<=1 round) — declutters the list of
@@ -1480,7 +1527,7 @@ def build_picker_sessions(live_tabs: Optional[list[dict]] = None,
             break
         if sid in seen:
             continue
-        d = _session_dict(jsonl, mtime, titles.get(sid), "recent")
+        d = _session_dict(jsonl, mtime, titles.get(sid), "recent", card_mode=card_mode)
         seen.add(sid)
         if _empty(d):
             continue
@@ -1493,7 +1540,7 @@ def build_picker_sessions(live_tabs: Optional[list[dict]] = None,
             break
         if sid in seen or titles.get(sid) is None:
             continue
-        d = _session_dict(jsonl, mtime, titles.get(sid), "named")
+        d = _session_dict(jsonl, mtime, titles.get(sid), "named", card_mode=card_mode)
         seen.add(sid)
         if _empty(d):
             continue
@@ -1779,6 +1826,40 @@ def _is_system_user_entry(e: dict) -> bool:
                    and isinstance(p.get("text"), str) and _is_command_noise(p["text"])
                    for p in c)
     return False
+
+
+def _user_request_text(e: dict) -> Optional[str]:
+    """Genuine user-typed prompt text from a JSONL entry, or None if it's not a
+    real user request — i.e. assistant/thinking/tool lines, tool-results stored
+    as type=user, and slash-command/system noise are all excluded. This is the
+    discriminator that makes content search hit only what the USER actually
+    asked (rg alone can't tell a real prompt from a tool_result on a user line)."""
+    if e.get("type") != "user" or _is_system_user_entry(e):
+        return None
+    msg = e.get("message") or {}
+    if not isinstance(msg, dict) or msg.get("role") != "user":
+        return None
+    c = msg.get("content")
+    if isinstance(c, str):
+        return c if c.strip() else None
+    if isinstance(c, list):
+        parts = [p.get("text") for p in c
+                 if isinstance(p, dict) and p.get("type") == "text"
+                 and isinstance(p.get("text"), str)]
+        joined = "\n".join(t for t in parts if t)
+        return joined if joined.strip() else None
+    return None
+
+
+def _snippet_around(text: str, q: str, width: int = 70) -> str:
+    """A one-line snippet of `text` centered on the first match of `q`."""
+    t = " ".join(text.split())
+    i = t.lower().find(q.lower())
+    if i < 0:
+        return t[: width * 2]
+    start = max(0, i - width)
+    end = min(len(t), i + len(q) + width)
+    return ("…" if start > 0 else "") + t[start:end] + ("…" if end < len(t) else "")
 
 
 def _is_user_msg(e: dict) -> bool:
@@ -2111,7 +2192,7 @@ def _get_battery() -> Optional[dict]:
 
 
 @app.get("/api/sessions", dependencies=[Depends(require_token)])
-async def get_sessions():
+async def get_sessions(card: str = "both"):
     """Picker list, grouped: tabs / recent / named. The "tabs" group lists EVERY
     live iTerm2 claude tab, resolved to its session-id via the claude session
     store (ground-truth pid->session map); recent/named browse the transcripts."""
@@ -2140,9 +2221,164 @@ async def get_sessions():
         log.warning("claude session-store changed? %s", store.get("detail"))
     return {
         "sessions": build_picker_sessions(live_tabs=live_tabs,
-                                          recent_n=max(10, n_claude_tabs)),
+                                          recent_n=max(10, n_claude_tabs),
+                                          card_mode=card),
         "battery": _get_battery(),
         "claude_store": store,
+    }
+
+
+# launchd runs us with a minimal PATH (no /opt/homebrew/bin), so which() alone
+# misses ripgrep — fall back to the usual install locations.
+_RG_BIN = shutil.which("rg") or next(
+    (p for p in ("/opt/homebrew/bin/rg", "/usr/local/bin/rg", "/usr/bin/rg")
+     if os.path.exists(p)), None)
+
+# Size buckets for /api/search, derived from the actual transcript-size
+# distribution (~60 files: p25≈36KB, p50≈122KB, p75≈1.6MB, p90≈9MB).
+_SEARCH_SIZE_BUCKETS = {
+    "lt50k":    (0,                 50 * 1024),
+    "50k-500k": (50 * 1024,         500 * 1024),
+    "500k-5m":  (500 * 1024,        5 * 1024 * 1024),
+    "gt5m":     (5 * 1024 * 1024,   None),
+}
+
+
+@app.get("/api/search", dependencies=[Depends(require_token)])
+async def search_sessions(q: Optional[str] = None, cwd: Optional[str] = None,
+                          size: Optional[str] = None, days: Optional[int] = None,
+                          limit: int = 20, card: str = "both"):
+    """Full backend search across ALL transcripts, with optional filters:
+      - q:    content query — matches ONLY genuine user requests (real prompts;
+              tool-results-as-user and command noise are excluded), found fast
+              via ripgrep then JSON-confirmed per matched line. Multi-keyword:
+              `a & b` = AND (all present), `a | b` = OR (any present); the two
+              operators can't be mixed.
+      - cwd:  working-dir substring (matched against the project dir name).
+      - size: one of _SEARCH_SIZE_BUCKETS keys.
+      - days: only sessions touched within the last N days.
+    Cheap stat/dir filters run first; content grep runs only over survivors;
+    transcript dicts are built only for the top `limit` (by recency)."""
+    raw_q = (q or "").strip()
+    cwd_q = (cwd or "").strip().lower()
+    cwd_norm = cwd_q.replace("/", "-").replace("_", "-")
+    now = _time.time()
+    size_lo, size_hi = _SEARCH_SIZE_BUCKETS.get(size or "", (None, None))
+
+    # Parse the content query into terms + boolean mode. `&`=AND, `|`=OR; mixing
+    # the two is rejected (ambiguous precedence).
+    mode, terms = "or", []
+    if raw_q:
+        if "&" in raw_q and "|" in raw_q:
+            return {"error": "Use only & (AND) or only | (OR), not both.",
+                    "sessions": [], "total_scanned": 0, "total_matched": 0,
+                    "truncated": False, "rg": bool(_RG_BIN)}
+        sep = "&" if "&" in raw_q else "|"
+        mode = "and" if sep == "&" else "or"
+        terms = [t.strip() for t in raw_q.split(sep) if t.strip()]
+
+    # 1. enumerate + cheap stat/dir filters (no file reads yet).
+    cands: list[tuple[float, Path, str]] = []
+    if PROJECTS_ROOT.exists():
+        for proj in PROJECTS_ROOT.iterdir():
+            if not proj.is_dir():
+                continue
+            if cwd_q and cwd_norm not in proj.name.lower():
+                continue
+            for jl in proj.glob("*.jsonl"):
+                try:
+                    st = jl.stat()
+                except OSError:
+                    continue
+                if size_lo is not None and st.st_size < size_lo:
+                    continue
+                if size_hi is not None and st.st_size >= size_hi:
+                    continue
+                if days and (now - st.st_mtime) > days * 86400:
+                    continue
+                cands.append((st.st_mtime, jl, jl.stem))
+
+    # 2. content grep (user-requests only) over the survivors. rg is run with
+    #    every term OR'd (-e per term) to gather candidate lines fast; the
+    #    AND/OR decision is then applied precisely against the user-request text.
+    matches: dict[str, dict] = {}
+    if terms:
+        if _RG_BIN and cands:
+            paths = [str(p) for _, p, _ in cands]
+            rg_args = [_RG_BIN, "-F", "-i", "--json"]
+            for t in terms:
+                rg_args += ["-e", t]
+            try:
+                proc = subprocess.run(rg_args + ["--", *paths],
+                                      capture_output=True, text=True, timeout=20)
+                out = proc.stdout
+            except Exception as e:
+                log.warning("search rg failed: %s", e)
+                out = ""
+            lows = [t.lower() for t in terms]
+            for ln in out.splitlines():
+                try:
+                    ev = json.loads(ln)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("type") != "match":
+                    continue
+                d = ev.get("data") or {}
+                line_text = (d.get("lines") or {}).get("text") or ""
+                try:
+                    entry = json.loads(line_text)
+                except json.JSONDecodeError:
+                    continue
+                text = _user_request_text(entry)
+                if not text:
+                    continue  # hit was in a tool-result / metadata, not a prompt
+                tl = text.lower()
+                if mode == "and":
+                    if not all(t in tl for t in lows):
+                        continue
+                else:
+                    if not any(t in tl for t in lows):
+                        continue
+                sid = Path((d.get("path") or {}).get("text", "")).stem
+                if not sid:
+                    continue
+                hit = next((t for t in terms if t.lower() in tl), terms[0])
+                snip = _snippet_around(text, hit)
+                m = matches.get(sid)
+                if m is None:
+                    matches[sid] = {"snippets": [snip], "count": 1}
+                else:
+                    m["snippets"].append(snip)
+                    m["count"] += 1
+            # Keep the LAST 3 matching requests per session (rg emits matches in
+            # file order = chronological, so the tail is the most recent).
+            for m in matches.values():
+                m["snippets"] = m["snippets"][-3:]
+            kept = [c for c in cands if c[2] in matches]
+        else:
+            kept = []
+    else:
+        kept = cands
+
+    # 3. rank by recency, build dicts only for the top `limit`.
+    kept.sort(key=lambda x: x[0], reverse=True)
+    total_matched = len(kept)
+    limit = max(1, min(limit, 200))
+    kept = kept[:limit]
+
+    titles = {e["session_id"]: e for e in load_session_index()}
+    out_sessions = []
+    for mt, jl, sid in kept:
+        d = _session_dict(jl, mt, titles.get(sid), "search", card_mode=card)
+        if sid in matches:
+            d["match"] = matches[sid]
+        out_sessions.append(d)
+    return {
+        "sessions": out_sessions,
+        "total_scanned": len(cands),
+        "total_matched": total_matched,
+        "truncated": total_matched > len(out_sessions),
+        "rg": bool(_RG_BIN),
     }
 
 
