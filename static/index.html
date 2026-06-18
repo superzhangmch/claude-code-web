@@ -189,6 +189,15 @@ main {
 #picker-search input:focus, #picker-search select:focus {
   outline: none; border-color: var(--accent);
 }
+#picker-search .ps-emb {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--muted); font-size: 12px; cursor: pointer; user-select: none;
+}
+#picker-search .ps-emb input[type="checkbox"] {
+  -webkit-appearance: checkbox; appearance: checkbox;
+  width: auto; padding: 0; border: 0; border-radius: 0;
+  flex: none; accent-color: var(--accent); cursor: pointer;
+}
 #picker-search .ps-row { display: flex; gap: 7px; align-items: center; }
 #picker-search .ps-row select { flex: 1; min-width: 0; }
 #picker-search #ps-go, #picker-search #ps-clear {
@@ -200,6 +209,19 @@ main {
 .hl { color: #ff4d4d; font-weight: 700; }
 body.light .hl { color: #c81e1e; }
 #picker-list .session-card .match-snip .more-count { color: var(--muted); font-weight: 400; }
+#picker-list .session-card .sess-summary {
+  margin: 5px 0 2px; font-size: 12px; line-height: 1.45;
+  color: var(--text); opacity: 0.9;
+  border-left: 2px solid var(--assistant); padding: 3px 8px;
+  background: var(--code-bg); border-radius: 0 4px 4px 0; word-break: break-word;
+}
+#picker-list .session-card .sess-summary .sm-ico { opacity: 0.7; }
+#picker-list .session-card .sess-summary .sm-title { font-weight: 700; color: var(--text); }
+#picker-list .session-card .sess-summary .sm-body { margin-top: 2px; }
+#picker-list .session-card .score-line {
+  margin-top: 5px; font-size: 11px; color: var(--accent);
+  font-variant-numeric: tabular-nums; text-align: right; opacity: 0.85;
+}
 #picker-list .session-card .match-snip {
   margin-top: 6px; font-size: 12px; color: var(--text);
   background: var(--code-bg); border-left: 2px solid var(--accent);
@@ -1312,6 +1334,7 @@ footer button.icon {
         <div class="ps-head">Full search — all sessions</div>
         <input id="ps-content" type="search" autocomplete="off"
                placeholder="user request:  a &amp; b (AND) · a | b (OR)" />
+        <label class="ps-emb"><input type="checkbox" id="ps-emb" checked /> 语义检索 (emb) — 按摘要含义排序</label>
         <input id="ps-cwd" type="search" autocomplete="off"
                placeholder="working dir contains…" />
         <div class="ps-row">
@@ -1704,12 +1727,15 @@ footer button.icon {
     const cwd = document.getElementById("ps-cwd").value.trim();
     const size = document.getElementById("ps-size").value;
     const days = document.getElementById("ps-days").value;
+    const useEmb = document.getElementById("ps-emb").checked;
+    if (useEmb && !q) { psStatus.textContent = "语义检索需要输入查询"; return; }
     if (!q && !cwd && !size && !days) { psStatus.textContent = "set a filter first"; return; }
     const params = new URLSearchParams();
     if (q) params.set("q", q);
     if (cwd) params.set("cwd", cwd);
     if (size) params.set("size", size);
     if (days) params.set("days", days);
+    if (useEmb) params.set("emb", "1");
     params.set("card", cardMode);
     psGo.disabled = true; psStatus.textContent = "searching…";
     try {
@@ -1722,9 +1748,9 @@ footer button.icon {
       // A full search supersedes the quick filter — clear it so results aren't
       // hidden by a leftover quick-filter term.
       quickText = ""; if (quickEl) quickEl.value = "";
-      let st = j.total_matched + " match" + (j.total_matched === 1 ? "" : "es");
+      let st = j.total_matched + (j.emb ? " semantic match" : " match") + (j.total_matched === 1 ? "" : "es");
       if (j.truncated) st += " (showing " + searchResults.length + ")";
-      if (q && !j.rg) st += " · ripgrep missing";
+      if (q && !j.emb && !j.rg) st += " · ripgrep missing";
       psStatus.textContent = st;
       renderPicker();
       pickerListEl.scrollIntoView({ block: "start" });
@@ -1746,6 +1772,7 @@ footer button.icon {
     document.getElementById("ps-cwd").value = "";
     document.getElementById("ps-size").value = "";
     document.getElementById("ps-days").value = "7";   // default back to 1 week
+    document.getElementById("ps-emb").checked = true;   // default on
     psStatus.textContent = "";
     renderPicker();
   });
@@ -3032,7 +3059,7 @@ footer button.icon {
       // exchanges), not just the title/preview metadata.
       const exTexts = (s.exchanges || []).map(e => e && e.user && e.user.text);
       const hay = [s.title, s.project_path, s.claude_session_id, s.tab_name,
-                   s.last_user_msg, s.first_user_msg,
+                   s.last_user_msg, s.first_user_msg, s.summary, s.summary_title,
                    s.match && s.match.snippet, ...exTexts]
                    .filter(Boolean).join(" ").toLowerCase();
       return quickMatches(hay, q);
@@ -3103,6 +3130,27 @@ footer button.icon {
       cwd.textContent = s.project_path || "";
       card.appendChild(cwd);
 
+      // "What it's doing" — LLM title (bold) + summary (background-generated).
+      if (s.summary || s.summary_title) {
+        const sm = document.createElement("div");
+        sm.className = "sess-summary";
+        const head = document.createElement("div"); head.className = "sm-head";
+        const ico = document.createElement("span"); ico.className = "sm-ico"; ico.textContent = "📝 ";
+        head.appendChild(ico);
+        if (s.summary_title) {
+          const tt = document.createElement("span"); tt.className = "sm-title";
+          hlInto(tt, s.summary_title, hlTerms());
+          head.appendChild(tt);
+        }
+        sm.appendChild(head);
+        if (s.summary) {
+          const body = document.createElement("div"); body.className = "sm-body";
+          hlInto(body, s.summary, hlTerms());
+          sm.appendChild(body);
+        }
+        card.appendChild(sm);
+      }
+
       function fmtSize(n) {
         if (!n) return "";
         if (n < 1024) return n + "B";
@@ -3160,6 +3208,17 @@ footer button.icon {
         }
         card.appendChild(hs);
       });
+
+      // Semantic search: show the title & summary cosine scores as the last line.
+      if (typeof s.score === "number") {
+        const sl = document.createElement("div");
+        sl.className = "score-line";
+        const parts = [];
+        if (typeof s.score_title === "number") parts.push("标题 " + s.score_title.toFixed(3));
+        if (typeof s.score_summary === "number") parts.push("摘要 " + s.score_summary.toFixed(3));
+        sl.textContent = "emb · " + (parts.length ? parts.join(" · ") : s.score.toFixed(3));
+        card.appendChild(sl);
+      }
 
       // Expanded: last few exchanges (user + response pair each) + Attach button
       const expanded = document.createElement("div");
