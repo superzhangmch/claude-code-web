@@ -56,10 +56,6 @@ body.light #screen-modal .screen-body,
 body.light #tabs-modal .screen-body,
 body.light #tabscr-modal .screen-body { background: #d7d6d0; color: var(--text); }
 body.light #tail-box { background: #d7d6d0; }
-#picker-list .session-card .title.tab-clickable { cursor: pointer; }
-#picker-list .session-card .title.tab-clickable:hover {
-  text-decoration: underline; text-decoration-color: var(--accent);
-}
 body.light .session-card .badge.bound { background: #d7ecc6; color: #2f6b2e; }
 body.light .session-card .badge.unnamed { background: var(--panel2); color: var(--muted); }
 * { box-sizing: border-box; }
@@ -3087,15 +3083,6 @@ footer button.icon {
           hlInto(tn, s.tab_name, hlTerms());
           title.appendChild(tn);
         }
-        // Clickable → popup the live screen of this tab.
-        if (s.iterm_session_id) {
-          title.classList.add("tab-clickable");
-          title.title = "tap to view this tab's live screen";
-          title.addEventListener("click", (e) => {
-            e.stopPropagation();
-            openTabScreen(s.iterm_session_id, sidPrefix + wt + (s.tab_name ? ` ${s.tab_name}` : ""));
-          });
-        }
       } else {
         const titleText = s.title
           || (s.last_user_msg || s.first_user_msg || "(no messages yet)").slice(0, 80);
@@ -3221,6 +3208,18 @@ footer button.icon {
       attachRow.appendChild(collapseBtn);
       const spacer = document.createElement("span"); spacer.style.flex = "1";
       attachRow.appendChild(spacer);
+      // Tabs group: a button to popup this tab's live screen (less misclick-prone
+      // than making the whole title clickable).
+      if (s.group === "tabs" && s.iterm_session_id) {
+        const scrBtn = document.createElement("button");
+        scrBtn.textContent = "🖥 Screen";
+        scrBtn.className = "more";
+        scrBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          openTabScreen(s.iterm_session_id, title.textContent.trim());
+        });
+        attachRow.appendChild(scrBtn);
+      }
       if (s.bound) {
         const detachBtn = document.createElement("button");
         detachBtn.textContent = "Detach";

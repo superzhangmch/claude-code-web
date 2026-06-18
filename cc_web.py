@@ -199,6 +199,7 @@ def extract_recent_context(
     exchanges: list[dict] = []  # [{user: {text, ts}, response: {text, ts}|None}]
     pending_response_text: str = ""
     pending_response_ts: str = ""
+    last_cwd: Optional[str] = None
     try:
         with jsonl_path.open("r", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -206,6 +207,9 @@ def extract_recent_context(
                     e = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                cwd = e.get("cwd")
+                if cwd:
+                    last_cwd = cwd  # most-recent cwd, captured in this one pass
                 t = e.get("type")
                 if t == "user" and not (e.get("isMeta") or e.get("isSidechain") or e.get("toolUseResult")):
                     msg = e.get("message") or {}
@@ -270,6 +274,7 @@ def extract_recent_context(
         "exchanges": out_exchanges,
         "first_user_msg": exchanges[0]["user"]["text"] if exchanges else "",
         "first_ts": exchanges[0]["user"]["ts"] if exchanges else "",
+        "project_path": last_cwd or "",
     }
 
 
@@ -1422,6 +1427,47 @@ async def _ensure_iterm2_running() -> None:
 NAMED_TOP_N = 5
 UNNAMED_TOP_N = 5
 
+# Cache the expensive file-derived context so we don't re-read multi-MB
+# transcripts on every picker load. Keyed by (path, mtime, size) — any append
+# changes mtime/size and busts it. We build BOTH card views ("both" and "user")
+# in a single read, so toggling Q / Q+A on an unchanged session never re-reads.
+# Bound/live-tab state is NOT cached (it changes independently of the file).
+_SESSION_CTX_CACHE: dict[tuple, dict] = {}
+
+
+def _session_views(jsonl: Path, st) -> dict:
+    """One read → both card views, cached by (path, mtime, size).
+      - "both": last 3 user+response exchanges.
+      - "user": most-recent content-weighted ~5 rounds, responses dropped.
+    Plus first_user_msg/ts and project_path (last cwd)."""
+    ck = (str(jsonl), st.st_mtime, st.st_size) if st else None
+    cached = _SESSION_CTX_CACHE.get(ck) if ck else None
+    if cached is not None:
+        return cached
+    full = extract_recent_context(jsonl, n_exchanges=0, max_user_chars=64,
+                                  max_response_chars=100)
+    all_exs = full["exchanges"]
+    picked: list[dict] = []
+    total = 0.0
+    for ex in reversed(all_exs):
+        picked.append({"user": ex["user"], "response": None})
+        total += _round_weight(ex["user"]["text"])
+        if total >= 5.0 or len(picked) >= 12:
+            break
+    picked.reverse()
+    views = {
+        "both": all_exs[-3:],
+        "user": picked,
+        "first_user_msg": full["first_user_msg"],
+        "first_ts": full["first_ts"],
+        "project_path": full["project_path"],
+    }
+    if ck:
+        if len(_SESSION_CTX_CACHE) > 1000:
+            _SESSION_CTX_CACHE.clear()
+        _SESSION_CTX_CACHE[ck] = views
+    return views
+
 
 def _session_dict(jsonl: Path, mtime: float, named: Optional[dict],
                   group: str, live_tab: Optional[dict] = None,
@@ -1429,29 +1475,24 @@ def _session_dict(jsonl: Path, mtime: float, named: Optional[dict],
     import datetime as _dt
     sid = jsonl.stem
     try:
-        file_size = jsonl.stat().st_size
+        st = jsonl.stat()
+        file_size = st.st_size
     except OSError:
+        st = None
         file_size = 0
     binding_info = bindings.get_by_session(sid)
     is_bound = binding_info is not None and verify_binding(binding_info)
-    # Request-only ("user"): ~5 content-weighted rounds, responses dropped.
-    # Both: last 3 user+response exchanges.
-    if card_mode == "user":
-        ctx = extract_recent_context(jsonl, max_user_chars=64,
-                                     weighted_target=5.0, max_rounds=12)
-    else:
-        ctx = extract_recent_context(jsonl, n_exchanges=3, max_user_chars=64,
-                                     max_response_chars=100)
-    exs = ctx["exchanges"]
+    views = _session_views(jsonl, st)
+    exs = views["user"] if card_mode == "user" else views["both"]
     last_user = exs[-1]["user"] if exs else None
     d = {
         "claude_session_id": sid,
         "title": (named.get("title") if named else ""),
-        "project_path": (named.get("project_path") if named else "") or _project_path_from_jsonl(jsonl) or "",
+        "project_path": (named.get("project_path") if named else "") or views.get("project_path") or "",
         "last_visit": _dt.datetime.fromtimestamp(mtime).strftime("%m-%d %H:%M"),
         "file_size": file_size,
-        "first_user_msg": ctx["first_user_msg"],
-        "first_ts": ctx["first_ts"],
+        "first_user_msg": views["first_user_msg"],
+        "first_ts": views["first_ts"],
         "last_user_msg": last_user["text"] if last_user else "",
         "last_ts": last_user["ts"] if last_user else "",
         "exchanges": exs,
