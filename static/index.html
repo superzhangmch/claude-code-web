@@ -3399,7 +3399,10 @@ footer button.icon {
     }
     if (data.result === "not_running") {
       const cwdHint = data.cwd ? `\nsession cwd: ${data.cwd}` : "";
-      if (confirm(`No iTerm2 tab matches this session's cwd — so it isn't currently running.${cwdHint}\n\nResume it on iTerm2 (opens a new tab + \`claude --resume\`)?`)) {
+      const why = data.store_ok
+        ? "This session isn't currently running (no live claude process for it)."
+        : "No iTerm2 tab matches this session's cwd — so it isn't currently running.";
+      if (confirm(`${why}${cwdHint}\n\nResume it on iTerm2 (opens a new tab + \`claude --resume\`)?`)) {
         showLoading("Resuming… (opening tab + waiting for claude)");
         const r = await authedFetch("/api/resume", {
           method: "POST",

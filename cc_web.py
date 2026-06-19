@@ -1319,7 +1319,18 @@ def _pid_alive_with_start(pid: int, expected_start: float, tolerance: float = 1.
 
 
 def verify_binding(b: Binding) -> bool:
-    return _pid_alive_with_start(b.pid, b.pid_start)
+    if not _pid_alive_with_start(b.pid, b.pid_start):
+        return False
+    # Store is ground truth: if claude reports this pid running a DIFFERENT
+    # session than the binding claims, the binding is provably wrong (a bad
+    # legacy LLM match, or the tab switched sessions) — reject it so the card
+    # stops showing "connected" to the wrong tab and gets re-resolved/resumed.
+    # Only reject on a POSITIVE contradiction; if the store has no entry for
+    # this pid we keep the binding (store-unavailable fallback).
+    meta = _claude_session_meta(b.pid)
+    if meta and meta.get("sessionId") and meta["sessionId"] != b.claude_session_id:
+        return False
+    return True
 
 
 # ---------- JSONL cache (delta reads) ----------
@@ -2942,6 +2953,16 @@ async def post_attach(payload: AttachPayload):
     if not candidates_refs:
         return {"result": "not_running", "session_id": sid, "cwd": target_cwd,
                 "note": "the only tabs in this cwd are running other (resumed) sessions"}
+
+    # Store is GROUND TRUTH. If the pid<->session store is healthy and neither
+    # the pid-map nor the `--resume` argv proved a live tab for this session,
+    # then it simply isn't running — every remaining candidate is a tab the
+    # store shows is running a DIFFERENT session. We must NOT fall back to the
+    # marker/score/LLM guessing here: that's exactly what mis-bound session
+    # 1571 onto the tab actually running f863397b. Resume instead.
+    if _claude_store_health(len(refs)).get("ok") is not False:
+        return {"result": "not_running", "session_id": sid, "cwd": target_cwd,
+                "store_ok": True}
 
     # Marker short-circuit:
     #   1. For each candidate iTerm tab, read its current screen and extract
