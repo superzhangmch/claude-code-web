@@ -914,7 +914,7 @@ footer button.icon {
 #candidlg .modal-card { padding: 10px; }
 
 #screen-modal .modal-card.screen-card {
-  width: 95vw; max-width: 1100px; max-height: 85vh;
+  width: 95vw; max-width: 1100px; height: 85vh;
   display: flex; flex-direction: column; gap: 8px;
 }
 #screen-modal .modal-row {
@@ -930,7 +930,7 @@ footer button.icon {
   overflow: auto; white-space: pre;
 }
 #tabscr-modal .modal-card.screen-card {
-  width: 95vw; max-width: 1100px; max-height: 85vh;
+  width: 95vw; max-width: 1100px; height: 85vh;
   display: flex; flex-direction: column; gap: 8px;
 }
 #tabscr-modal .modal-row { display: flex; align-items: center; gap: 8px; }
@@ -959,6 +959,8 @@ footer button.icon {
 }
 #tabs-modal .modal-row { display: flex; align-items: center; gap: 8px; }
 #tabs-modal .modal-row h3 { margin: 0; flex: 1; font-size: 14px; }
+#tabs-modal .tabs-snap-row { flex-shrink: 0; }
+#tabs-modal #tabs-snap-status { font-size: 11px; color: var(--muted); margin-left: auto; }
 #tabs-modal .tabs-list {
   display: flex; flex-direction: column; gap: 6px;
   flex-shrink: 0; max-height: 30vh; overflow-y: auto;
@@ -1216,6 +1218,11 @@ footer button.icon {
         <h3>iTerm2 tabs</h3>
         <button id="tabs-refresh" class="btn">↻</button>
         <button id="tabs-close" class="btn">close</button>
+      </div>
+      <div class="modal-row tabs-snap-row">
+        <button id="tabs-snap-save" class="btn" title="保存当前所有 claude tab（含顺序），重启前点">💾 Save list</button>
+        <button id="tabs-snap-resume" class="btn" title="按原顺序 claude --resume 恢复，重启后点">↻ Resume saved</button>
+        <span id="tabs-snap-status"></span>
       </div>
       <div id="tabs-list" class="tabs-list"></div>
       <pre id="tabs-screen" class="screen-body">Pick a tab above to view its screen.</pre>
@@ -2222,6 +2229,55 @@ footer button.icon {
   tabsClose.addEventListener("click", () => tabsModal.classList.remove("show"));
   tabsModal.addEventListener("click", (e) => {
     if (e.target === tabsModal) tabsModal.classList.remove("show");
+  });
+
+  // ---- save / resume the live session list (survive a reboot) ----
+  const snapStatus = document.getElementById("tabs-snap-status");
+  const snapSaveBtn = document.getElementById("tabs-snap-save");
+  const snapResumeBtn = document.getElementById("tabs-snap-resume");
+  const fmtSnap = (arr) => arr.map((s, i) =>
+    `${i + 1}. [${(s.sid || "").slice(0, 8)}] ${s.name || ""}  ${s.cwd || ""}`).join("\n");
+  // Disable BOTH buttons while either op runs (resume can take 10s+; no
+  // double-clicks / concurrent save+resume).
+  const snapBusy = (on) => { snapSaveBtn.disabled = on; snapResumeBtn.disabled = on; };
+  snapSaveBtn.addEventListener("click", async () => {
+    // Guard the footgun: Save OVERWRITES the previous snapshot. If one exists
+    // (e.g. you meant to click Resume after a reboot), confirm before clobbering.
+    let prev = null;
+    try { prev = await (await authedFetch("/api/sessions-snapshot")).json(); } catch {}
+    if (prev && (prev.sessions || []).length) {
+      if (!confirm(`⚠️ 已存在快照:${prev.sessions.length} 个 session(存于 ${prev.saved_at})。\n\nSave 会用“当前”的 tab 列表覆盖它。\n（重启后想恢复的话应该点 “Resume saved”,不是 Save!）\n\n确定要覆盖?`)) return;
+    } else {
+      if (!confirm("保存当前所有 claude tab(含顺序)为快照?")) return;
+    }
+    snapBusy(true);
+    snapStatus.textContent = "saving…";
+    try {
+      const r = await authedFetch("/api/sessions-snapshot/save", { method: "POST" });
+      if (!r.ok) { snapStatus.textContent = "save failed"; alert("Save failed: " + await r.text()); return; }
+      const j = await r.json();
+      snapStatus.textContent = `saved ${j.count} · ${j.saved_at}`;
+      alert(`已保存 ${j.count} 个 claude session(按顺序):\n\n${fmtSnap(j.sessions || [])}\n\n保存时间: ${j.saved_at}\n现在可以安全重启。重启后回到本页点 “Resume saved”。`);
+    } catch (e) { snapStatus.textContent = "error"; alert("Save error: " + e); }
+    finally { snapBusy(false); }
+  });
+  snapResumeBtn.addEventListener("click", async () => {
+    let snap;
+    try { snap = await (await authedFetch("/api/sessions-snapshot")).json(); } catch { snap = null; }
+    if (!snap || !(snap.sessions || []).length) { alert("没有已保存的 session 快照。"); return; }
+    if (!confirm(`将按原顺序 resume ${snap.sessions.length} 个 session(已在运行的会自动跳过):\n\n${fmtSnap(snap.sessions)}\n\n保存于 ${snap.saved_at}\n\n继续?`)) return;
+    snapBusy(true);
+    snapStatus.textContent = "resuming… (每个 tab 间隔约 1.2s,请稍候)";
+    try {
+      const r = await authedFetch("/api/sessions-snapshot/resume", { method: "POST" });
+      if (!r.ok) { snapStatus.textContent = "resume failed"; alert("Resume failed: " + await r.text()); return; }
+      const j = await r.json();
+      snapStatus.textContent = `resumed ${j.resumed}/${(j.results || []).length}`;
+      const rl = (j.results || []).map(x => `[${(x.sid || "").slice(0, 8)}] ${x.status}`).join("\n");
+      alert(`恢复完成(resumed ${j.resumed}):\n\n${rl}`);
+      loadItermTabs();
+    } catch (e) { snapStatus.textContent = "error"; alert("Resume error: " + e); }
+    finally { snapBusy(false); }
   });
 
   // ---- tabs control panel: send keys/text to the selected tab ----

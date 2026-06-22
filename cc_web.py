@@ -3822,6 +3822,86 @@ async def post_resume(payload: ResumePayload):
     return {"ok": True, "iterm_session_id": iterm_id, "label": label, "cwd": cwd}
 
 
+# ---------- session-list snapshot (save before reboot, resume after) ----------
+
+SNAPSHOT_FILE = Path.home() / ".claude" / "cc_web_session_snapshot.json"
+
+
+async def _live_tab_entries() -> list[dict]:
+    """Ordered (by window/tab) list of live claude tabs resolved to session-ids."""
+    await bridge.ensure_connected()
+    out: list[dict] = []
+    for t in await bridge.list_claude_tabs():
+        meta = _claude_session_meta(t.pid)
+        sid = (meta or {}).get("sessionId") or (t.claude_session_id or "")
+        if not sid:
+            continue
+        out.append({"sid": sid, "cwd": t.cwd or "", "name": t.name or "",
+                    "window_index": t.window_index, "tab_index": t.tab_index})
+    out.sort(key=lambda e: (e["window_index"], e["tab_index"]))
+    return out
+
+
+@app.post("/api/sessions-snapshot/save", dependencies=[Depends(require_token)])
+async def post_snapshot_save():
+    """Capture all live claude tabs (session-id + cwd, in window/tab order) so
+    they can be resumed after a reboot."""
+    import datetime as _dt
+    try:
+        sessions = await _live_tab_entries()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
+    snap = {"saved_at": _dt.datetime.now().isoformat(timespec="seconds"),
+            "sessions": sessions}
+    try:
+        tmp = SNAPSHOT_FILE.with_name(SNAPSHOT_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(SNAPSHOT_FILE)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"save failed: {e}")
+    return {"ok": True, "count": len(sessions), **snap}
+
+
+@app.get("/api/sessions-snapshot", dependencies=[Depends(require_token)])
+async def get_snapshot():
+    try:
+        return {"ok": True, **json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))}
+    except Exception:
+        return {"ok": False, "saved_at": None, "sessions": []}
+
+
+@app.post("/api/sessions-snapshot/resume", dependencies=[Depends(require_token)])
+async def post_snapshot_resume():
+    """Re-open the saved sessions in their original order (claude --resume),
+    skipping any that are already running."""
+    try:
+        snap = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        raise HTTPException(status_code=404, detail="no saved snapshot")
+    try:
+        await _ensure_iterm2_running()
+        await bridge.ensure_connected()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
+    results = []
+    for e in snap.get("sessions", []):
+        sid = e.get("sid")
+        if not sid:
+            continue
+        if _pids_for_session(sid):           # already running → don't duplicate
+            results.append({"sid": sid, "status": "already running"})
+            continue
+        try:
+            iterm_id = await bridge.open_resume_claude_tab(
+                e.get("cwd", ""), sid, f"resume_{sid[:6]}")
+            results.append({"sid": sid, "status": "resumed" if iterm_id else "failed"})
+        except Exception as ex:
+            results.append({"sid": sid, "status": f"failed: {ex}"})
+        await asyncio.sleep(1.2)             # let each tab spin up before the next
+    return {"ok": True, "results": results,
+            "resumed": sum(1 for r in results if r["status"] == "resumed")}
+
+
 @app.get("/api/cwds", dependencies=[Depends(require_token)])
 async def get_cwds():
     return {"cwds": _suggested_cwds()}
