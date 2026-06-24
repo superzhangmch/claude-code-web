@@ -30,55 +30,85 @@ them makes them findable by title.
 
 ## How to find the current session ID
 
-**Important**: Multiple Claude sessions may be running concurrently in the same project. The approach below handles this.
+**Primary method (fast, no marker injection):** Claude Code writes a
+`~/.claude/sessions/<pid>.json` file for every live session, mapping the
+Claude process PID to `{sessionId, cwd, status, ...}`. The Bash tool runs
+as a *descendant* of the Claude process, so we walk up the parent-PID chain
+and the first ancestor PID that has a matching `sessions/<pid>.json` file
+**is** the current session. We use file existence (not process-name matching)
+as the signal, and cross-check `cwd == $PWD` for safety. This handles
+multiple concurrent sessions correctly because each Bash tool only ever
+walks up to its own Claude process.
 
-### Step 1: Find the project directory
-
-The project directory in `~/.claude/projects/` is derived from `$PWD` by replacing `/` and `_` with `-`:
+Run this single command — it prints `session_id`, `first_user_msg`, and `cwd`:
 
 ```bash
+python3.11 - <<'PYEOF'
+import os, json, glob, subprocess
+
+def ppid_of(pid):
+    out = subprocess.run(["ps","-o","ppid=","-p",str(pid)],
+                         capture_output=True, text=True).stdout.strip()
+    return int(out) if out else None
+
+# 1. Collect this process's ancestor PIDs (self -> shell -> claude -> ...)
+pid, ancestors = os.getpid(), []
+for _ in range(30):
+    ancestors.append(pid)
+    p = ppid_of(pid)
+    if not p or p <= 1: break
+    pid = p
+
+# 2. The current session = the ancestor PID that owns a sessions/<pid>.json
+sess_dir = os.path.expanduser("~/.claude/sessions")
+cwd = os.getcwd()
+sid = jsonl = None
+candidates = []
+for a in ancestors:
+    f = os.path.join(sess_dir, f"{a}.json")
+    if os.path.exists(f):
+        try: candidates.append(json.load(open(f)))
+        except Exception: pass
+# prefer the candidate whose cwd matches $PWD; else first found
+pick = next((c for c in candidates if c.get("cwd") == cwd), candidates[0] if candidates else None)
+if pick:
+    sid = pick.get("sessionId")
+
+# 3. Read first_user_msg from that session's JSONL (path derived from cwd)
+first_msg = ""
+if sid:
+    projdir = cwd.replace("/", "-").replace("_", "-")
+    jsonl = os.path.expanduser(f"~/.claude/projects/{projdir}/{sid}.jsonl")
+    if os.path.exists(jsonl):
+        for line in open(jsonl):
+            try:
+                obj = json.loads(line)
+                if obj.get("type") == "user" and obj.get("message",{}).get("role") == "user":
+                    c = obj["message"]["content"]
+                    if isinstance(c, str) and c.strip():
+                        first_msg = c[:150]; break
+            except Exception: pass
+
+print(json.dumps({"session_id": sid, "first_user_msg": first_msg, "cwd": cwd}))
+PYEOF
+```
+
+If `session_id` comes back `null` (e.g. the `sessions/` file is missing on
+an older client), fall back to the marker method below.
+
+### Fallback method (marker injection)
+
+Plant a unique marker, then grep the project's JSONLs for it:
+
+```bash
+# Command 1 — echo a marker (gets written into the current session's JSONL)
+MARKER="SESSION_MARKER_$(uuidgen)"; echo "$MARKER"
+```
+```bash
+# Command 2 (separate call, so the marker is already persisted)
 PROJECT_DIR=$(echo "$PWD" | sed 's|[/_]|-|g')
-```
-
-### Step 2: Identify the current session file
-
-Plant a **unique marker** into the session, then grep for it. This is 100% reliable even with multiple concurrent sessions:
-
-```bash
-# Generate and echo a unique marker (this gets written into the current session's JSONL)
-MARKER="SESSION_MARKER_$(uuidgen)"
-echo "$MARKER"
-
-# Then grep for it — only the current session will contain it
 SESSION_FILE=$(grep -l "$MARKER" ~/.claude/projects/${PROJECT_DIR}/*.jsonl 2>/dev/null)
-```
-
-Run these as **two separate bash commands** (the marker must be written to the JSONL before grepping).
-
-### Step 3: Extract session info
-
-```bash
-python3.11 -c "
-import json, os, sys
-session_file = sys.argv[1]
-first_msg = None
-sid = None
-with open(session_file) as f:
-    for line in f:
-        try:
-            obj = json.loads(line.strip())
-            if obj.get('type') == 'permission-mode' and obj.get('sessionId'):
-                sid = obj['sessionId']
-            if obj.get('type') == 'user' and obj.get('message', {}).get('role') == 'user':
-                content = obj['message']['content']
-                if isinstance(content, str) and content.strip() and first_msg is None:
-                    first_msg = content[:150]
-        except: pass
-print(json.dumps({
-    'session_id': sid or os.path.basename(session_file).replace('.jsonl',''),
-    'first_user_msg': first_msg or '',
-}))
-" "\$SESSION_FILE"
+echo "$SESSION_FILE"   # basename (minus .jsonl) is the session_id
 ```
 
 ## Operations

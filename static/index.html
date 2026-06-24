@@ -217,7 +217,23 @@ body.light .hl { color: #c81e1e; }
 }
 #picker-list .session-card .sess-summary .sm-ico { opacity: 0.7; }
 #picker-list .session-card .sess-summary .sm-title { font-weight: 700; color: var(--text); }
+#picker-list .session-card .sess-summary .sm-title.user-named { color: var(--accent); }
 #picker-list .session-card .sess-summary .sm-body { margin-top: 2px; }
+#picker-list .session-card .sess-summary .sm-edit {
+  background: none; border: 0; color: var(--muted); cursor: pointer;
+  font-size: 12px; padding: 0 4px; margin-left: 4px; line-height: 1;
+}
+#picker-list .session-card .sess-summary .sm-edit:hover { color: var(--accent); }
+/* Group headers: collapse toggle (Recent/Named) + Tabs sort pill. */
+#picker-list .group-delim.collapsible { cursor: pointer; }
+#picker-list .group-delim.collapsible:hover .gd-label { color: var(--text); }
+#picker-list .group-delim .gd-sort {
+  background: var(--panel2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 2px 10px; font-size: 10px; cursor: pointer;
+  text-transform: none; letter-spacing: 0; white-space: nowrap;
+}
+#picker-list .group-delim .gd-sort:hover { border-color: var(--accent); color: var(--text); }
 #picker-list .session-card .score-line {
   margin-top: 5px; font-size: 11px; color: var(--accent);
   font-variant-numeric: tabular-nums; text-align: right; opacity: 0.85;
@@ -1605,6 +1621,13 @@ footer button.icon {
   let searchTerm = "";   // full-search content query, for match highlighting
   // Card exchange display: "user" = requests only, "both" = requests + responses.
   let cardMode = localStorage.getItem("cc_web_card_mode") || "user";
+  // Recent/Named groups collapsed by default (Tabs always shown).
+  let groupCollapsed = (() => {
+    try { return JSON.parse(localStorage.getItem("cc_web_group_collapsed")) || { recent: true, named: true }; }
+    catch { return { recent: true, named: true }; }
+  })();
+  // Tabs group ordering: "tab" (window/tab) or "use" (last-modified desc).
+  let tabsSort = localStorage.getItem("cc_web_tabs_sort") || "tab";
 
   // Set `el`'s text with any case-insensitive occurrences of `terms` wrapped in
   // <span class="hl"> (the red "飘红" highlight). Builds DOM, so it's XSS-safe.
@@ -3116,7 +3139,7 @@ footer button.icon {
       const exTexts = (s.exchanges || []).map(e => e && e.user && e.user.text);
       const hay = [s.title, s.project_path, s.claude_session_id, s.tab_name,
                    s.last_user_msg, s.first_user_msg, s.summary, s.summary_title,
-                   s.match && s.match.snippet, ...exTexts]
+                   s.user_name, s.match && s.match.snippet, ...exTexts]
                    .filter(Boolean).join(" ").toLowerCase();
       return quickMatches(hay, q);
     });
@@ -3134,19 +3157,60 @@ footer button.icon {
     }
     pickerListEl.innerHTML = "";
     const GROUP_TITLES = { tabs: "Tabs", recent: "Recent", named: "Named", search: "Search results" };
+    const GROUP_ORDER = { tabs: 0, recent: 1, named: 2, search: 3 };
+    // Reorder: keep group order; within Tabs, sort by tab position or last use.
+    const list = sessions.slice().sort((a, b) => {
+      const ga = GROUP_ORDER[a.group] ?? 9, gb = GROUP_ORDER[b.group] ?? 9;
+      if (ga !== gb) return ga - gb;
+      if (a.group === "tabs") {
+        if (tabsSort === "use") return (b.mtime || 0) - (a.mtime || 0);
+        return ((a.window_index || 0) - (b.window_index || 0))
+          || ((a.tab_index || 0) - (b.tab_index || 0));
+      }
+      return 0;  // stable: preserve backend order within other groups
+    });
+    const counts = {};
+    for (const s of list) counts[s.group] = (counts[s.group] || 0) + 1;
     // Single-window? then the "tabs" title can omit the wX part (just tY).
-    const tabWins = new Set(sessions.filter(s => s.group === "tabs")
+    const tabWins = new Set(list.filter(s => s.group === "tabs")
       .map(s => s.window_index || 0));
     const tabsSingleWin = tabWins.size <= 1;
-    let lastGroup = null;
-    for (const s of sessions) {
+    let lastGroup = null, hideCurrent = false;
+    for (const s of list) {
       if (s.group !== lastGroup) {
         lastGroup = s.group;
+        const collapsible = (s.group === "recent" || s.group === "named");
+        const collapsed = collapsible && !!groupCollapsed[s.group];
+        hideCurrent = collapsed;
         const hdr = document.createElement("div");
-        hdr.className = "group-delim";
-        hdr.textContent = GROUP_TITLES[s.group] || s.group;
+        hdr.className = "group-delim" + (collapsible ? " collapsible" : "");
+        const lbl = document.createElement("span"); lbl.className = "gd-label";
+        lbl.textContent = (collapsible ? (collapsed ? "▸ " : "▾ ") : "")
+          + (GROUP_TITLES[s.group] || s.group) + " (" + (counts[s.group] || 0) + ")";
+        hdr.appendChild(lbl);
+        if (collapsible) {
+          hdr.addEventListener("click", () => {
+            groupCollapsed[s.group] = !collapsed;
+            try { localStorage.setItem("cc_web_group_collapsed", JSON.stringify(groupCollapsed)); } catch {}
+            renderPicker();
+          });
+        }
+        if (s.group === "tabs") {
+          const sortBtn = document.createElement("button");
+          sortBtn.className = "gd-sort";
+          sortBtn.textContent = tabsSort === "use" ? "↺ last use" : "↹ tab order";
+          sortBtn.title = "切换 Tabs 排序:tab 顺序 / 最近使用";
+          sortBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            tabsSort = tabsSort === "use" ? "tab" : "use";
+            try { localStorage.setItem("cc_web_tabs_sort", tabsSort); } catch {}
+            renderPicker();
+          });
+          hdr.appendChild(sortBtn);
+        }
         pickerListEl.appendChild(hdr);
       }
+      if (hideCurrent) continue;   // collapsed group → skip its cards
       const card = document.createElement("div");
       card.className = "session-card" + (s.named ? "" : " unnamed");
       const titleRow = document.createElement("div");
@@ -3186,18 +3250,39 @@ footer button.icon {
       cwd.textContent = s.project_path || "";
       card.appendChild(cwd);
 
-      // "What it's doing" — LLM title (bold) + summary (background-generated).
-      if (s.summary || s.summary_title) {
+      // "What it's doing" — name (user override or LLM title, bold) + summary.
+      const displayTitle = s.user_name || s.summary_title || "";
+      if (s.summary || displayTitle) {
         const sm = document.createElement("div");
         sm.className = "sess-summary";
         const head = document.createElement("div"); head.className = "sm-head";
         const ico = document.createElement("span"); ico.className = "sm-ico"; ico.textContent = "📝 ";
         head.appendChild(ico);
-        if (s.summary_title) {
-          const tt = document.createElement("span"); tt.className = "sm-title";
-          hlInto(tt, s.summary_title, hlTerms());
+        if (displayTitle) {
+          const tt = document.createElement("span");
+          tt.className = "sm-title" + (s.user_name ? " user-named" : "");
+          hlInto(tt, displayTitle, hlTerms());
           head.appendChild(tt);
         }
+        // ✎ rename — overrides the LLM title (empty restores it).
+        const edit = document.createElement("button");
+        edit.className = "sm-edit"; edit.textContent = "✎";
+        edit.title = "重命名(覆盖 LLM 标题;留空恢复)";
+        edit.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const nv = prompt("会话名称(留空恢复 LLM 标题):", s.user_name || s.summary_title || "");
+          if (nv === null) return;
+          try {
+            const r = await authedFetch("/api/session-name", {
+              method: "POST", headers: { "content-type": "application/json" },
+              body: JSON.stringify({ claude_session_id: s.claude_session_id, name: nv.trim() }),
+            });
+            if (!r.ok) { alert("Rename failed: " + await r.text()); return; }
+            s.user_name = nv.trim();
+            renderPicker();
+          } catch (err) { alert("Rename error: " + err); }
+        });
+        head.appendChild(edit);
         sm.appendChild(head);
         if (s.summary) {
           const body = document.createElement("div"); body.className = "sm-body";
