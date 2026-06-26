@@ -24,6 +24,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import threading
 import time as _time
@@ -2479,6 +2480,160 @@ def _sample_top_mem_groups(n: int = 10) -> list[dict]:
     return rows
 
 
+# Runaway-process alarm: a non-system process that's been continuously high-CPU
+# for over an hour (a session-launched cmd that never exited, cooking the CPU).
+RUNAWAY_CPU_PCT = 50.0          # "high" = >= this %CPU (one core ~= 100)
+RUNAWAY_MIN_SEC = 3600.0        # sustained for at least 1 hour
+RUNAWAY_MAX_GAP = 2             # tolerate this many consecutive sub-threshold samples
+
+
+def _proc_detail(pid: int) -> dict:
+    """Full command line + elapsed wall time for a pid (best-effort)."""
+    try:
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "command=,etime="],
+                             capture_output=True, text=True, timeout=2).stdout.strip()
+    except Exception:
+        out = ""
+    cmd, etime = out, ""
+    idx = out.rfind(" ")          # etime is the last whitespace-free token
+    if idx > 0:
+        cmd, etime = out[:idx].strip(), out[idx + 1:].strip()
+    return {"command": cmd[:200], "etime": etime}
+
+
+def _proc_comm(pid: int) -> str:
+    """Short command name of a pid (best-effort)."""
+    if not pid or pid <= 1:
+        return ""
+    try:
+        return subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                              capture_output=True, text=True, timeout=2).stdout.strip()
+    except Exception:
+        return ""
+
+
+def _proc_cwd(pid: int) -> str:
+    """Working directory of a pid via lsof (best-effort; may be empty)."""
+    try:
+        out = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                             capture_output=True, text=True, timeout=3).stdout
+        for ln in out.splitlines():
+            if ln.startswith("n"):
+                return ln[1:]
+    except Exception:
+        pass
+    return ""
+
+
+def _ppid_map() -> dict[int, int]:
+    """pid -> ppid for every process (one ps call), for ancestor walking."""
+    m: dict[int, int] = {}
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid="],
+                             capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return m
+    for ln in out.splitlines():
+        parts = ln.split()
+        if len(parts) >= 2:
+            try:
+                m[int(parts[0])] = int(parts[1])
+            except ValueError:
+                pass
+    return m
+
+
+def _attribute_to_claude(pid: int, claude_info: dict, ppm: dict) -> tuple[Optional[dict], bool]:
+    """Return (session_info, is_self): is this pid a claude session itself, or a
+    descendant of one? Walks the parent chain. (None, False) if unattributable."""
+    if pid in claude_info:
+        return claude_info[pid], True
+    cur, seen = pid, 0
+    while cur and cur > 1 and seen < 25:
+        cur = ppm.get(cur, 0)
+        seen += 1
+        if cur in claude_info:
+            return claude_info[cur], False
+    return None, False
+
+
+def _runaway_processes(live_tabs: Optional[list[dict]] = None) -> list[dict]:
+    """From the CPU history, find non-system processes that have been >= RUNAWAY_CPU_PCT
+    continuously (ending now) for >= RUNAWAY_MIN_SEC. These overheat the machine.
+    Each is attributed to a claude session/tab when the pid IS a claude process or
+    a descendant of one (the session that launched it)."""
+    snaps = list(_cpu_history)
+    if len(snaps) < 2:
+        return []
+    newest = snaps[-1]
+    cands = [r["pid"] for r in newest["top"]
+             if r.get("cpu", 0) >= RUNAWAY_CPU_PCT and not r.get("is_system")]
+    out: list[dict] = []
+    for pid in cands:
+        run_start_ts = newest["ts"]
+        misses = 0
+        cpus: list[float] = []
+        for snap in reversed(snaps):            # walk back from now
+            row = next((r for r in snap["top"] if r["pid"] == pid), None)
+            if row and row.get("cpu", 0) >= RUNAWAY_CPU_PCT:
+                run_start_ts = snap["ts"]
+                misses = 0
+                cpus.append(row["cpu"])
+            else:
+                misses += 1
+                if misses > RUNAWAY_MAX_GAP:    # run broke — stop walking back
+                    break
+        dur = newest["ts"] - run_start_ts
+        if dur >= RUNAWAY_MIN_SEC:
+            out.append({
+                "pid": pid,
+                "duration_sec": int(dur),
+                "cpu_now": next((r["cpu"] for r in newest["top"] if r["pid"] == pid), 0.0),
+                "cpu_avg": round(sum(cpus) / len(cpus), 1) if cpus else 0.0,
+                **_proc_detail(pid),
+            })
+    if not out:
+        return out
+
+    # Attribute each flagged process to a claude session/tab. Build pid->info
+    # from the live iTerm tabs (has window/tab) plus the session store (covers
+    # claude pids with no current tab).
+    claude_info: dict[int, dict] = {}
+    for lt in (live_tabs or []):
+        if isinstance(lt.get("pid"), int):
+            claude_info[lt["pid"]] = lt
+    try:
+        for f in CLAUDE_SESSIONS_DIR.glob("*.json"):
+            try:
+                d = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            p, sid = d.get("pid"), d.get("sessionId")
+            if isinstance(p, int) and sid and p not in claude_info:
+                claude_info[p] = {"sid": sid, "cwd": d.get("cwd", "")}
+    except OSError:
+        pass
+    ppm = _ppid_map()
+    for item in out:
+        info, is_self = _attribute_to_claude(item["pid"], claude_info, ppm)
+        item["is_claude"] = bool(info)
+        if info:
+            item["session_id"] = info.get("sid", "")
+            item["tab_name"] = info.get("name", "")
+            wi, ti = info.get("window_index"), info.get("tab_index")
+            item["tab"] = (f"w{wi + 1}t{ti + 1}"
+                           if isinstance(wi, int) and isinstance(ti, int) else "")
+            item["attribution"] = "claude 进程本身" if is_self else "claude 子进程"
+        # Always include cwd + parent so non-claude offenders are identifiable.
+        item["cwd"] = _proc_cwd(item["pid"])
+        ppid = ppm.get(item["pid"], 0)
+        item["ppid"] = ppid
+        item["parent_cmd"] = _proc_comm(ppid)
+
+    out.sort(key=lambda x: x["duration_sec"], reverse=True)
+    return out
+
+
 async def _cpu_sampler_loop() -> None:
     while True:
         try:
@@ -2566,7 +2721,29 @@ async def get_sessions(card: str = "both"):
                                           card_mode=card),
         "battery": _get_battery(),
         "claude_store": store,
+        "runaway": _runaway_processes(live_tabs),
     }
+
+
+class KillProcessPayload(BaseModel):
+    pid: int
+    force: bool = False   # SIGKILL instead of SIGTERM
+
+
+@app.post("/api/kill-process", dependencies=[Depends(require_token)])
+async def post_kill_process(payload: KillProcessPayload):
+    """Kill a runaway process (from the high-CPU alarm). SIGTERM by default,
+    SIGKILL when force=True."""
+    sig = signal.SIGKILL if payload.force else signal.SIGTERM
+    try:
+        os.kill(payload.pid, sig)
+    except ProcessLookupError:
+        return {"ok": True, "note": "already gone"}
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="not permitted to kill that pid")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"kill failed: {e}")
+    return {"ok": True, "pid": payload.pid, "signal": "SIGKILL" if payload.force else "SIGTERM"}
 
 
 # launchd runs us with a minimal PATH (no /opt/homebrew/bin), so which() alone

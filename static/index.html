@@ -255,6 +255,27 @@ body.light .hl { color: #c81e1e; }
   background: #2a1a14; border: 1px solid #ff8b6a; color: #ffb499;
   font-size: 12px; line-height: 1.4;
 }
+/* Red alarm: runaway high-CPU processes (overheating). */
+#picker-runaway {
+  margin: 10px 2px 4px; padding: 8px 10px; border-radius: 6px;
+  background: #3a1414; border: 1px solid #ff5b5b; color: #ffb0b0;
+  font-size: 12px; line-height: 1.5;
+}
+#picker-runaway .ra-head { font-weight: 700; color: #ff6a6a; margin-bottom: 4px; }
+#picker-runaway .ra-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+#picker-runaway .ra-left { flex: 1; min-width: 0; }
+#picker-runaway .ra-info {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+}
+#picker-runaway .ra-tag { display: block; font-size: 11px; color: #ffd0a0; margin-top: 1px; }
+#picker-runaway .ra-tag.muted { color: var(--muted); opacity: 0.85; }
+#picker-runaway .ra-kill {
+  flex: none; background: #ff5b5b; color: #1b1b1b; border: 0; border-radius: 5px;
+  padding: 3px 12px; font-size: 11px; font-weight: 700; cursor: pointer;
+}
+#picker-runaway .ra-kill:hover { background: #ff7a7a; }
+#picker-runaway .ra-kill:disabled { opacity: 0.5; cursor: default; }
 /* Group delimiter between session groups (Tabs / Recent / Named). */
 #picker-list .group-delim {
   display: flex; align-items: center; gap: 8px;
@@ -1349,6 +1370,7 @@ footer button.icon {
           <button id="picker-fontdown" title="smaller list font">a</button>
         </span>
       </div>
+      <div id="picker-runaway" style="display:none"></div>
       <input id="picker-quickfilter" type="search" autocomplete="off"
              placeholder="Quick filter…  a &amp; b (AND) · a | b (OR)" />
       <div id="picker-warn" style="display:none"></div>
@@ -3111,8 +3133,68 @@ footer button.icon {
         pw.style.display = "";
       } else { pw.style.display = "none"; }
     }
+    renderRunaway(data.runaway || []);
     pickerBase = data.sessions || [];
     renderPicker();
+  }
+
+  // Red alarm: processes stuck high-CPU for >1h (overheating the machine).
+  function renderRunaway(list) {
+    const el = document.getElementById("picker-runaway");
+    if (!el) return;
+    if (!list.length) { el.style.display = "none"; el.innerHTML = ""; return; }
+    el.innerHTML = "";
+    const hd = document.createElement("div"); hd.className = "ra-head";
+    hd.textContent = `🔥 ${list.length} 个进程持续高 CPU 超 1 小时(可能让设备发烫)`;
+    el.appendChild(hd);
+    for (const p of list) {
+      const row = document.createElement("div"); row.className = "ra-row";
+      const dur = Math.round(p.duration_sec / 60);
+      const durTxt = dur >= 60 ? `${Math.floor(dur / 60)}h${dur % 60}m` : `${dur}m`;
+      const info = document.createElement("span"); info.className = "ra-info";
+      info.textContent = `pid ${p.pid} · ${Math.round(p.cpu_now)}% (avg ${p.cpu_avg}%) · ${durTxt} · ${p.command || ""}`;
+      info.title = (p.command || "")
+        + (p.cwd ? `\ncwd: ${p.cwd}` : "")
+        + (p.parent_cmd ? `\nparent: ${p.parent_cmd} (pid ${p.ppid})` : "")
+        + (p.etime ? `\nelapsed ${p.etime}` : "");
+
+      // claude attribution: which session/tab, and self vs child.
+      const tag = document.createElement("span"); tag.className = "ra-tag";
+      if (p.is_claude && p.session_id) {
+        const sid4 = p.session_id.slice(0, 4);
+        const tabTxt = [p.tab, p.tab_name].filter(Boolean).join(" ");
+        const self = (p.attribution === "claude 进程本身");
+        tag.textContent = `🧩 ${self ? "claude 本身" : "claude 子进程"} ← [${sid4}]${tabTxt ? " " + tabTxt : ""}`;
+        tag.title = "该进程属于这个 claude session/tab";
+      } else {
+        // Non-claude: surface parent + cwd so you can tell who's the culprit.
+        const bits = [];
+        if (p.parent_cmd) bits.push(`父进程 ${p.parent_cmd}`);
+        if (p.cwd) bits.push(`📁 ${p.cwd}`);
+        tag.textContent = "非 claude · " + (bits.length ? bits.join(" · ") : "无法归属");
+        tag.classList.add("muted");
+      }
+
+      const kill = document.createElement("button"); kill.className = "ra-kill"; kill.textContent = "Kill";
+      kill.addEventListener("click", async () => {
+        if (!confirm(`结束这个进程?\n\npid ${p.pid}  (${Math.round(p.cpu_now)}% CPU, 已 ${durTxt})\n${p.command || ""}\n\n先发 SIGTERM。`)) return;
+        kill.disabled = true; kill.textContent = "…";
+        try {
+          const r = await authedFetch("/api/kill-process", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ pid: p.pid }),
+          });
+          if (!r.ok) { alert("Kill failed: " + await r.text()); kill.disabled = false; kill.textContent = "Kill"; return; }
+          row.style.opacity = "0.4"; kill.textContent = "killed";
+        } catch (e) { alert("Kill error: " + e); kill.disabled = false; kill.textContent = "Kill"; }
+      });
+
+      const left = document.createElement("div"); left.className = "ra-left";
+      left.appendChild(info); left.appendChild(tag);
+      row.appendChild(left); row.appendChild(kill);
+      el.appendChild(row);
+    }
+    el.style.display = "";
   }
 
   // The list actually shown = search results (if any) else the 3 groups,
