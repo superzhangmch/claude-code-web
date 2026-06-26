@@ -81,6 +81,22 @@ header .dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; 
 header .dot.off { background: #888; }
 header .dot.err { background: #e04a4a; }
 header .mode-group { display: inline-flex; gap: 2px; }
+/* In-transcript quick tab switcher dropdown. */
+.switch-menu {
+  position: fixed; top: 46px; right: 8px; z-index: 80;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4); padding: 6px; min-width: 200px;
+  max-width: 80vw; max-height: 70vh; overflow-y: auto;
+}
+.switch-menu .sw-item {
+  display: block; width: 100%; text-align: left; box-sizing: border-box;
+  background: var(--panel2); color: var(--text); border: 1px solid transparent;
+  border-radius: 6px; padding: 7px 10px; margin-bottom: 4px; cursor: pointer;
+  font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.switch-menu .sw-item:hover { border-color: var(--accent); }
+.switch-menu .sw-item.current { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.switch-menu .sw-empty { color: var(--muted); font-size: 12px; padding: 8px; }
 /* All header buttons / icons share the same height so they line up
    with the verbosity (▁▄█) picker. Each individual button keeps its
    own padding/font-size; this rule just clamps the box. */
@@ -90,7 +106,7 @@ header button, header a.btn, header a.icon {
   display: inline-flex; align-items: center; justify-content: center;
 }
 header .mode-group .mode-pick {
-  font-weight: normal; padding: 3px 5px; min-width: 22px;
+  font-weight: normal; padding: 3px 2px; min-width: 16px;
 }
 header .mode-group .mode-pick.active {
   font-weight: 700; color: var(--accent);
@@ -109,11 +125,11 @@ header .ready {
   width: 14px; height: 14px;
 }
 header .ready.idle::before {
-  content: ""; width: 8px; height: 8px;
+  content: ""; width: 8px; height: 8px; flex: none; box-sizing: border-box;
   border-radius: 50%; background: #6ee884;
 }
 header .ready.busy::before {
-  content: ""; width: 12px; height: 12px;
+  content: ""; width: 12px; height: 12px; flex: none; box-sizing: border-box;
   border-radius: 50%;
   border: 2px solid #3a2c1f; border-top-color: #e0a070;
   animation: spin 0.8s linear infinite;
@@ -127,9 +143,9 @@ header button.icon, header a.icon {
   text-decoration: none;
 }
 header button.icon:hover, header a.icon:hover { border-color: var(--accent); }
-/* Terminal-tabs button: render its ">_" prompt glyph as a tight monospace
+/* Terminal/screen buttons: render their ">_" prompt glyph as a tight monospace
    shell prompt rather than a thin proportional ">". */
-#tabs-btn {
+#tabs-btn, #screen-btn {
   font-family: ui-monospace, Menlo, monospace;
   font-weight: 700; letter-spacing: -1px;
 }
@@ -393,8 +409,22 @@ header .battery:hover { color: var(--text); }
 }
 .session-card.expanded { margin-left: 0; }
 .session-card:hover { border-color: var(--accent); }
+/* The expanded (focused) card gets a bright, distinct border + glow. */
+.session-card.expanded {
+  border-color: #36e0c8;
+  box-shadow: 0 0 0 1px #36e0c8, 0 0 10px rgba(54, 224, 200, 0.35);
+}
 .session-card .title-row { display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px; }
 .session-card .title { font-weight: 500; font-size: 14px; word-break: break-word; flex: 1; }
+/* Tabs group: line 1 is metadata (tX [sid] size pid datetime), line 2 the name. */
+.session-card .title.tabs-meta {
+  font-family: ui-monospace, Menlo, monospace; font-size: 11.5px;
+  font-weight: 600; color: var(--muted); letter-spacing: -0.2px;
+}
+.session-card .tab-name-line {
+  font-size: 13.5px; font-weight: 600; color: var(--text);
+  margin: 1px 0 4px; word-break: break-word; line-height: 1.35;
+}
 .session-card.unnamed .title { font-style: italic; color: var(--muted); }
 .session-card .time { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .session-card .cwd {
@@ -1209,17 +1239,18 @@ footer button.icon {
 </head>
 <body>
   <header>
-    <span id="status-dot" class="dot off"></span>
+    <span id="status-dot" class="dot off" style="display:none"></span>
     <span id="meta" class="meta"></span>
     <span id="ready" class="ready" style="display:none"></span>
     <span id="traffic" class="traffic"></span>
-    <a id="remote-btn" class="battery" href="/remote/" title="Phone remote control" style="text-decoration:none">📱</a>
+    <a id="remote-btn" class="battery" href="/remote/" title="Remote control" style="text-decoration:none">🖥</a>
     <span id="mode-group" class="mode-group" style="display:none">
       <button class="btn mode-pick" data-mode="brief" title="brief">▁</button>
       <button class="btn mode-pick" data-mode="medium" title="medium">▄</button>
       <button class="btn mode-pick" data-mode="all" title="all">█</button>
     </span>
-    <button id="screen-btn" class="btn icon" style="display:none" title="iTerm screen + session info">🖥</button>
+    <button id="screen-btn" class="btn icon" style="display:none" title="iTerm screen + session info">&gt;_</button>
+    <button id="switch-btn" class="btn icon" style="display:none" title="切换到其它 tab">⇆</button>
     <span id="battery" class="battery" style="display:none" title="Click for CPU history"></span>
     <button id="tabs-btn" class="btn icon" style="display:none" title="Show all iTerm2 tabs">&gt;_</button>
     <button id="files-btn" class="btn icon" style="display:none" title="Browse local files">📁</button>
@@ -1227,6 +1258,7 @@ footer button.icon {
     <button id="back-btn" class="btn" style="display:none">←</button>
     <button id="new-btn" class="btn">+</button>
   </header>
+  <div id="switch-menu" class="switch-menu" style="display:none"></div>
 
   <div id="cpu-modal" class="modal">
     <div class="modal-card cpu-card">
@@ -1536,15 +1568,17 @@ footer button.icon {
   });
 
   let traffic = { in_bytes: 0, out_bytes: 0 };
-  function fmtBytes(n) {
+  // Traffic counter — whole units, no decimals. (Named distinctly from the
+  // CPU-mem fmtBytes below, since duplicate function names in one scope clash.)
+  function fmtTraffic(n) {
     if (n < 1024) return n + " B";
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
-    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(2) + " MB";
-    return (n / 1024 / 1024 / 1024).toFixed(2) + " GB";
+    if (n < 1024 * 1024) return Math.round(n / 1024) + " KB";
+    if (n < 1024 * 1024 * 1024) return Math.round(n / 1024 / 1024) + " MB";
+    return Math.round(n / 1024 / 1024 / 1024) + " GB";
   }
   const trafficEl = document.getElementById("traffic");
   function renderTraffic() {
-    trafficEl.textContent = "↓" + fmtBytes(traffic.out_bytes) + " ↑" + fmtBytes(traffic.in_bytes);
+    trafficEl.textContent = "↓" + fmtTraffic(traffic.out_bytes) + " ↑" + fmtTraffic(traffic.in_bytes);
   }
   renderTraffic();
 
@@ -1846,6 +1880,36 @@ footer button.icon {
   const choiceBannerText = document.getElementById("choice-banner-text");
   const choiceBannerBtn = document.getElementById("choice-banner-btn");
   const screenBtn = document.getElementById("screen-btn");
+  // Quick tab switcher (in transcript view): dropdown of live claude tabs.
+  const switchBtn = document.getElementById("switch-btn");
+  const switchMenu = document.getElementById("switch-menu");
+  function hideSwitchMenu() { switchMenu.style.display = "none"; }
+  async function openSwitchMenu() {
+    if (switchMenu.style.display !== "none") { hideSwitchMenu(); return; }
+    switchMenu.innerHTML = "<div class='sw-empty'>loading…</div>";
+    switchMenu.style.display = "";
+    let tabs = [];
+    try { const r = await authedFetch("/api/tabs"); if (r.ok) tabs = (await r.json()).tabs || []; } catch {}
+    if (!tabs.length) { switchMenu.innerHTML = "<div class='sw-empty'>没有运行中的 claude tab</div>"; return; }
+    const single = new Set(tabs.map(t => t.window_index || 0)).size <= 1;
+    switchMenu.innerHTML = "";
+    for (const t of tabs) {
+      const wt = single ? `t${(t.tab_index || 0) + 1}`
+        : `w${(t.window_index || 0) + 1}t${(t.tab_index || 0) + 1}`;
+      const b = document.createElement("button");
+      b.className = "sw-item" + (t.sid === attachedSid ? " current" : "");
+      b.textContent = `${wt} · ${t.name || ("[" + t.sid.slice(0, 4) + "]")}`;
+      b.addEventListener("click", () => {
+        hideSwitchMenu();
+        if (t.sid !== attachedSid) enterTranscript(t.sid, t.name || "");
+      });
+      switchMenu.appendChild(b);
+    }
+  }
+  switchBtn.addEventListener("click", (e) => { e.stopPropagation(); openSwitchMenu(); });
+  document.addEventListener("click", (e) => {
+    if (switchMenu.style.display !== "none" && !switchMenu.contains(e.target) && e.target !== switchBtn) hideSwitchMenu();
+  });
   const screenModal = document.getElementById("screen-modal");
   const screenBody = document.getElementById("screen-body");
   const screenRefresh = document.getElementById("screen-refresh");
@@ -1912,6 +1976,9 @@ footer button.icon {
 
   function setStatus(s) {
     statusDot.className = "dot " + (s === "ok" ? "" : s === "err" ? "err" : "off");
+    // Only surface it when something's wrong — a green "all good" dot next to
+    // the idle/busy dot is just noise.
+    statusDot.style.display = (s === "err") ? "" : "none";
   }
 
   // Server tells us when to show a confirmation menu via m.pending_confirm.
@@ -1988,6 +2055,8 @@ footer button.icon {
     backBtn.style.display = "none";
     modeGroup.style.display = "none";
     screenBtn.style.display = "none";
+    switchBtn.style.display = "none"; hideSwitchMenu();
+    startTabNamePoll();
     newBtn.style.display = "";
     refreshBtn.style.display = "";
     tabsBtn.style.display = "";
@@ -2017,6 +2086,8 @@ footer button.icon {
     backBtn.style.display = "";
     modeGroup.style.display = "";
     screenBtn.style.display = "";
+    switchBtn.style.display = "";
+    stopTabNamePoll();
     newBtn.style.display = "none";
     refreshBtn.style.display = "none";
     tabsBtn.style.display = "none";
@@ -3077,6 +3148,17 @@ footer button.icon {
       return `${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
     } catch { return ""; }
   }
+  // ms-epoch start time -> relative age: "x.x hour" / "x.x day" / "x.x mon".
+  function fmtAge(ms) {
+    if (!ms) return "";
+    const sec = (Date.now() - Number(ms)) / 1000;
+    if (!isFinite(sec) || sec < 0) return "";
+    const h = sec / 3600;
+    if (h < 24) return h.toFixed(1) + "hour";
+    const d = h / 24;
+    if (d < 30) return d.toFixed(1) + "day";
+    return (d / 30).toFixed(1) + "mon";
+  }
 
   // Render user+response exchange pairs into a container (replacing its
   // contents). Shared by the picker card's initial render and "More" reloads.
@@ -3137,6 +3219,32 @@ footer button.icon {
     pickerBase = data.sessions || [];
     renderPicker();
   }
+
+  // Keep the Tabs group's names fresh without re-fetching the whole list:
+  // poll the light /api/tabs while the picker is visible and patch names in
+  // place. Gated on document visibility so it stops when backgrounded.
+  let _tabNameTimer = null;
+  async function pollTabNames() {
+    if (document.hidden || !pickerEl.classList.contains("show")) return;
+    let tabs = [];
+    try {
+      const r = await authedFetch("/api/tabs");
+      if (!r.ok) return;
+      tabs = (await r.json()).tabs || [];
+    } catch { return; }
+    const byId = {}; tabs.forEach(t => { byId[t.sid] = t; });
+    for (const s of (pickerBase || [])) {
+      if (s.group !== "tabs") continue;
+      const t = byId[s.claude_session_id];
+      if (!t || t.tab_name === s.tab_name) continue;
+      s.tab_name = t.tab_name;   // keep data in sync for the next full render
+      const card = pickerListEl.querySelector(`.session-card[data-sid="${CSS.escape(s.claude_session_id)}"]`);
+      const span = card && card.querySelector(".tn-live");
+      if (span) hlInto(span, t.tab_name || "", hlTerms());
+    }
+  }
+  function startTabNamePoll() { stopTabNamePoll(); _tabNameTimer = setInterval(pollTabNames, 15000); }
+  function stopTabNamePoll() { if (_tabNameTimer) { clearInterval(_tabNameTimer); _tabNameTimer = null; } }
 
   // Red alarm: processes stuck high-CPU for >1h (overheating the machine).
   function renderRunaway(list) {
@@ -3295,6 +3403,7 @@ footer button.icon {
       if (hideCurrent) continue;   // collapsed group → skip its cards
       const card = document.createElement("div");
       card.className = "session-card" + (s.named ? "" : " unnamed");
+      card.dataset.sid = s.claude_session_id;
       const titleRow = document.createElement("div");
       titleRow.className = "title-row";
       const title = document.createElement("span");
@@ -3303,15 +3412,15 @@ footer button.icon {
       // Tabs group: [sid] wXtY (omit wX when there's a single window).
       // Otherwise: title / last / first msg.
       if (s.group === "tabs") {
+        // Line 1: metadata — tX [sid] json_size pid create_datetime.
         const wt = tabsSingleWin
           ? `t${(s.tab_index || 0) + 1}`
           : `w${(s.window_index || 0) + 1}t${(s.tab_index || 0) + 1}`;
-        title.textContent = sidPrefix + wt + (s.tab_name ? " " : "");
-        if (s.tab_name) {
-          const tn = document.createElement("span");
-          hlInto(tn, s.tab_name, hlTerms());
-          title.appendChild(tn);
-        }
+        const parts = [wt, `[${s.claude_session_id.slice(0, 4)}]`];
+        if (s.file_size) parts.push(fmtSize(s.file_size));
+        if (s.proc_start) parts.push(fmtAge(s.proc_start));
+        title.textContent = parts.join("  ");
+        title.classList.add("tabs-meta");
       } else {
         const titleText = s.title
           || (s.last_user_msg || s.first_user_msg || "(no messages yet)").slice(0, 80);
@@ -3326,6 +3435,15 @@ footer button.icon {
       titleRow.appendChild(title);
       titleRow.appendChild(time);
       card.appendChild(titleRow);
+
+      // Tabs group: the iTerm tab name on its own line (auto-refreshed in place).
+      if (s.group === "tabs") {
+        const tnLine = document.createElement("div"); tnLine.className = "tab-name-line";
+        const tn = document.createElement("span"); tn.className = "tn-live";
+        hlInto(tn, s.tab_name || "", hlTerms());
+        tnLine.appendChild(tn);
+        card.appendChild(tnLine);
+      }
 
       const cwd = document.createElement("div");
       cwd.className = "cwd";
@@ -3383,17 +3501,12 @@ footer button.icon {
 
       const badges = document.createElement("div");
       badges.className = "badges";
-      if (s.bound && s.binding) {
-        const b = document.createElement("span"); b.className = "badge bound";
-        b.textContent = `connected · pid ${s.binding.pid} · w${(s.binding.window_index||0)+1}t${(s.binding.tab_index||0)+1}`;
-        badges.appendChild(b);
-      } else if (s.bound) {
-        const b = document.createElement("span"); b.className = "badge bound"; b.textContent = "connected"; badges.appendChild(b);
-      }
+      // (CONNECTED badge removed — pid/tab/size now live on the Tabs title line.)
       if (!s.named) {
         const b = document.createElement("span"); b.className = "badge unnamed"; b.textContent = "unnamed"; badges.appendChild(b);
       }
-      if (s.file_size) {
+      // Size badge only for non-tabs (Tabs show it in the title line).
+      if (s.file_size && s.group !== "tabs") {
         const b = document.createElement("span"); b.className = "badge unnamed"; b.textContent = fmtSize(s.file_size);
         badges.appendChild(b);
       }

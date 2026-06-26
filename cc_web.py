@@ -1527,6 +1527,8 @@ def _session_dict(jsonl: Path, mtime: float, named: Optional[dict],
         d["window_index"] = live_tab.get("window_index", 0)
         d["tab_index"] = live_tab.get("tab_index", 0)
         d["iterm_session_id"] = live_tab.get("iterm_session_id", "")
+        d["pid"] = live_tab.get("pid")
+        d["proc_start"] = live_tab.get("proc_start")   # ms epoch
     return d
 
 
@@ -2704,6 +2706,7 @@ async def get_sessions(card: str = "both"):
                 "sid": sid,
                 "name": t.name,
                 "pid": t.pid,
+                "proc_start": (meta or {}).get("startedAt"),   # ms epoch, claude start
                 "cwd": t.cwd or "",
                 "iterm_session_id": t.iterm_session_id,
                 "window_index": t.window_index,
@@ -2723,6 +2726,33 @@ async def get_sessions(card: str = "both"):
         "claude_store": store,
         "runaway": _runaway_processes(live_tabs),
     }
+
+
+@app.get("/api/tabs", dependencies=[Depends(require_token)])
+async def get_tabs():
+    """Lightweight list of live claude tabs for the in-transcript quick switcher:
+    [{sid, window_index, tab_index, name}] sorted by window/tab. `name` prefers
+    the user-set name, then the LLM title, then the iTerm tab name."""
+    out: list[dict] = []
+    try:
+        await bridge.ensure_connected()
+        for t in await bridge.list_claude_tabs():
+            meta = _claude_session_meta(t.pid)
+            sid = (meta or {}).get("sessionId") or (t.claude_session_id or "")
+            if not sid:
+                continue
+            title, _ = _summary_of(sid)
+            out.append({
+                "sid": sid,
+                "window_index": t.window_index,
+                "tab_index": t.tab_index,
+                "tab_name": t.name or "",                       # raw iTerm name (picker)
+                "name": _user_name_of(sid) or title or (t.name or ""),  # display (switcher)
+            })
+    except Exception:
+        pass
+    out.sort(key=lambda e: (e["window_index"], e["tab_index"]))
+    return {"tabs": out}
 
 
 class KillProcessPayload(BaseModel):
