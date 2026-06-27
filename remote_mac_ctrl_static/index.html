@@ -17,6 +17,18 @@
     --err: #e25555;
     --pad: 12px;
   }
+  /* Follow cc-web's display mode (shared via localStorage cc_web_theme). */
+  body.light {
+    --bg: #fdf6e3; --card: #f5edd6; --card-hi: #ece3c8; --fg: #1d2021;
+    --dim: #7c6f64; --accent: #af3a03; --ok: #2f6b2e; --err: #9d0006;
+  }
+  body.pure {
+    --bg: #fff; --card: #fff; --card-hi: #f2f2f2; --fg: #000;
+    --dim: #333; --accent: #000; --ok: #000; --err: #000;
+  }
+  body.pure button, body.pure .btn {
+    background: #fff !important; color: #000 !important; border: 1px solid #000 !important;
+  }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; padding: 0; }
   body {
@@ -402,6 +414,7 @@
 </style>
 </head>
 <body>
+<script>/* match cc-web theme (same-origin localStorage) */(function(){try{var t=localStorage.getItem("cc_web_theme");if(t==="light"||t==="pure")document.body.classList.add(t);}catch(e){}})();</script>
 
 <div class="toast" id="toast"></div>
 

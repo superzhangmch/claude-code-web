@@ -58,6 +58,39 @@ body.light #tabscr-modal .screen-body { background: #d7d6d0; color: var(--text);
 body.light #tail-box { background: #d7d6d0; }
 body.light .session-card .badge.bound { background: #d7ecc6; color: #2f6b2e; }
 body.light .session-card .badge.unnamed { background: var(--panel2); color: var(--muted); }
+
+/* Pure-white theme — for e-ink monitors: every text box is pure white with
+   black text + black borders, no colors (e-ink is grayscale). */
+body.pure {
+  --bg: #fff; --panel: #fff; --panel2: #fff; --text: #000; --muted: #333;
+  --accent: #000; --assistant: #000; --border: #000; --code-bg: #fff; --warn: #000;
+}
+body.pure header, body.pure footer { background: #fff; }
+body.pure .session-card { background: #fff; border-color: #000; }
+body.pure .session-card .msg-block.user,
+body.pure .session-card .msg-block.claude { background: #fff; color: #000; }
+body.pure .msg.user, body.pure .msg.assistant,
+body.pure .msg.tool, body.pure .msg.system, body.pure .msg.thinking { background: #fff; }
+body.pure .msg.user, body.pure .msg.user .markdown,
+body.pure .msg.system, body.pure .msg.system .markdown { color: #000; }
+body.pure .candidate .screen-tail,
+body.pure #screen-modal .screen-body,
+body.pure #tabs-modal .screen-body,
+body.pure #tabscr-modal .screen-body,
+body.pure #tail-box { background: #fff; color: #000; }
+body.pure .session-card .badge.bound,
+body.pure .session-card .badge.unnamed { background: #fff; color: #000; border: 1px solid #000; }
+body.pure .session-card.expanded { border-color: #000; box-shadow: 0 0 0 2px #000; }
+body.pure .hl { color: #000; font-weight: 700; text-decoration: underline; }
+body.pure #picker-runaway { background: #fff; border-color: #000; }
+body.pure #picker-runaway .ra-head, body.pure #picker-runaway .ra-kill { color: #000; }
+body.pure #picker-runaway .ra-kill { background: #fff; border: 1px solid #000; }
+/* e-ink: every button is white bg + black text/border (accent-bg buttons like
+   the full-search "Search" would otherwise be solid black). !important to beat
+   the id-specific accent rules. */
+body.pure button, body.pure .btn, body.pure a.btn, body.pure .mode-pick {
+  background: #fff !important; color: #000 !important; border: 1px solid #000 !important;
+}
 * { box-sizing: border-box; }
 html, body {
   margin: 0; padding: 0;
@@ -1766,17 +1799,24 @@ footer button.icon {
   applyPickerScale();
 
   // Light / dark theme toggle (persisted). Dark is the default.
+  // Three themes, cycled by the button: dark → light → pure (e-ink white).
+  const THEME_ORDER = ["dark", "light", "pure"];
+  const THEME_GLYPH = { dark: "◐", light: "☀", pure: "▢" };
+  const THEME_METACOLOR = { dark: "#000000", light: "#fdf6e3", pure: "#ffffff" };
   function applyTheme() {
-    const light = localStorage.getItem("cc_web_theme") === "light";
-    document.body.classList.toggle("light", light);
+    let t = localStorage.getItem("cc_web_theme") || "dark";
+    if (!THEME_ORDER.includes(t)) t = "dark";
+    document.body.classList.toggle("light", t === "light");
+    document.body.classList.toggle("pure", t === "pure");
     const btn = document.getElementById("picker-mode");
-    if (btn) btn.textContent = light ? "☀" : "◐";
+    if (btn) { btn.textContent = THEME_GLYPH[t]; btn.title = `theme: ${t} (tap to cycle dark/light/pure)`; }
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute("content", light ? "#fdf6e3" : "#000000");
+    if (meta) meta.setAttribute("content", THEME_METACOLOR[t]);
   }
   document.getElementById("picker-mode").addEventListener("click", () => {
-    const light = localStorage.getItem("cc_web_theme") === "light";
-    localStorage.setItem("cc_web_theme", light ? "dark" : "light");
+    let t = localStorage.getItem("cc_web_theme") || "dark";
+    const next = THEME_ORDER[(THEME_ORDER.indexOf(t) + 1) % THEME_ORDER.length];
+    localStorage.setItem("cc_web_theme", next);
     applyTheme();
   });
   applyTheme();
@@ -3104,6 +3144,16 @@ footer button.icon {
           fmtProcesses(j.processes, j.binding && j.binding.pid),
           { pre: true });
       }
+      // Keyboard shortcuts (active in this detail view, only when NOT typing
+      // in the reply box and with no modifier held).
+      appendInfoRow(infoBody, "⌨ shortcuts", "(when not typing in the reply box)");
+      appendInfoRow(infoBody, "/", "focus reply box");
+      appendInfoRow(infoBody, "i", "toggle tab list  →  1–9 opens that tab");
+      appendInfoRow(infoBody, "t", "tailScr window (open / refresh)");
+      appendInfoRow(infoBody, "s", "screenshot window");
+      appendInfoRow(infoBody, "x", "close the open popup");
+      appendInfoRow(infoBody, "r", "refresh open popup, else get latest");
+      appendInfoRow(infoBody, "Esc", "blur the reply box");
     } catch (e) {
       infoBody.innerHTML = "";
       appendInfoRow(infoBody, "error", String(e));
@@ -4595,6 +4645,66 @@ footer button.icon {
     if (wasTimeoutPause) setPaused(true, "timeout");
     else updateAutoload();
   });
+  // Force a one-shot "get the latest" fetch now (what the keyboard shortcut and
+  // the autoload tap both want).
+  async function forceCheckNow() {
+    if (!attachedSid) return;
+    isPaused = false;
+    keepAlive();
+    autoloadEl.classList.remove("paused");
+    autoloadEl.classList.add("checking");
+    autoloadLabel.textContent = "checking…";
+    try { await pollOnce(); }
+    finally { autoloadEl.classList.remove("checking"); updateAutoload(); }
+  }
+
+  // Transcript-page keyboard shortcuts (desktop). Plain keys, ONLY when you're
+  // NOT typing in a field and no modifier is held (so typing in the reply box,
+  // and Cmd/Ctrl+R page reload, are unaffected):
+  //   /  focus reply box      i  toggle tab list      t  tailScr window
+  //   s  screenshot window    x  close open popup      r  refresh open popup / get latest
+  //   1-9 (while tab list open)  switch to that tab    Esc (in reply box)  blur
+  function _isEditable(el) {
+    return el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA"
+      || el.tagName === "SELECT" || el.isContentEditable);
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && document.activeElement === inputEl) { inputEl.blur(); return; }
+    if (!tvEl.classList.contains("show")) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (_isEditable(document.activeElement)) return;
+
+    const tailOpen = tailBox.style.display === "block";
+    const screenOpen = screenModal.classList.contains("show");
+    const switchOpen = switchMenu.style.display !== "none";
+
+    // Digit picks a tab while the tab list is open.
+    if (switchOpen && /^[1-9]$/.test(e.key)) {
+      const items = switchMenu.querySelectorAll(".sw-item");
+      const it = items[parseInt(e.key, 10) - 1];
+      if (it) { e.preventDefault(); it.click(); }
+      return;
+    }
+    switch (e.key) {
+      case "/": e.preventDefault(); inputEl.focus(); break;
+      case "i": case "I": e.preventDefault(); openSwitchMenu(); break;   // toggle tab list
+      case "t": case "T": e.preventDefault(); tailScreen(); break;       // open/refresh tailScr
+      case "s": case "S": e.preventDefault(); openScreenInfo(); break;   // open screenshot
+      case "x": case "X":
+        if (tailOpen) { e.preventDefault(); tailBox.style.display = "none"; }
+        else if (screenOpen) { e.preventDefault(); screenModal.classList.remove("show"); }
+        else if (switchOpen) { e.preventDefault(); hideSwitchMenu(); }
+        break;
+      case "r": case "R":
+        e.preventDefault();
+        if (tailOpen) tailScreen();                       // refresh tailScr
+        else if (screenOpen) screenRefresh.click();       // refresh screenshot
+        else if (switchOpen) { hideSwitchMenu(); openSwitchMenu(); }
+        else forceCheckNow();                             // get latest transcript
+        break;
+    }
+  });
+
   function updateAutoload() {
     autoloadEl.classList.toggle("show", !!attachedSid);
     autoloadEl.classList.toggle("paused", isPaused || claudeIdle);
