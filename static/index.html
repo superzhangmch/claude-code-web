@@ -1390,6 +1390,8 @@ footer button.icon {
         <label class="tab-radio"><input type="radio" name="screenTab" value="screen" checked> Screen</label>
         <label class="tab-radio"><input type="radio" name="screenTab" value="info"> Info</label>
         <span style="flex:1"></span>
+        <button id="screen-fontup" class="btn" title="bigger">A</button>
+        <button id="screen-fontdown" class="btn" title="smaller">a</button>
         <button id="screen-refresh" class="btn">↻</button>
         <button id="screen-close" class="btn">close</button>
       </div>
@@ -1996,7 +1998,15 @@ footer button.icon {
   // choice/question is pending and the banner needs to appear. Stops anyway
   // once ACTIVITY_TIMEOUT_MS of no interaction trips the timeout pause.
   const IDLE_POLL_INTERVAL_MS = 6000;
-  const ACTIVITY_TIMEOUT_MS = 2 * 60 * 1000;
+  // How long polling keeps running after the last interaction before it pauses.
+  // Longer while the page is FOREGROUND (you're here looking at it); short
+  // otherwise (and a hidden page pauses immediately via the document.hidden
+  // guard anyway). Returning to the foreground resets the window.
+  const ACTIVITY_TIMEOUT_MS = 2 * 60 * 1000;        // base / background
+  const ACTIVITY_TIMEOUT_FG_MS = 20 * 60 * 1000;    // foreground: poll much longer
+  function _activityWindow() {
+    return document.hidden ? ACTIVITY_TIMEOUT_MS : ACTIVITY_TIMEOUT_FG_MS;
+  }
 
   mainEl.addEventListener("scroll", () => {
     const nearBottom = mainEl.scrollHeight - mainEl.scrollTop - mainEl.clientHeight < 40;
@@ -2179,6 +2189,16 @@ footer button.icon {
   }
   screenBtn.addEventListener("click", openScreenInfo);
   choiceBannerBtn.addEventListener("click", openScreenInfo);
+  // A / a zoom the screenshot content (persisted, separate from the chat scale).
+  let screenScale = parseFloat(localStorage.getItem("cc_web_screen_scale") || "1") || 1;
+  function applyScreenScale() {
+    screenScale = Math.round(Math.max(0.6, Math.min(2.5, screenScale)) * 10) / 10;
+    screenBody.style.zoom = screenScale;
+    localStorage.setItem("cc_web_screen_scale", String(screenScale));
+  }
+  applyScreenScale();
+  document.getElementById("screen-fontup").addEventListener("click", () => { screenScale += 0.1; applyScreenScale(); });
+  document.getElementById("screen-fontdown").addEventListener("click", () => { screenScale -= 0.1; applyScreenScale(); });
   screenRefresh.addEventListener("click", () => { loadScreen(); loadInfo(); });
   screenClose.addEventListener("click", () => screenModal.classList.remove("show"));
   screenModal.addEventListener("click", (e) => {
@@ -3841,7 +3861,7 @@ footer button.icon {
     claudeIdle = false; isPaused = false;
     transcriptEl.innerHTML = "";
     showTranscript();
-    activityDeadline = Date.now() + ACTIVITY_TIMEOUT_MS;
+    activityDeadline = Date.now() + _activityWindow();
     pollOnce();
   }
 
@@ -4584,6 +4604,9 @@ footer button.icon {
     // cascade — zoom scales the whole transcript proportionally. Supported in
     // Safari/Chrome (the targets).
     transcriptEl.style.zoom = chatScale;
+    // Scale the reply box and the tailScr peek along with the messages.
+    if (inputEl) inputEl.style.zoom = chatScale;
+    if (tailPre) tailPre.style.zoom = chatScale;
     localStorage.setItem("cc_web_chat_scale", String(chatScale));
     // After a resize, jump to the bottom (latest message). The pill row lives
     // at the very bottom of the scroll area, so it stays exposed.
@@ -4715,11 +4738,11 @@ footer button.icon {
   function setPaused(p, reason) {
     isPaused = p;
     pauseReason = p ? (reason || pauseReason || "manual") : null;
-    if (!p) { activityDeadline = Date.now() + ACTIVITY_TIMEOUT_MS; if (!pollTimer) schedulePoll(0); }
+    if (!p) { activityDeadline = Date.now() + _activityWindow(); if (!pollTimer) schedulePoll(0); }
     else { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
     updateAutoload();
   }
-  function keepAlive() { activityDeadline = Date.now() + ACTIVITY_TIMEOUT_MS; }
+  function keepAlive() { activityDeadline = Date.now() + _activityWindow(); }
   function schedulePoll(delay) {
     if (pollTimer) clearTimeout(pollTimer);
     pollTimer = setTimeout(pollOnce, delay);
