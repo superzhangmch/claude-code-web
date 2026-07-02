@@ -1400,8 +1400,13 @@ footer button.icon {
         <pre id="screen-body" class="screen-body">…</pre>
         <div class="modal-row screen-actions">
           <button id="key-esc" class="btn" title="Send ESC">ESC</button>
-          <button id="key-up" class="btn" title="Arrow Up — move selection up">↑</button>
-          <button id="key-down" class="btn" title="Arrow Down — move selection down">↓</button>
+          <button id="key-up" class="btn" title="Arrow Up">↑</button>
+          <button id="key-up2" class="btn" title="Up ×2">↑2</button>
+          <button id="key-up3" class="btn" title="Up ×3">↑3</button>
+          <button id="key-down" class="btn" title="Arrow Down">↓</button>
+          <button id="key-down2" class="btn" title="Down ×2">↓2</button>
+          <button id="key-down3" class="btn" title="Down ×3">↓3</button>
+          <button id="key-clearline" class="btn" title="Clear current line (Ctrl-E then Ctrl-U)">⌫ line</button>
           <button id="key-enter" class="btn" title="Enter — confirm">⏎ Enter</button>
         </div>
       </div>
@@ -2831,7 +2836,8 @@ footer button.icon {
   // refresh the screen view so the user can see what happened.
   // press_enter:false because we encode \r ourselves when needed — that
   // way we can send a bare ESC without an extra Enter sneaking in.
-  const screenKeyBtns = ["key-esc", "key-up", "key-down", "key-enter"]
+  const screenKeyBtns = ["key-esc", "key-up", "key-up2", "key-up3", "key-down",
+                         "key-down2", "key-down3", "key-clearline", "key-enter"]
     .map(id => document.getElementById(id));
   function setScreenKeysDisabled(on) {
     for (const b of screenKeyBtns) b.disabled = on;
@@ -2863,9 +2869,16 @@ footer button.icon {
     setTimeout(() => loadScreen(true), 250);
     setTimeout(async () => { await loadScreen(true); setScreenKeysDisabled(false); }, 650);
   }
+  const UP = "\x1b[A", DOWN = "\x1b[B";
   document.getElementById("key-esc").addEventListener("click", () => sendRaw("\x1b"));
-  document.getElementById("key-up").addEventListener("click", () => sendRaw("\x1b[A"));
-  document.getElementById("key-down").addEventListener("click", () => sendRaw("\x1b[B"));
+  document.getElementById("key-up").addEventListener("click", () => sendRaw(UP));
+  document.getElementById("key-up2").addEventListener("click", () => sendRaw(UP + UP));
+  document.getElementById("key-up3").addEventListener("click", () => sendRaw(UP + UP + UP));
+  document.getElementById("key-down").addEventListener("click", () => sendRaw(DOWN));
+  document.getElementById("key-down2").addEventListener("click", () => sendRaw(DOWN + DOWN));
+  document.getElementById("key-down3").addEventListener("click", () => sendRaw(DOWN + DOWN + DOWN));
+  // Clear the current input line: Ctrl-E (to end of line) then Ctrl-U (kill to start).
+  document.getElementById("key-clearline").addEventListener("click", () => sendRaw("\x05\x15"));
   document.getElementById("key-enter").addEventListener("click", () => sendRaw("", true));
 
   // CPU history modal — opened by clicking the battery in the picker.
@@ -3167,6 +3180,7 @@ footer button.icon {
       // Keyboard shortcuts (active in this detail view, only when NOT typing
       // in the reply box and with no modifier held).
       appendInfoRow(infoBody, "⌨ shortcuts", "(when not typing in the reply box)");
+      appendInfoRow(infoBody, "A / a", "font bigger / smaller (screenshot window: zooms it)");
       appendInfoRow(infoBody, "/", "focus reply box");
       appendInfoRow(infoBody, "i", "toggle tab list  →  1–9 opens that tab");
       appendInfoRow(infoBody, "t", "tailScr window (open / refresh)");
@@ -4724,6 +4738,18 @@ footer button.icon {
         else if (screenOpen) screenRefresh.click();       // refresh screenshot
         else if (switchOpen) { hideSwitchMenu(); openSwitchMenu(); }
         else forceCheckNow();                             // get latest transcript
+        break;
+      // Font size: A bigger / a smaller. In the screenshot window it zooms the
+      // screenshot; otherwise it zooms the chat (which also scales input+tailScr).
+      case "A":
+        e.preventDefault();
+        if (screenOpen) { screenScale += 0.1; applyScreenScale(); }
+        else { chatScale += 0.1; applyChatScale(true); }
+        break;
+      case "a":
+        e.preventDefault();
+        if (screenOpen) { screenScale -= 0.1; applyScreenScale(); }
+        else { chatScale -= 0.1; applyChatScale(true); }
         break;
     }
   });
