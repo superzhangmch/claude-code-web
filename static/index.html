@@ -1043,6 +1043,18 @@ footer button.icon {
   padding: 8px 10px; margin: 0;
   overflow: auto; white-space: pre;
 }
+#screen-modal .scr-delta {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 12px; color: var(--muted); cursor: pointer; user-select: none;
+}
+#screen-modal .scr-delta input { width: auto; margin: 0; accent-color: var(--accent); }
+#screen-modal .screen-input-row { display: flex; gap: 6px; }
+#screen-modal #screen-input {
+  flex: 1; min-width: 0; box-sizing: border-box; -webkit-appearance: none;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 13px;
+}
+#screen-modal #screen-input:focus { outline: none; border-color: var(--accent); }
 #screen-modal .screen-actions {
   display: flex; flex-wrap: wrap; gap: 6px;
   justify-content: flex-end;
@@ -1390,9 +1402,9 @@ footer button.icon {
         <label class="tab-radio"><input type="radio" name="screenTab" value="screen" checked> Screen</label>
         <label class="tab-radio"><input type="radio" name="screenTab" value="info"> Info</label>
         <span style="flex:1"></span>
+        <label class="scr-delta" title="增量更新:只传变化的行,省流量"><input type="checkbox" id="screen-delta" checked> Δ</label>
         <button id="screen-fontup" class="btn" title="bigger">A</button>
         <button id="screen-fontdown" class="btn" title="smaller">a</button>
-        <button id="screen-refresh" class="btn">↻</button>
         <button id="screen-close" class="btn">close</button>
       </div>
       <!-- Screen tab: scrollable both ways; action keys below the screen. -->
@@ -1408,6 +1420,11 @@ footer button.icon {
           <button id="key-down3" class="btn" title="Down ×3">↓3</button>
           <button id="key-clearline" class="btn" title="Clear current line (Ctrl-E then Ctrl-U)">⌫ line</button>
           <button id="key-enter" class="btn" title="Enter — confirm">⏎ Enter</button>
+        </div>
+        <div class="modal-row screen-input-row">
+          <input id="screen-input" type="text" placeholder="type & send to this tab…" autocomplete="off">
+          <button id="screen-send" class="btn">Send</button>
+          <button id="screen-refresh" class="btn" title="refresh screen">↻</button>
         </div>
       </div>
       <!-- Info tab: just a table, only horizontal scroll. -->
@@ -2155,18 +2172,41 @@ footer button.icon {
   // quiet=true: in-place refresh used after ↑/↓/Enter — skip the "Loading…"
   // placeholder (which collapses the <pre> and makes the box jump) and only
   // re-pin to the bottom if we were already there, so the view stays steady.
+  // Delta-mode client state (experimental incremental screen updates).
+  let screenVer = "";
+  let screenLines = [];
   async function loadScreen(quiet) {
     if (!attachedSid) return;
-    if (!quiet) screenBody.textContent = "Loading…";
+    const useDelta = document.getElementById("screen-delta").checked;
+    if (!quiet && !useDelta) screenBody.textContent = "Loading…";
     try {
-      const resp = await authedFetch("/api/screen?claude_session_id=" + encodeURIComponent(attachedSid));
+      let url = "/api/screen?claude_session_id=" + encodeURIComponent(attachedSid);
+      if (useDelta) url += "&delta=1&ver=" + encodeURIComponent(screenVer);
+      const resp = await authedFetch(url);
       if (!resp.ok) {
         if (!quiet) screenBody.textContent = "Error: " + resp.status + " " + resp.statusText;
         return;
       }
       const j = await resp.json();
       const atBottom = screenBody.scrollHeight - screenBody.scrollTop - screenBody.clientHeight < 24;
-      screenBody.textContent = j.screen || "(empty)";
+      if (useDelta) {
+        if (j.same) { screenVer = j.ver; return; }          // unchanged → touch nothing
+        if (j.full !== undefined) {
+          screenLines = (j.full || "").split("\n"); screenVer = j.ver;
+          screenBody.textContent = j.full || "(empty)";
+        } else if (j.changed && j.base === screenVer) {      // apply the diff
+          const lines = screenLines.slice(0, j.n);
+          while (lines.length < j.n) lines.push("");
+          for (const [i, t] of j.changed) lines[i] = t;
+          screenLines = lines; screenVer = j.ver;
+          screenBody.textContent = lines.join("\n") || "(empty)";
+        } else {                                             // base mismatch → re-fetch full
+          screenVer = "";
+          return loadScreen(quiet);
+        }
+      } else {
+        screenBody.textContent = j.screen || "(empty)";
+      }
       // Scroll to bottom — most recent output is what the user usually wants.
       // On a quiet refresh keep the user's position unless they were at bottom.
       if (!quiet || atBottom) screenBody.scrollTop = screenBody.scrollHeight;
@@ -2189,11 +2229,20 @@ footer button.icon {
   function openScreenInfo() {
     screenModal.classList.add("show");
     showScreenTab("screen");
+    screenVer = ""; screenLines = [];   // fresh: first load is a full send
     loadScreen();
     loadInfo();
   }
   screenBtn.addEventListener("click", openScreenInfo);
   choiceBannerBtn.addEventListener("click", openScreenInfo);
+  // Experimental delta toggle (persisted). Switching resets the versioned state.
+  const screenDelta = document.getElementById("screen-delta");
+  screenDelta.checked = localStorage.getItem("cc_web_screen_delta") !== "0";   // default ON
+  screenDelta.addEventListener("change", () => {
+    localStorage.setItem("cc_web_screen_delta", screenDelta.checked ? "1" : "0");
+    screenVer = ""; screenLines = [];
+    loadScreen();
+  });
   // A / a zoom the screenshot content (persisted, separate from the chat scale).
   let screenScale = parseFloat(localStorage.getItem("cc_web_screen_scale") || "1") || 1;
   function applyScreenScale() {
@@ -2837,7 +2886,8 @@ footer button.icon {
   // press_enter:false because we encode \r ourselves when needed — that
   // way we can send a bare ESC without an extra Enter sneaking in.
   const screenKeyBtns = ["key-esc", "key-up", "key-up2", "key-up3", "key-down",
-                         "key-down2", "key-down3", "key-clearline", "key-enter"]
+                         "key-down2", "key-down3", "key-clearline", "key-enter",
+                         "screen-send"]
     .map(id => document.getElementById(id));
   function setScreenKeysDisabled(on) {
     for (const b of screenKeyBtns) b.disabled = on;
@@ -2880,6 +2930,19 @@ footer button.icon {
   // Clear the current input line: Ctrl-E (to end of line) then Ctrl-U (kill to start).
   document.getElementById("key-clearline").addEventListener("click", () => sendRaw("\x05\x15"));
   document.getElementById("key-enter").addEventListener("click", () => sendRaw("", true));
+  // Text input + Send: type into this tab and submit (text + Enter).
+  const screenInput = document.getElementById("screen-input");
+  function screenSend() {
+    const t = screenInput.value;
+    if (!t) return;
+    screenInput.value = "";
+    sendRaw(t, true);
+  }
+  document.getElementById("screen-send").addEventListener("click", screenSend);
+  screenInput.addEventListener("keydown", (e) => {
+    if (e.isComposing || e.keyCode === 229) return;   // IME guard
+    if (e.key === "Enter") { e.preventDefault(); screenSend(); }
+  });
 
   // CPU history modal — opened by clicking the battery in the picker.
   // Renders a simple line chart (no chart library) of each active pid's

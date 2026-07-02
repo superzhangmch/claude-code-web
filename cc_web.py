@@ -3802,8 +3802,14 @@ async def get_session_info(claude_session_id: str):
     }
 
 
+# Per-session last-screen cache for the experimental delta path (single client
+# assumed; a stale/mismatched ver just degrades to a full send — never wrong).
+_SCREEN_DELTA_CACHE: dict[str, dict] = {}
+
+
 @app.get("/api/screen", dependencies=[Depends(require_token)])
-async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0):
+async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0,
+                     delta: bool = False, ver: str = ""):
     """Return the current iTerm screen tail for a bound session. Used by
     the 'Load screen' button so the user can peek at the live tab any time.
     tail>0 → slice to the input box + `tail` lines above it SERVER-SIDE and
@@ -3831,7 +3837,27 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
     if tail > 0:
         return {"screen": _screen_tail(screen or "", tail)}
-    return {"screen": _collapse_blanks(screen or "")}
+    text = _collapse_blanks(screen or "")
+    if not delta:
+        return {"screen": text}
+
+    # Experimental incremental path. ver = content hash (so "unchanged" is a
+    # cheap exact-match); on a real change, if the client's last ver matches our
+    # cached previous screen, send only the changed lines; else send full.
+    cur_lines = text.split("\n")
+    new_ver = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+    prev = _SCREEN_DELTA_CACHE.get(claude_session_id)
+    _SCREEN_DELTA_CACHE[claude_session_id] = {"ver": new_ver, "lines": cur_lines}
+    if ver and ver == new_ver:
+        return {"ver": new_ver, "same": True}
+    if prev and ver and prev.get("ver") == ver:
+        pl = prev["lines"]
+        changed = [[i, cur_lines[i]] for i in range(len(cur_lines))
+                   if i >= len(pl) or cur_lines[i] != pl[i]]
+        # Only worth a diff if a minority of lines changed; else just send full.
+        if len(changed) <= max(1, int(len(cur_lines) * 0.6)):
+            return {"ver": new_ver, "base": ver, "n": len(cur_lines), "changed": changed}
+    return {"ver": new_ver, "full": text}
 
 
 @app.get("/api/iterm-tabs", dependencies=[Depends(require_token)])
