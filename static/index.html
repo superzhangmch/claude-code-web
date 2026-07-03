@@ -1024,7 +1024,13 @@ footer button.icon {
 #screen-modal .screen-body {
   flex: 1; min-height: 0;
   background: #000; color: var(--text);
-  font: 12px ui-monospace, Menlo, monospace;
+  /* Terminal alignment: TUI tables assume 1 CJK glyph == 2 ASCII cells. That
+     only holds if latin AND CJK come from the SAME dual-width monospace font,
+     so lead with those (Sarasa / Noto Mono CJK). If none is installed we fall
+     to a latin monospace (ASCII aligns; CJK columns won't — needs a bundled
+     webfont). ui-monospace stays last: it maps to a proportional UI font in
+     some embedded browsers. */
+  font: 12px "Sarasa Mono SC", "Sarasa Fixed SC", "Noto Sans Mono CJK SC", "Noto Sans Mono CJK", "WenQuanYi Zen Hei Mono", Menlo, Monaco, "SF Mono", "DejaVu Sans Mono", Consolas, "Liberation Mono", "Courier New", ui-monospace, monospace;
   border: 1px solid var(--border); border-radius: 4px;
   padding: 8px 10px; margin: 0;
   overflow: auto; white-space: pre;
@@ -1038,7 +1044,7 @@ footer button.icon {
 #tabscr-modal .screen-body {
   flex: 1; min-height: 0;
   background: #000; color: var(--text);
-  font: 12px ui-monospace, Menlo, monospace;
+  font: 12px "Sarasa Mono SC", "Sarasa Fixed SC", "Noto Sans Mono CJK SC", "Noto Sans Mono CJK", "WenQuanYi Zen Hei Mono", Menlo, Monaco, "SF Mono", "DejaVu Sans Mono", Consolas, "Liberation Mono", "Courier New", ui-monospace, monospace;
   border: 1px solid var(--border); border-radius: 4px;
   padding: 8px 10px; margin: 0;
   overflow: auto; white-space: pre;
@@ -1046,10 +1052,12 @@ footer button.icon {
 /* Fullscreen (mainly for desktop): the screen card fills the viewport. */
 #screen-modal.fs { padding: 0; }
 #screen-modal.fs .modal-card.screen-card {
-  width: 100vw; max-width: none; height: 100vh; max-height: none; border-radius: 0;
+  width: 100vw; max-width: none; height: 100vh; max-height: none;
+  border-radius: 0; padding: 6px 6px; gap: 4px;   /* tight margins, compact rows */
 }
-#screen-modal .screen-stat-row { min-height: 13px; }
+#screen-modal.fs .screen-body { padding: 3px 6px; }   /* less left/right margin */
 #screen-modal .scr-stat {
+  margin-right: auto;   /* sit at the far left; the action buttons stay right */
   font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1065,11 +1073,6 @@ footer button.icon {
   border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 13px;
 }
 #screen-modal #screen-input:focus { outline: none; border-color: var(--accent); }
-#screen-modal #screen-auto {
-  flex: none; background: var(--panel2); color: var(--muted);
-  border: 1px solid var(--border); border-radius: 6px; padding: 5px 6px;
-  font-size: 12px; -webkit-appearance: none;
-}
 #screen-modal .screen-actions {
   display: flex; flex-wrap: wrap; gap: 6px;
   justify-content: flex-end;
@@ -1427,6 +1430,7 @@ footer button.icon {
       <div id="screen-pane">
         <pre id="screen-body" class="screen-body">…</pre>
         <div class="modal-row screen-actions">
+          <span id="screen-stat" class="scr-stat"></span>
           <button id="key-esc" class="btn" title="Send ESC">ESC</button>
           <button id="key-up" class="btn" title="Arrow Up">↑</button>
           <button id="key-up2" class="btn" title="Up ×2">↑2</button>
@@ -1440,15 +1444,8 @@ footer button.icon {
         <div class="modal-row screen-input-row">
           <input id="screen-input" type="text" placeholder="type & send to this tab…" autocomplete="off">
           <button id="screen-send" class="btn">Send</button>
-          <select id="screen-auto" title="auto-reload every 3s for a while (resets on input)">
-            <option value="0">⟳ off</option>
-            <option value="60">⟳ 1m</option>
-            <option value="180">⟳ 3m</option>
-            <option value="300">⟳ 5m</option>
-          </select>
           <button id="screen-refresh" class="btn" title="refresh screen">↻</button>
         </div>
-        <div class="screen-stat-row"><span id="screen-stat" class="scr-stat"></span></div>
       </div>
       <!-- Info tab: just a table, only horizontal scroll. -->
       <div id="info-pane" style="display:none">
@@ -2222,10 +2219,10 @@ footer button.icon {
           screenBody.textContent = j.full || "(empty)";
           screenStat.textContent = `full · ${bytes}B (${screenLines.length} lines)`;
         } else if (j.changed && j.base === screenVer) {      // apply the diff
-          const k = j.scroll || 0;                            // scroll offset
+          const k = j.scroll || 0;                            // alignment offset (may be negative)
           const prev = screenLines;
           const lines = new Array(j.n);
-          for (let i = 0; i < j.n; i++) lines[i] = (i + k < prev.length) ? prev[i + k] : "";
+          for (let i = 0; i < j.n; i++) lines[i] = (i + k >= 0 && i + k < prev.length) ? prev[i + k] : "";
           for (const [i, v] of j.changed) lines[i] = (typeof v === "string") ? v : v.c.repeat(v.n);
           screenLines = lines; screenVer = j.ver;
           screenBody.textContent = lines.join("\n") || "(empty)";
@@ -2263,37 +2260,47 @@ footer button.icon {
     screenModal.classList.toggle("fs", localStorage.getItem("cc_web_screen_full") === "1");
     showScreenTab("screen");
     screenVer = ""; screenLines = [];   // fresh: first load is a full send
-    stopAuto(); screenAuto.value = "0"; autoDurMs = 0;   // auto-reload off on open
     loadScreen();
     loadInfo();
+    startAuto();   // auto-reload always on while the window is shown
   }
   document.getElementById("screen-full").addEventListener("click", () => {
     const on = !screenModal.classList.contains("fs");
     screenModal.classList.toggle("fs", on);
     localStorage.setItem("cc_web_screen_full", on ? "1" : "0");
   });
-  // Auto-reload: refresh the screen every 3s for the chosen duration, then stop.
-  // Sending input (any key / Send) resets the countdown so it keeps going while
-  // you interact. Paused while the tab is backgrounded (document.hidden).
-  const screenAuto = document.getElementById("screen-auto");
-  let autoTimer = null, autoDeadline = 0, autoDurMs = 0;
-  function stopAuto() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  // Auto-reload with exponential backoff: always on while the screen window is
+  // shown. Poll fast (3s) while the screen is changing, back off 3→7→15→30→60s
+  // while idle; any update (or your input) resets the interval to 3s. Hard
+  // 1-hour total cap so a forgotten-open window doesn't poll forever. Canceled
+  // whenever the window is hidden/closed, restarted (fresh 1h) when shown again.
+  const AUTO_STEPS = [3000, 7000, 15000, 30000, 60000];
+  const AUTO_TOTAL_MS = 3600000;   // 1 hour
+  let autoTimer = null, autoDeadline = 0, autoStep = 0;
+  function stopAuto() { if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; } }
+  function scheduleAuto() {
+    autoTimer = setTimeout(autoTick, AUTO_STEPS[Math.min(autoStep, AUTO_STEPS.length - 1)]);
+  }
+  async function autoTick() {
+    autoTimer = null;
+    if (!screenModal.classList.contains("show") || document.hidden) return;
+    if (Date.now() > autoDeadline) return;   // 1h total cap reached
+    const before = screenBody.textContent;
+    await loadScreen(true);
+    if (screenBody.textContent !== before) autoStep = 0;   // update → poll fast again
+    else autoStep = Math.min(autoStep + 1, AUTO_STEPS.length - 1);   // idle → back off
+    scheduleAuto();
+  }
   function startAuto() {
     stopAuto();
-    if (autoDurMs <= 0) return;
-    autoDeadline = Date.now() + autoDurMs;
-    autoTimer = setInterval(() => {
-      if (!screenModal.classList.contains("show") || Date.now() > autoDeadline) {
-        stopAuto(); screenAuto.value = "0"; return;
-      }
-      if (!document.hidden) loadScreen(true);
-    }, 3000);
+    if (!screenModal.classList.contains("show") || document.hidden) return;
+    autoStep = 0; autoDeadline = Date.now() + AUTO_TOTAL_MS;
+    scheduleAuto();
   }
-  function bumpAuto() { if (autoTimer && autoDurMs > 0) autoDeadline = Date.now() + autoDurMs; }
-  screenAuto.addEventListener("change", () => {
-    autoDurMs = (parseInt(screenAuto.value, 10) || 0) * 1000;
-    startAuto();
-  });
+  function bumpAuto() {   // input resets the interval and re-polls soon
+    if (!screenModal.classList.contains("show")) return;
+    autoStep = 0; stopAuto(); scheduleAuto();
+  }
   screenBtn.addEventListener("click", openScreenInfo);
   choiceBannerBtn.addEventListener("click", openScreenInfo);
   // Experimental delta toggle (persisted). Switching resets the versioned state.
@@ -2315,7 +2322,7 @@ footer button.icon {
   document.getElementById("screen-fontup").addEventListener("click", () => { screenScale += 0.1; applyScreenScale(); });
   document.getElementById("screen-fontdown").addEventListener("click", () => { screenScale -= 0.1; applyScreenScale(); });
   screenRefresh.addEventListener("click", () => { loadScreen(); loadInfo(); });
-  function closeScreenModal() { screenModal.classList.remove("show"); stopAuto(); screenAuto.value = "0"; autoDurMs = 0; }
+  function closeScreenModal() { screenModal.classList.remove("show"); stopAuto(); }
   screenClose.addEventListener("click", closeScreenModal);
   screenModal.addEventListener("click", (e) => { if (e.target === screenModal) closeScreenModal(); });
 
@@ -4959,7 +4966,9 @@ footer button.icon {
   }
 
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && !isPaused && attachedSid) { keepAlive(); pollOnce(); }
+    if (document.hidden) { stopAuto(); return; }   // window hidden → cancel screen auto-reload
+    if (!isPaused && attachedSid) { keepAlive(); pollOnce(); }
+    if (screenModal.classList.contains("show")) startAuto();   // shown again → restart (fresh 1h)
   });
   ["click","keydown","touchstart","input"].forEach(evt => {
     document.addEventListener(evt, keepAlive, { passive: true });
