@@ -3716,10 +3716,8 @@ footer button.icon {
 
       const badges = document.createElement("div");
       badges.className = "badges";
-      // (CONNECTED badge removed — pid/tab/size now live on the Tabs title line.)
-      if (!s.named) {
-        const b = document.createElement("span"); b.className = "badge unnamed"; b.textContent = "unnamed"; badges.appendChild(b);
-      }
+      // (CONNECTED / "unnamed" badges removed — an unnamed card is already
+      //  shown by its italic muted title; no separate marker needed.)
       // Size badge only for non-tabs (Tabs show it in the title line).
       if (s.file_size && s.group !== "tabs") {
         const b = document.createElement("span"); b.className = "badge unnamed"; b.textContent = fmtSize(s.file_size);
@@ -4758,15 +4756,34 @@ footer button.icon {
     if (scroll) requestAnimationFrame(() => { mainEl.scrollTop = mainEl.scrollHeight; });
   }
   applyChatScale();
+  // tailScr uses the same incremental scheme as the screen window: unchanged →
+  // {same} (keep what's shown), else only the differing lines (run-length
+  // compressed). Independent baseline from the screen modal.
+  let tailVer = "", tailLines = [];
   async function tailScreen() {
     if (!attachedSid) return;
     tailBox.style.display = "block";
     try {
-      const resp = await authedFetch("/api/screen?refresh=false&tail=" + TAIL_CONTEXT
+      const resp = await authedFetch("/api/screen?refresh=false&delta=1&tail=" + TAIL_CONTEXT
+        + "&ver=" + encodeURIComponent(tailVer)
         + "&claude_session_id=" + encodeURIComponent(attachedSid));
       if (!resp.ok) { tailPre.textContent = "Error: " + resp.status; return; }
       const j = await resp.json();
-      tailPre.textContent = j.screen || "(empty)";
+      if (j.same) {
+        // unchanged — leave the current content as is
+      } else if (j.full !== undefined) {
+        tailLines = (j.full || "").split("\n"); tailVer = j.ver;
+        tailPre.textContent = j.full || "(empty)";
+      } else if (j.changed && j.base === tailVer) {
+        const k = j.scroll || 0; const prev = tailLines;
+        const lines = new Array(j.n);
+        for (let i = 0; i < j.n; i++) lines[i] = (i + k >= 0 && i + k < prev.length) ? prev[i + k] : "";
+        for (const [i, v] of j.changed) lines[i] = (typeof v === "string") ? v : v.c.repeat(v.n);
+        tailLines = lines; tailVer = j.ver;
+        tailPre.textContent = lines.join("\n") || "(empty)";
+      } else {                       // base mismatch → refetch full once
+        tailVer = ""; return tailScreen();
+      }
     } catch (e) { tailPre.textContent = "Error: " + e; }
   }
   document.getElementById("tail-controls").addEventListener("click", (e) => e.stopPropagation());

@@ -3808,6 +3808,46 @@ _SCREEN_DELTA_CACHE: dict[str, dict] = {}
 _DELTA_MIN_RUN = 5   # need this many consecutive matching lines to accept a scroll align
 
 
+def _screen_delta(cache_key: str, text: str, ver: str) -> dict:
+    """Incremental screen update. ver = content hash. Unchanged → tiny {same}.
+    Else, if the client's last ver matches our cached previous frame, find the
+    alignment offset k (cur[i] == prev[i+k]) with the LONGEST run of consecutive
+    matching lines and send only the differing lines (a whole line of one
+    repeated char ships compressed as {c,n}); reconstruction from prev at offset
+    k is exact for any k, so a bad k only enlarges the diff, never corrupts.
+    Else full. cache_key keeps the full-screen and the tail peek independent."""
+    cur_lines = text.split("\n")
+    new_ver = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+    prev = _SCREEN_DELTA_CACHE.get(cache_key)
+    _SCREEN_DELTA_CACHE[cache_key] = {"ver": new_ver, "lines": cur_lines}
+    if ver and ver == new_ver:
+        return {"ver": new_ver, "same": True}
+    if prev and ver and prev.get("ver") == ver:
+        pl = prev["lines"]
+        n, p = len(cur_lines), len(pl)
+        # Scan k with k=0 and small offsets preferred on ties (favour no scroll).
+        best_k, best_run = 0, 0
+        for k in list(range(0, p)) + list(range(-1, -n, -1)):
+            run = 0
+            for i in range(n):
+                j = i + k
+                if 0 <= j < p and cur_lines[i] == pl[j]:
+                    run += 1
+                    if run > best_run:
+                        best_run, best_k = run, k
+                else:
+                    run = 0
+        if best_run >= _DELTA_MIN_RUN:
+            def _enc(s):
+                return ({"c": s[0], "n": len(s)}
+                        if len(s) >= 8 and s == s[0] * len(s) else s)
+            changed = [[i, _enc(cur_lines[i])] for i in range(n)
+                       if not (0 <= i + best_k < p) or cur_lines[i] != pl[i + best_k]]
+            return {"ver": new_ver, "base": ver, "n": n,
+                    "scroll": best_k, "changed": changed}
+    return {"ver": new_ver, "full": text}
+
+
 @app.get("/api/screen", dependencies=[Depends(require_token)])
 async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0,
                      delta: bool = False, ver: str = ""):
@@ -3837,64 +3877,15 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
     if tail > 0:
-        return {"screen": _screen_tail(screen or "", tail)}
+        ttext = _screen_tail(screen or "", tail)
+        # tail peek: same delta scheme, independent baseline (tail text ≠ full
+        # screen). refresh=false path, so it never disturbs the tab.
+        return _screen_delta(f"{claude_session_id}:tail{tail}", ttext, ver) if delta \
+            else {"screen": ttext}
     text = _collapse_blanks(screen or "")
     if not delta:
         return {"screen": text}
-
-    # Incremental path. ver = content hash. Unchanged → tiny {same}. Changed:
-    # if the client's last ver matches our cached previous screen, find the
-    # alignment offset k (cur[i] == prev[i+k]) with the LONGEST run of
-    # consecutive matching lines. That anchor covers every case: a scroll keeps
-    # a long block (found at k=scroll); a "top changed, rest unchanged" frame
-    # keeps a long block at k=0 below the changed top; a single changed line
-    # leaves the larger of the two surrounding blocks. Accept if the anchor is
-    # long enough, then send only the differing lines — reconstruction from prev
-    # at offset k is exact for any k, so a bad k only enlarges the diff, never
-    # corrupts. Else full. A stale/mismatched ver just degrades to full.
-    cur_lines = text.split("\n")
-    new_ver = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
-    prev = _SCREEN_DELTA_CACHE.get(claude_session_id)
-    _SCREEN_DELTA_CACHE[claude_session_id] = {"ver": new_ver, "lines": cur_lines}
-    # sid8 = claude_session_id[:8]  # (diagnostic logging below is commented out)
-    if ver and ver == new_ver:
-        # log.debug("delta[%s] same ver=%s", sid8, new_ver)
-        return {"ver": new_ver, "same": True}
-    if prev and ver and prev.get("ver") == ver:
-        pl = prev["lines"]
-        n, p = len(cur_lines), len(pl)
-        # Scan k with k=0 and small offsets preferred on ties (favour no scroll).
-        best_k, best_run = 0, 0
-        for k in list(range(0, p)) + list(range(-1, -n, -1)):
-            run = 0
-            for i in range(n):
-                j = i + k
-                if 0 <= j < p and cur_lines[i] == pl[j]:
-                    run += 1
-                    if run > best_run:
-                        best_run, best_k = run, k
-                else:
-                    run = 0
-        if best_run >= _DELTA_MIN_RUN:
-            def _enc(s):
-                # A whole line of one repeated char (box-drawing / separator)
-                # ships as {c,n} instead of the full string.
-                return ({"c": s[0], "n": len(s)}
-                        if len(s) >= 8 and s == s[0] * len(s) else s)
-            changed = [[i, _enc(cur_lines[i])] for i in range(n)
-                       if not (0 <= i + best_k < p) or cur_lines[i] != pl[i + best_k]]
-            # log.debug("delta[%s] DELTA %s->%s n=%d p=%d k=%d run=%d changed=%d",
-            #           sid8, ver, new_ver, n, p, best_k, best_run, len(changed))
-            return {"ver": new_ver, "base": ver, "n": n,
-                    "scroll": best_k, "changed": changed}
-        # log.info("delta[%s] FULL whole-change %s->%s n=%d p=%d best_run=%d(<%d)",
-        #          sid8, ver, new_ver, n, p, best_run, _DELTA_MIN_RUN)
-        return {"ver": new_ver, "full": text}
-    # no usable base: fresh client, restart, or the client's ver doesn't match
-    # our cached previous screen (concurrent/interleaved polls)
-    # log.debug("delta[%s] FULL no-base ver=%r new=%s prev_ver=%r", sid8, ver,
-    #           new_ver, (prev or {}).get("ver"))
-    return {"ver": new_ver, "full": text}
+    return _screen_delta(claude_session_id, text, ver)
 
 
 @app.get("/api/iterm-tabs", dependencies=[Depends(require_token)])
