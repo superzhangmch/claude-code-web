@@ -3805,6 +3805,7 @@ async def get_session_info(claude_session_id: str):
 # Per-session last-screen cache for the experimental delta path (single client
 # assumed; a stale/mismatched ver just degrades to a full send — never wrong).
 _SCREEN_DELTA_CACHE: dict[str, dict] = {}
+_DELTA_MIN_RUN = 5   # need this many consecutive matching lines to accept a scroll align
 
 
 @app.get("/api/screen", dependencies=[Depends(require_token)])
@@ -3841,9 +3842,14 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
     if not delta:
         return {"screen": text}
 
-    # Experimental incremental path. ver = content hash (so "unchanged" is a
-    # cheap exact-match); on a real change, if the client's last ver matches our
-    # cached previous screen, send only the changed lines; else send full.
+    # Incremental path. ver = content hash. Unchanged → tiny {same}. Changed:
+    # if the client's last ver matches our cached previous screen, find the
+    # scroll offset k where the CURRENT screen's LEADING lines match a
+    # consecutive slice of the previous one starting at k (cur[0]==prev[k],
+    # cur[1]==prev[k+1], … — that's exactly what a scroll produces: the new
+    # top is the old top/middle shifted up). Accept only if that leading run is
+    # long enough, then send just the differing lines. Else full. A stale/
+    # mismatched ver just degrades to full — multi-client safe.
     cur_lines = text.split("\n")
     new_ver = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
     prev = _SCREEN_DELTA_CACHE.get(claude_session_id)
@@ -3852,11 +3858,26 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
         return {"ver": new_ver, "same": True}
     if prev and ver and prev.get("ver") == ver:
         pl = prev["lines"]
-        changed = [[i, cur_lines[i]] for i in range(len(cur_lines))
-                   if i >= len(pl) or cur_lines[i] != pl[i]]
-        # Only worth a diff if a minority of lines changed; else just send full.
-        if len(changed) <= max(1, int(len(cur_lines) * 0.6)):
-            return {"ver": new_ver, "base": ver, "n": len(cur_lines), "changed": changed}
+        n, p = len(cur_lines), len(pl)
+        best_k, best_lead = 0, 0
+        for k in range(0, min(p, n) + 1):
+            L = 0
+            while L < n and L + k < p and cur_lines[L] == pl[L + k]:
+                L += 1
+            if L > best_lead:
+                best_lead, best_k = L, k
+                if L == n:
+                    break
+        if best_lead >= _DELTA_MIN_RUN:
+            def _enc(s):
+                # A whole line of one repeated char (box-drawing / separator)
+                # ships as {c,n} instead of the full string.
+                return ({"c": s[0], "n": len(s)}
+                        if len(s) >= 8 and s == s[0] * len(s) else s)
+            changed = [[i, _enc(cur_lines[i])] for i in range(n)
+                       if i + best_k >= p or cur_lines[i] != pl[i + best_k]]
+            return {"ver": new_ver, "base": ver, "n": n,
+                    "scroll": best_k, "changed": changed}
     return {"ver": new_ver, "full": text}
 
 

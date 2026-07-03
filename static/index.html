@@ -1043,6 +1043,16 @@ footer button.icon {
   padding: 8px 10px; margin: 0;
   overflow: auto; white-space: pre;
 }
+/* Fullscreen (mainly for desktop): the screen card fills the viewport. */
+#screen-modal.fs { padding: 0; }
+#screen-modal.fs .modal-card.screen-card {
+  width: 100vw; max-width: none; height: 100vh; max-height: none; border-radius: 0;
+}
+#screen-modal .screen-stat-row { min-height: 13px; }
+#screen-modal .scr-stat {
+  font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 #screen-modal .scr-delta {
   display: inline-flex; align-items: center; gap: 3px;
   font-size: 12px; color: var(--muted); cursor: pointer; user-select: none;
@@ -1055,6 +1065,11 @@ footer button.icon {
   border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 13px;
 }
 #screen-modal #screen-input:focus { outline: none; border-color: var(--accent); }
+#screen-modal #screen-auto {
+  flex: none; background: var(--panel2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px; padding: 5px 6px;
+  font-size: 12px; -webkit-appearance: none;
+}
 #screen-modal .screen-actions {
   display: flex; flex-wrap: wrap; gap: 6px;
   justify-content: flex-end;
@@ -1310,7 +1325,7 @@ footer button.icon {
       <div class="modal-row">
         <h3>CPU history (top 5, last 5h)</h3>
         <button id="cpu-refresh" class="btn">↻</button>
-        <button id="cpu-close" class="btn">close</button>
+        <button id="cpu-close" class="btn" title="close">✕</button>
       </div>
       <div id="cpu-chart" class="cpu-chart"></div>
       <div class="cpu-chart-actions">
@@ -1331,7 +1346,7 @@ footer button.icon {
       <div class="modal-row">
         <h3>iTerm2 tabs</h3>
         <button id="tabs-refresh" class="btn">↻</button>
-        <button id="tabs-close" class="btn">close</button>
+        <button id="tabs-close" class="btn" title="close">✕</button>
       </div>
       <div class="modal-row tabs-snap-row">
         <button id="tabs-snap-save" class="btn" title="保存当前所有 claude tab（含顺序），重启前点">💾 Save list</button>
@@ -1371,7 +1386,7 @@ footer button.icon {
     <div class="modal-card files-card">
       <div class="modal-row">
         <h3>Files</h3>
-        <button id="files-close" class="btn">close</button>
+        <button id="files-close" class="btn" title="close">✕</button>
       </div>
       <div class="files-bar">
         <button id="files-up" class="btn" title="Parent directory">↑</button>
@@ -1405,7 +1420,8 @@ footer button.icon {
         <label class="scr-delta" title="增量更新:只传变化的行,省流量"><input type="checkbox" id="screen-delta" checked> Δ</label>
         <button id="screen-fontup" class="btn" title="bigger">A</button>
         <button id="screen-fontdown" class="btn" title="smaller">a</button>
-        <button id="screen-close" class="btn">close</button>
+        <button id="screen-full" class="btn" title="fullscreen (desktop)">⛶</button>
+        <button id="screen-close" class="btn" title="close">✕</button>
       </div>
       <!-- Screen tab: scrollable both ways; action keys below the screen. -->
       <div id="screen-pane">
@@ -1424,8 +1440,15 @@ footer button.icon {
         <div class="modal-row screen-input-row">
           <input id="screen-input" type="text" placeholder="type & send to this tab…" autocomplete="off">
           <button id="screen-send" class="btn">Send</button>
+          <select id="screen-auto" title="auto-reload every 3s for a while (resets on input)">
+            <option value="0">⟳ off</option>
+            <option value="60">⟳ 1m</option>
+            <option value="180">⟳ 3m</option>
+            <option value="300">⟳ 5m</option>
+          </select>
           <button id="screen-refresh" class="btn" title="refresh screen">↻</button>
         </div>
+        <div class="screen-stat-row"><span id="screen-stat" class="scr-stat"></span></div>
       </div>
       <!-- Info tab: just a table, only horizontal scroll. -->
       <div id="info-pane" style="display:none">
@@ -1440,7 +1463,7 @@ footer button.icon {
       <div class="modal-row">
         <h3 id="tabscr-title">screen</h3>
         <button id="tabscr-refresh" class="btn">↻</button>
-        <button id="tabscr-close" class="btn">close</button>
+        <button id="tabscr-close" class="btn" title="close">✕</button>
       </div>
       <pre id="tabscr-body" class="screen-body">…</pre>
     </div>
@@ -1976,6 +1999,7 @@ footer button.icon {
   });
   const screenModal = document.getElementById("screen-modal");
   const screenBody = document.getElementById("screen-body");
+  const screenStat = document.getElementById("screen-stat");
   const screenRefresh = document.getElementById("screen-refresh");
   const screenClose = document.getElementById("screen-close");
   const refreshBtn = document.getElementById("refresh-btn");
@@ -2187,25 +2211,33 @@ footer button.icon {
         if (!quiet) screenBody.textContent = "Error: " + resp.status + " " + resp.statusText;
         return;
       }
-      const j = await resp.json();
+      const raw = await resp.text();
+      let bytes; try { bytes = new Blob([raw]).size; } catch { bytes = raw.length; }
+      const j = JSON.parse(raw);
       const atBottom = screenBody.scrollHeight - screenBody.scrollTop - screenBody.clientHeight < 24;
       if (useDelta) {
-        if (j.same) { screenVer = j.ver; return; }          // unchanged → touch nothing
+        if (j.same) { screenVer = j.ver; screenStat.textContent = `same · ${bytes}B`; return; }
         if (j.full !== undefined) {
           screenLines = (j.full || "").split("\n"); screenVer = j.ver;
           screenBody.textContent = j.full || "(empty)";
+          screenStat.textContent = `full · ${bytes}B (${screenLines.length} lines)`;
         } else if (j.changed && j.base === screenVer) {      // apply the diff
-          const lines = screenLines.slice(0, j.n);
-          while (lines.length < j.n) lines.push("");
-          for (const [i, t] of j.changed) lines[i] = t;
+          const k = j.scroll || 0;                            // scroll offset
+          const prev = screenLines;
+          const lines = new Array(j.n);
+          for (let i = 0; i < j.n; i++) lines[i] = (i + k < prev.length) ? prev[i + k] : "";
+          for (const [i, v] of j.changed) lines[i] = (typeof v === "string") ? v : v.c.repeat(v.n);
           screenLines = lines; screenVer = j.ver;
           screenBody.textContent = lines.join("\n") || "(empty)";
+          screenStat.textContent = `Δ ${j.changed.length} line${j.changed.length === 1 ? "" : "s"}`
+            + (k ? ` · scroll ${k}` : "") + ` · ${bytes}B`;
         } else {                                             // base mismatch → re-fetch full
           screenVer = "";
           return loadScreen(quiet);
         }
       } else {
         screenBody.textContent = j.screen || "(empty)";
+        screenStat.textContent = "";
       }
       // Scroll to bottom — most recent output is what the user usually wants.
       // On a quiet refresh keep the user's position unless they were at bottom.
@@ -2228,11 +2260,40 @@ footer button.icon {
   });
   function openScreenInfo() {
     screenModal.classList.add("show");
+    screenModal.classList.toggle("fs", localStorage.getItem("cc_web_screen_full") === "1");
     showScreenTab("screen");
     screenVer = ""; screenLines = [];   // fresh: first load is a full send
+    stopAuto(); screenAuto.value = "0"; autoDurMs = 0;   // auto-reload off on open
     loadScreen();
     loadInfo();
   }
+  document.getElementById("screen-full").addEventListener("click", () => {
+    const on = !screenModal.classList.contains("fs");
+    screenModal.classList.toggle("fs", on);
+    localStorage.setItem("cc_web_screen_full", on ? "1" : "0");
+  });
+  // Auto-reload: refresh the screen every 3s for the chosen duration, then stop.
+  // Sending input (any key / Send) resets the countdown so it keeps going while
+  // you interact. Paused while the tab is backgrounded (document.hidden).
+  const screenAuto = document.getElementById("screen-auto");
+  let autoTimer = null, autoDeadline = 0, autoDurMs = 0;
+  function stopAuto() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  function startAuto() {
+    stopAuto();
+    if (autoDurMs <= 0) return;
+    autoDeadline = Date.now() + autoDurMs;
+    autoTimer = setInterval(() => {
+      if (!screenModal.classList.contains("show") || Date.now() > autoDeadline) {
+        stopAuto(); screenAuto.value = "0"; return;
+      }
+      if (!document.hidden) loadScreen(true);
+    }, 3000);
+  }
+  function bumpAuto() { if (autoTimer && autoDurMs > 0) autoDeadline = Date.now() + autoDurMs; }
+  screenAuto.addEventListener("change", () => {
+    autoDurMs = (parseInt(screenAuto.value, 10) || 0) * 1000;
+    startAuto();
+  });
   screenBtn.addEventListener("click", openScreenInfo);
   choiceBannerBtn.addEventListener("click", openScreenInfo);
   // Experimental delta toggle (persisted). Switching resets the versioned state.
@@ -2254,10 +2315,9 @@ footer button.icon {
   document.getElementById("screen-fontup").addEventListener("click", () => { screenScale += 0.1; applyScreenScale(); });
   document.getElementById("screen-fontdown").addEventListener("click", () => { screenScale -= 0.1; applyScreenScale(); });
   screenRefresh.addEventListener("click", () => { loadScreen(); loadInfo(); });
-  screenClose.addEventListener("click", () => screenModal.classList.remove("show"));
-  screenModal.addEventListener("click", (e) => {
-    if (e.target === screenModal) screenModal.classList.remove("show");
-  });
+  function closeScreenModal() { screenModal.classList.remove("show"); stopAuto(); screenAuto.value = "0"; autoDurMs = 0; }
+  screenClose.addEventListener("click", closeScreenModal);
+  screenModal.addEventListener("click", (e) => { if (e.target === screenModal) closeScreenModal(); });
 
   // ---------- iTerm2 tabs viewer (picker page) ----------
   const tabsModal = document.getElementById("tabs-modal");
@@ -2897,6 +2957,7 @@ footer button.icon {
   // through press_enter, not the raw text — that's why ⏎ did nothing before.)
   async function sendRaw(text, pressEnter) {
     if (!attachedSid) return;
+    bumpAuto();   // interacting resets the auto-reload countdown
     // Lock the four screen keys until the post + refresh settle, so a second
     // click can't fire mid-flight (would queue extra arrows / double-Enter).
     setScreenKeysDisabled(true);
@@ -3248,7 +3309,7 @@ footer button.icon {
       appendInfoRow(infoBody, "i", "toggle tab list  →  1–9 opens that tab");
       appendInfoRow(infoBody, "t", "tailScr window (open / refresh)");
       appendInfoRow(infoBody, "s", "screenshot window");
-      appendInfoRow(infoBody, "x", "close the open popup");
+      appendInfoRow(infoBody, "x / q / Esc", "close the open popup");
       appendInfoRow(infoBody, "r", "refresh open popup, else get latest");
       appendInfoRow(infoBody, "Esc", "blur the reply box");
     } catch (e) {
@@ -4790,9 +4851,9 @@ footer button.icon {
       case "i": case "I": e.preventDefault(); openSwitchMenu(); break;   // toggle tab list
       case "t": case "T": e.preventDefault(); tailScreen(); break;       // open/refresh tailScr
       case "s": case "S": e.preventDefault(); openScreenInfo(); break;   // open screenshot
-      case "x": case "X":
+      case "x": case "X": case "q": case "Q": case "Escape":
         if (tailOpen) { e.preventDefault(); tailBox.style.display = "none"; }
-        else if (screenOpen) { e.preventDefault(); screenModal.classList.remove("show"); }
+        else if (screenOpen) { e.preventDefault(); closeScreenModal(); }
         else if (switchOpen) { e.preventDefault(); hideSwitchMenu(); }
         break;
       case "r": case "R":
