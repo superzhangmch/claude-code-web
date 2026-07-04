@@ -792,7 +792,7 @@ footer textarea {
 footer button {
   background: var(--bg); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
-  padding: 0 10px; font-weight: 600; font-size: 13px;
+  padding: 0 6px; font-weight: 600; font-size: 13px;
   cursor: pointer; flex-shrink: 0;
 }
 footer button:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -842,7 +842,15 @@ footer .prompt-row .pchoice.default {
 footer .prompt-row .pchoice:hover { background: var(--code-bg); }
 footer button.icon {
   background: var(--panel2); color: var(--muted);
-  font-weight: normal; font-size: 15px; min-width: 28px; padding: 0;
+  font-weight: normal; font-size: 14px; min-width: 22px; padding: 0;
+}
+/* The u/U navigator: two half-height mini buttons stacked in one column,
+   stretching to the input row's height. */
+footer .jump-pair {
+  display: flex; flex-direction: column; gap: 2px; flex-shrink: 0;
+}
+footer .jump-pair button.icon.mini {
+  flex: 1; min-height: 0; min-width: 22px; font-size: 11px; padding: 0;
 }
 .upload-row {
   display: flex; flex-wrap: wrap; gap: 4px;
@@ -1554,8 +1562,12 @@ footer button.icon {
       <input id="upload-input" type="file" accept="image/*" multiple style="display:none">
       <button id="upload-btn" class="icon" title="Attach image">📎</button>
       <textarea id="input" placeholder="Reply to Claude…" rows="1"></textarea>
-      <button id="send">Send</button>
-      <button id="jump-bottom" class="icon" title="Jump to latest">↓</button>
+      <button id="send" class="icon" title="Send" aria-label="Send">➤</button>
+      <div class="jump-pair">
+        <button id="jump-prev-user" class="icon mini" title="Previous user request (u)">↑</button>
+        <button id="jump-next-user" class="icon mini" title="Next user request (U)">↓</button>
+      </div>
+      <button id="jump-bottom" class="icon" title="Jump to latest">⤓</button>
     </div>
   </footer>
 
@@ -2057,6 +2069,36 @@ footer button.icon {
   });
   function scrollToBottom() {
     if (shouldAutoscroll) mainEl.scrollTop = mainEl.scrollHeight;
+  }
+  // Jump to the previous/next REAL user request (class .msg.user — watcher/system
+  // ticks are .msg.system, so they're skipped). dir=-1 walks up, +1 walks down.
+  // At the ends it runs off past the last request: up past the first → very TOP,
+  // down past the last → very BOTTOM (latest, autoscroll re-enabled). Otherwise
+  // autoscroll is paused so a refresh doesn't yank us back down.
+  function jumpUserRequest(dir) {
+    const nodes = mainEl.querySelectorAll(".msg.user");
+    const baseTop = mainEl.getBoundingClientRect().top;
+    const EPS = 4;
+    let target = null;
+    if (dir < 0) {
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        if (nodes[i].getBoundingClientRect().top - baseTop < -EPS) { target = nodes[i]; break; }
+      }
+    } else {
+      for (let i = 0; i < nodes.length; i++) {
+        if (nodes[i].getBoundingClientRect().top - baseTop > EPS) { target = nodes[i]; break; }
+      }
+    }
+    if (target) {
+      shouldAutoscroll = false;
+      mainEl.scrollTop += target.getBoundingClientRect().top - baseTop;
+    } else if (dir < 0) {
+      shouldAutoscroll = false;                 // above the first → very top
+      mainEl.scrollTop = 0;
+    } else {
+      shouldAutoscroll = true;                  // below the last → very bottom / latest
+      mainEl.scrollTop = mainEl.scrollHeight;
+    }
   }
 
   function setReady(idle) {
@@ -4847,6 +4889,7 @@ footer button.icon {
   // NOT typing in a field and no modifier is held (so typing in the reply box,
   // and Cmd/Ctrl+R page reload, are unaffected):
   //   /  focus reply box      i  toggle tab list      t  tailScr window
+  //   u  prev user request   U  next user request
   //   s  screenshot window    x  close open popup      r  refresh open popup / get latest
   //   1-9 (while tab list open)  switch to that tab    Esc (in reply box)  blur
   function _isEditable(el) {
@@ -4872,6 +4915,12 @@ footer button.icon {
     }
     switch (e.key) {
       case "/": e.preventDefault(); inputEl.focus(); break;
+      case "u":                                           // prev user request
+        if (!tailOpen && !screenOpen && !switchOpen) { e.preventDefault(); jumpUserRequest(-1); }
+        break;
+      case "U":                                           // next user request
+        if (!tailOpen && !screenOpen && !switchOpen) { e.preventDefault(); jumpUserRequest(1); }
+        break;
       case "i": case "I": e.preventDefault(); openSwitchMenu(); break;   // toggle tab list
       case "t": case "T": e.preventDefault(); tailScreen(); break;       // open/refresh tailScr
       case "s": case "S": e.preventDefault(); openScreenInfo(); break;   // open screenshot
@@ -5169,6 +5218,8 @@ footer button.icon {
   document.getElementById("jump-bottom").addEventListener("click", () => {
     shouldAutoscroll = true; mainEl.scrollTop = mainEl.scrollHeight;
   });
+  document.getElementById("jump-prev-user").addEventListener("click", () => jumpUserRequest(-1));
+  document.getElementById("jump-next-user").addEventListener("click", () => jumpUserRequest(1));
 
   // ---------- new session dialog ----------
   const newDlg = document.getElementById("newdlg");

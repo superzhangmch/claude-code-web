@@ -1680,6 +1680,65 @@ def _head_tail_trunc(s: str, total: int) -> str:
     return f"{s[:half]} ... [{skipped} chars skipped] ... {s[-half:]}"
 
 
+# ---------- auto-injected (scheduler / watcher / autonomous-loop) detection ----------
+# ScheduleWakeup / cron / autonomous-/loop ticks are NOT typed by the human — Claude
+# Code stamps the recorded turn isMeta=true + promptSource='system'. We surface them
+# as 'System' (not 'You') and, in brief mode, collapse the long body to head+tail so
+# a wall-of-text watcher prompt doesn't drown out the real conversation.
+AUTO_BRIEF_BUDGET = 240   # head + tail chars kept for an auto tick in brief mode
+
+# While a tick is still PENDING it arrives via a queue-operation entry that carries
+# NO metadata (no isMeta/promptSource), so the only signal is the loop-wrapper
+# phrasing the harness stamps on every tick. Real user prompts don't say these.
+_AUTO_PROMPT_MARKERS = (
+    "handle autonomously, do not wait for a reply",
+    "handle autonomously; do not wait for a reply",
+    "do not wait for a reply). do these checks",
+    "watcher tick",
+    "then reschedule",
+)
+
+
+def _looks_like_auto_prompt(text) -> bool:
+    if not isinstance(text, str):
+        return False
+    low = text.lower()
+    return any(m in low for m in _AUTO_PROMPT_MARKERS)
+
+
+def _is_auto_injected(e: dict) -> bool:
+    """type=user JSONL entry injected by the scheduler (ScheduleWakeup / cron /
+    autonomous /loop) rather than typed by the human. Recorded ticks are stamped
+    isMeta=true + promptSource='system' (reliable); pending ones lack metadata, so
+    we fall back to the loop-wrapper phrasing — but never for a turn that carries an
+    `origin` (that means a human typed it in the web/terminal)."""
+    if e.get("isMeta") and e.get("promptSource") == "system":
+        return True
+    if e.get("origin"):
+        return False
+    msg = e.get("message") or {}
+    c = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(c, str):
+        return _looks_like_auto_prompt(c)
+    if isinstance(c, list):
+        return _looks_like_auto_prompt(" ".join(
+            p.get("text", "") for p in c
+            if isinstance(p, dict) and p.get("type") == "text"))
+    return False
+
+
+def _collapse_auto_content(new_content):
+    """Collapse a brief-mode auto tick's body to a simple head+tail blurb."""
+    if isinstance(new_content, str):
+        return _head_tail_trunc(new_content, AUTO_BRIEF_BUDGET)
+    if isinstance(new_content, list):
+        joined = "\n".join(
+            p.get("text", "") for p in new_content
+            if isinstance(p, dict) and p.get("type") == "text")
+        return [{"type": "text", "text": _head_tail_trunc(joined, AUTO_BRIEF_BUDGET)}]
+    return new_content
+
+
 _BASE64_LIKE = re.compile(r"^[A-Za-z0-9+/=\s]+$")
 BASE64_AGGRESSIVE_KEEP = 16    # like _truncate_tool_result_content's BASE64_KEEP
 
@@ -1849,6 +1908,13 @@ def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
                 }
                 if _is_command_noise(content):
                     qe["_system"] = True
+                elif _looks_like_auto_prompt(content):
+                    # scheduler/watcher tick still sitting in the queue — no
+                    # metadata to go on, so recognise the loop-wrapper phrasing.
+                    # It's not "You"; and in brief mode collapse to head+tail.
+                    qe["_system"] = True
+                    if mode == "brief":
+                        qe["message"]["content"] = _head_tail_trunc(content, AUTO_BRIEF_BUDGET)
                 out.append(qe)
             continue
         if t not in ("user", "assistant"):
@@ -1856,15 +1922,21 @@ def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
         if e.get("isSidechain"):
             continue
         if mode == "brief":
-            if e.get("isMeta") or e.get("toolUseResult"):
+            if e.get("toolUseResult"):
+                continue
+            auto = _is_auto_injected(e)
+            if e.get("isMeta") and not auto:
                 continue
             trimmed = _trim_brief(e)
+            if trimmed and auto:
+                trimmed["message"]["content"] = _collapse_auto_content(
+                    trimmed["message"]["content"])
         elif mode == "medium":
             trimmed = _trim_medium(e)
         else:
             trimmed = _trim_all(e)
         if trimmed:
-            if t == "user" and _is_system_user_entry(e):
+            if t == "user" and (_is_system_user_entry(e) or _is_auto_injected(e)):
                 trimmed["_system"] = True
             out.append(trimmed)
     return out
