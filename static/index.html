@@ -100,6 +100,14 @@ html, body {
 }
 body { display: flex; flex-direction: column; height: 100dvh; }
 
+/* Rapid taps on a button must not trigger iOS double-tap-to-zoom. touch-action:
+   manipulation keeps normal tap + scroll + pinch-zoom but drops the double-tap
+   zoom gesture; user-select:none stops a fast double-tap selecting the glyph. */
+button, .btn, .icon, label.tab-radio, label.scr-delta {
+  touch-action: manipulation;
+  -webkit-user-select: none; user-select: none;
+}
+
 header {
   padding: 10px 14px;
   padding-top: calc(10px + env(safe-area-inset-top));
@@ -264,7 +272,9 @@ body.light .hl { color: #c81e1e; }
   border-left: 2px solid var(--assistant); padding: 3px 8px;
   background: var(--code-bg); border-radius: 0 4px 4px 0; word-break: break-word;
 }
-#picker-list .session-card .sess-summary .sm-ico { opacity: 0.7; }
+#picker-list .session-card .sess-summary .sm-head { display: flex; align-items: flex-start; gap: 4px; }
+#picker-list .session-card .sess-summary .sm-title { flex: 1; min-width: 0; }
+#picker-list .session-card .sess-summary .sm-ico { opacity: 0.7; flex-shrink: 0; }
 #picker-list .session-card .sess-summary .sm-title { font-weight: 700; color: var(--text); }
 #picker-list .session-card .sess-summary .sm-title.user-named { color: var(--accent); }
 #picker-list .session-card .sess-summary .sm-body { margin-top: 2px; }
@@ -448,6 +458,14 @@ header .battery:hover { color: var(--text); }
   box-shadow: 0 0 0 1px #36e0c8, 0 0 10px rgba(54, 224, 200, 0.35);
 }
 .session-card .title-row { display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px; }
+.session-card .enter-row { display: flex; justify-content: flex-end; margin: 0 0 4px; }
+.session-card .title-enter {
+  flex-shrink: 0;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 3px 14px; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.session-card .title-enter:hover { border-color: var(--accent); }
 .session-card .title { font-weight: 500; font-size: 14px; word-break: break-word; flex: 1; }
 /* Tabs group: line 1 is metadata (tX [sid] size pid datetime), line 2 the name. */
 .session-card .title.tabs-meta {
@@ -696,25 +714,30 @@ header .battery:hover { color: var(--text); }
   display: none; justify-content: center; align-items: center; gap: 8px;
   flex-wrap: wrap; padding: 10px 0 4px 0; cursor: pointer;
 }
-/* Combined segmented pill: [ tail screen | A+ | A− ] — saves space. */
-#autoload #tail-controls {
+/* Combined segmented pill [ tailScr | A | a | ↑ | ↓ | ⤓ ] FLOATING above the
+   input, pinned to the footer so it stays on screen while the chat scrolls —
+   so you can tap ↑ repeatedly. Theme-aware translucent fill (light/dark/pure),
+   solid fallback for browsers without color-mix. */
+footer #float-controls {
+  position: absolute; right: 10px; top: -40px; z-index: 5;
   display: inline-flex; align-items: center;
-  background: var(--panel); border: 1px solid var(--border); border-radius: 999px;
+  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 60%, transparent);
+  border: 1px solid var(--border); border-radius: 999px;
+  backdrop-filter: blur(4px);
 }
-#autoload #tail-controls button {
+footer #float-controls button {
   background: transparent; border: none; color: var(--muted);
-  padding: 6px 11px; font-size: 11px; line-height: 1; cursor: pointer;
+  padding: 6px 6px; font-size: 11px; line-height: 1; cursor: pointer;
   white-space: nowrap; border-radius: 999px;
 }
-/* Highlight only the active SEGMENT (orange outline on that button), not the
-   whole pill — the container border stays neutral. */
-#autoload #tail-controls button:hover,
-#autoload #tail-controls button:focus,
-#autoload #tail-controls button:active {
+footer #float-controls button:hover,
+footer #float-controls button:focus,
+footer #float-controls button:active {
   color: var(--text); background: var(--panel2);
   box-shadow: inset 0 0 0 1px var(--accent); outline: none;
 }
-#autoload #tail-controls .tc-sep { color: var(--border); font-size: 11px; user-select: none; }
+footer #float-controls .tc-sep { color: var(--border); font-size: 9px; user-select: none; }
 /* Bottom-left peek at the last lines of the live terminal. */
 #tail-box {
   position: fixed; left: 50%; transform: translateX(-50%); bottom: 76px; z-index: 60;
@@ -773,21 +796,25 @@ header .battery:hover { color: var(--text); }
 }
 
 footer {
-  flex-shrink: 0;
+  flex-shrink: 0; position: relative;   /* anchor for the floating nav pill */
   padding-bottom: env(safe-area-inset-bottom);
   background: #000; border-top: 1px solid var(--border);
   display: flex; flex-direction: column;
 }
 footer .input-row {
-  display: flex; gap: 8px; padding: 8px 10px;
+  /* 📎 + textarea + Send. align-items:stretch → the two buttons are exactly the
+     same height as the input box. */
+  display: flex; align-items: stretch; gap: 8px; padding: 8px 10px;
 }
+footer .input-row > button { flex-shrink: 0; }
 footer.hidden { display: none; }
 footer textarea {
-  flex: 1; background: var(--bg); color: var(--text);
+  flex: 1; box-sizing: border-box;
+  background: var(--bg); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
-  padding: 8px 10px; resize: none;
+  padding: 10px 12px; resize: none;
   font: 16px -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-  min-height: 40px; max-height: 30vh;
+  min-height: 44px; max-height: 40vh;
 }
 footer button {
   background: var(--bg); color: var(--text);
@@ -844,13 +871,9 @@ footer button.icon {
   background: var(--panel2); color: var(--muted);
   font-weight: normal; font-size: 14px; min-width: 22px; padding: 0;
 }
-/* The u/U navigator: two half-height mini buttons stacked in one column,
-   stretching to the input row's height. */
-footer .jump-pair {
-  display: flex; flex-direction: column; gap: 2px; flex-shrink: 0;
-}
-footer .jump-pair button.icon.mini {
-  flex: 1; min-height: 0; min-width: 22px; font-size: 11px; padding: 0;
+/* Send is the primary action — bigger than the small icon buttons. */
+footer button.send {
+  min-width: 44px; padding: 0 12px; font-size: 19px; color: var(--text);
 }
 .upload-row {
   display: flex; flex-wrap: wrap; gap: 4px;
@@ -1058,9 +1081,19 @@ footer .jump-pair button.icon.mini {
   overflow: auto; white-space: pre;
 }
 /* Fullscreen (mainly for desktop): the screen card fills the viewport. */
-#screen-modal.fs { padding: 0; }
+#screen-modal.fs {
+  /* Safe-area insets so the header (✕) clears the top status bar/notch and the
+     bottom rows clear the home indicator. viewport-fit=cover is set, so these
+     resolve to real values on mobile and to 0 elsewhere. */
+  padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  align-items: flex-start; justify-content: flex-start;
+}
 #screen-modal.fs .modal-card.screen-card {
-  width: 100vw; max-width: none; height: 100vh; max-height: none;
+  /* dvh, not vh: on mobile the browser toolbar makes 100vh taller than the
+     visible area. Minus the safe-area insets (added as modal padding above) so
+     the header, scrolling body, and every button row all stay tappable. */
+  width: 100vw; max-width: none; max-height: none;
+  height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom));
   border-radius: 0; padding: 6px 6px; gap: 4px;   /* tight margins, compact rows */
 }
 #screen-modal.fs .screen-body { padding: 3px 6px; }   /* less left/right margin */
@@ -1428,6 +1461,8 @@ footer .jump-pair button.icon.mini {
         <label class="tab-radio"><input type="radio" name="screenTab" value="screen" checked> Screen</label>
         <label class="tab-radio"><input type="radio" name="screenTab" value="info"> Info</label>
         <span style="flex:1"></span>
+        <button id="screen-pgup" class="btn" title="上翻一屏 (u) — 冻结+全量抓取 scrollback">⇞</button>
+        <button id="screen-pgdn" class="btn" title="下翻一屏 (d)">⇟</button>
         <label class="scr-delta" title="增量更新:只传变化的行,省流量"><input type="checkbox" id="screen-delta" checked> Δ</label>
         <button id="screen-fontup" class="btn" title="bigger">A</button>
         <button id="screen-fontdown" class="btn" title="smaller">a</button>
@@ -1532,13 +1567,6 @@ footer .jump-pair button.icon.mini {
           <span class="dot"></span><span class="dot"></span><span class="dot"></span>
           <span id="autoload-label" style="margin-left:6px">auto-refreshing · tap to stop</span>
         </span>
-        <span id="tail-controls">
-          <button id="tail-screen-btn" title="Peek at the last lines of the live terminal">tailScr</button>
-          <span class="tc-sep">|</span>
-          <button id="tail-fontup" title="bigger chat font">A</button>
-          <span class="tc-sep">|</span>
-          <button id="tail-fontdown" title="smaller chat font">a</button>
-        </span>
       </div>
     </div>
     <div id="tail-box" style="display:none">
@@ -1558,16 +1586,22 @@ footer .jump-pair button.icon.mini {
       <div id="prompt-choices" class="pchoices"></div>
     </div>
     <div id="upload-row" class="upload-row" style="display:none"></div>
+    <div id="float-controls">
+      <button id="tail-screen-btn" title="Peek at the last lines of the live terminal">tail</button>
+      <span class="tc-sep">|</span>
+      <button id="tail-fontup" title="bigger chat font">A</button>
+      <span class="tc-sep">|</span>
+      <button id="tail-fontdown" title="smaller chat font">a</button>
+      <span class="tc-sep">|</span>
+      <button id="jump-prev-user" title="Previous user request (u)">↑</button>
+      <button id="jump-next-user" title="Next user request (U)">↓</button>
+      <button id="jump-bottom" title="Jump to latest">⤓</button>
+    </div>
     <div class="input-row">
       <input id="upload-input" type="file" accept="image/*" multiple style="display:none">
       <button id="upload-btn" class="icon" title="Attach image">📎</button>
       <textarea id="input" placeholder="Reply to Claude…" rows="1"></textarea>
-      <button id="send" class="icon" title="Send" aria-label="Send">➤</button>
-      <div class="jump-pair">
-        <button id="jump-prev-user" class="icon mini" title="Previous user request (u)">↑</button>
-        <button id="jump-next-user" class="icon mini" title="Next user request (U)">↓</button>
-      </div>
-      <button id="jump-bottom" class="icon" title="Jump to latest">⤓</button>
+      <button id="send" class="send" title="Send" aria-label="Send">➤</button>
     </div>
   </footer>
 
@@ -2238,9 +2272,32 @@ footer .jump-pair button.icon.mini {
   // Delta-mode client state (experimental incremental screen updates).
   let screenVer = "";
   let screenLines = [];
+  // ⇞/⇟ (keys u/d): send the real PageUp/PageDown key to the tab so the TERMINAL
+  // itself pages, then re-fetch the now-paged visible screen (sendRaw refreshes).
+  // Also pauses the delta auto-refresh so a later poll / new output doesn't yank
+  // the view back to the bottom; the ↻ refresh button resumes live updates.
+  let screenPaused = false, screenPageDir = 0;   // -1 up / +1 down while paged; 0 = live
+  async function pageScreen(dir) {
+    if (!attachedSid) return;
+    screenPaused = true; screenPageDir = dir; stopAuto();
+    const before = screenBody.textContent;
+    await sendRaw(dir < 0 ? "\x1b[5~" : "\x1b[6~");   // PageUp / PageDown (sendRaw re-fetches)
+    // After the redraw settles: a PageDown that changed NOTHING means we hit the
+    // bottom → we're at the latest, so RE-ACTIVATE live delta auto-refresh.
+    // (Caveat: while claude is streaming the bottom keeps changing, so a
+    // page-down there won't register as "unchanged" and won't auto-resume.)
+    setTimeout(() => {
+      if (screenPaused && dir > 0 && screenBody.textContent === before) {
+        screenPaused = false; screenPageDir = 0; screenVer = ""; screenLines = [];
+        loadScreen(); startAuto();
+      }
+    }, 800);
+  }
   async function loadScreen(quiet) {
     if (!attachedSid) return;
-    const useDelta = document.getElementById("screen-delta").checked;
+    // Paged (⇞/⇟) mode forces a real FULL fetch — delta would just report {same}
+    // / a tiny diff (the "34B" you saw), which isn't a full screen.
+    const useDelta = document.getElementById("screen-delta").checked && !screenPageDir;
     if (!quiet && !useDelta) screenBody.textContent = "Loading…";
     try {
       let url = "/api/screen?claude_session_id=" + encodeURIComponent(attachedSid);
@@ -2255,7 +2312,9 @@ footer .jump-pair button.icon.mini {
       const j = JSON.parse(raw);
       const atBottom = screenBody.scrollHeight - screenBody.scrollTop - screenBody.clientHeight < 24;
       if (useDelta) {
-        if (j.same) { screenVer = j.ver; screenStat.textContent = `same · ${bytes}B`; return; }
+        if (j.same) { screenVer = j.ver;
+          screenStat.textContent = screenPageDir ? `full-${screenPageDir < 0 ? "up" : "down"} · ${bytes}B` : `same · ${bytes}B`;
+          return; }
         if (j.full !== undefined) {
           screenLines = (j.full || "").split("\n"); screenVer = j.ver;
           screenBody.textContent = j.full || "(empty)";
@@ -2278,6 +2337,8 @@ footer .jump-pair button.icon.mini {
         screenBody.textContent = j.screen || "(empty)";
         screenStat.textContent = "";
       }
+      // While paged (⇞/⇟) show the page action + bytes, not the delta stat.
+      if (screenPageDir) screenStat.textContent = `full-${screenPageDir < 0 ? "up" : "down"} · ${bytes}B`;
       // Scroll to bottom — most recent output is what the user usually wants.
       // On a quiet refresh keep the user's position unless they were at bottom.
       if (!quiet || atBottom) screenBody.scrollTop = screenBody.scrollHeight;
@@ -2301,7 +2362,7 @@ footer .jump-pair button.icon.mini {
     screenModal.classList.add("show");
     screenModal.classList.toggle("fs", localStorage.getItem("cc_web_screen_full") === "1");
     showScreenTab("screen");
-    screenVer = ""; screenLines = [];   // fresh: first load is a full send
+    screenVer = ""; screenLines = []; screenPaused = false; screenPageDir = 0;   // fresh: first load is a full send
     loadScreen();
     loadInfo();
     startAuto();   // auto-reload always on while the window is shown
@@ -2325,6 +2386,7 @@ footer .jump-pair button.icon.mini {
   }
   async function autoTick() {
     autoTimer = null;
+    if (screenPaused) return;                // frozen for paged scrolling
     if (!screenModal.classList.contains("show") || document.hidden) return;
     if (Date.now() > autoDeadline) return;   // 1h total cap reached
     const before = screenBody.textContent;
@@ -2335,6 +2397,7 @@ footer .jump-pair button.icon.mini {
   }
   function startAuto() {
     stopAuto();
+    if (screenPaused) return;                // don't resume polling while frozen
     if (!screenModal.classList.contains("show") || document.hidden) return;
     autoStep = 0; autoDeadline = Date.now() + AUTO_TOTAL_MS;
     scheduleAuto();
@@ -2363,7 +2426,18 @@ footer .jump-pair button.icon.mini {
   applyScreenScale();
   document.getElementById("screen-fontup").addEventListener("click", () => { screenScale += 0.1; applyScreenScale(); });
   document.getElementById("screen-fontdown").addEventListener("click", () => { screenScale -= 0.1; applyScreenScale(); });
-  screenRefresh.addEventListener("click", () => { loadScreen(); loadInfo(); });
+  screenRefresh.addEventListener("click", () => {
+    if (screenPaused) {
+      // leaving paged mode → live again, with a fresh full baseline + auto-refresh.
+      screenPaused = false; screenPageDir = 0; screenVer = ""; screenLines = [];
+      loadScreen(); loadInfo(); startAuto();
+    } else {
+      // already live → just a lightweight delta update (keep the ver baseline).
+      loadScreen(); loadInfo();
+    }
+  });
+  document.getElementById("screen-pgup").addEventListener("click", () => pageScreen(-1));
+  document.getElementById("screen-pgdn").addEventListener("click", () => pageScreen(1));
   function closeScreenModal() { screenModal.classList.remove("show"); stopAuto(); }
   screenClose.addEventListener("click", closeScreenModal);
   screenModal.addEventListener("click", (e) => { if (e.target === screenModal) closeScreenModal(); });
@@ -3690,8 +3764,20 @@ footer .jump-pair button.icon.mini {
       time.className = "time";
       time.textContent = s.last_visit;
       titleRow.appendChild(title);
+      // Quick Enter/Attach in the title row (right-aligned, since .title is
+      // flex:1) so you can jump into a session WITHOUT expanding the card.
+      const enterBtn = document.createElement("button");
+      enterBtn.className = "title-enter";
+      enterBtn.textContent = s.bound ? "Enter" : "Attach";
+      enterBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const label = s.title || s.project_path;
+        if (s.bound) enterTranscript(s.claude_session_id, label);
+        else attachSession(s.claude_session_id, label);
+      });
       titleRow.appendChild(time);
       card.appendChild(titleRow);
+      let enterPlaced = false;   // enterBtn goes into the summary title line below (or a fallback row)
 
       // Tabs group: the iTerm tab name on its own line (auto-refreshed in place).
       if (s.group === "tabs") {
@@ -3740,6 +3826,7 @@ footer .jump-pair button.icon.mini {
           } catch (err) { alert("Rename error: " + err); }
         });
         head.appendChild(edit);
+        head.appendChild(enterBtn); enterPlaced = true;   // Enter/Attach at the right of the summary title
         sm.appendChild(head);
         if (s.summary) {
           const body = document.createElement("div"); body.className = "sm-body";
@@ -3747,6 +3834,12 @@ footer .jump-pair button.icon.mini {
           sm.appendChild(body);
         }
         card.appendChild(sm);
+      }
+      if (!enterPlaced) {   // no summary line — give the card its own right-aligned Enter row
+        const enterRow = document.createElement("div");
+        enterRow.className = "enter-row";
+        enterRow.appendChild(enterBtn);
+        card.appendChild(enterRow);
       }
 
       function fmtSize(n) {
@@ -4828,7 +4921,7 @@ footer .jump-pair button.icon.mini {
       }
     } catch (e) { tailPre.textContent = "Error: " + e; }
   }
-  document.getElementById("tail-controls").addEventListener("click", (e) => e.stopPropagation());
+  document.getElementById("float-controls").addEventListener("click", (e) => e.stopPropagation());
   tailBtn.addEventListener("click", (e) => { e.stopPropagation(); tailScreen(); });
   document.getElementById("tail-refresh").addEventListener("click", (e) => { e.stopPropagation(); tailScreen(); });
   tailClose.addEventListener("click", (e) => { e.stopPropagation(); tailBox.style.display = "none"; });
@@ -4915,8 +5008,12 @@ footer .jump-pair button.icon.mini {
     }
     switch (e.key) {
       case "/": e.preventDefault(); inputEl.focus(); break;
-      case "u":                                           // prev user request
-        if (!tailOpen && !screenOpen && !switchOpen) { e.preventDefault(); jumpUserRequest(-1); }
+      case "u":                                           // screen: page up; chat: prev user request
+        if (screenOpen) { e.preventDefault(); pageScreen(-1); }
+        else if (!tailOpen && !switchOpen) { e.preventDefault(); jumpUserRequest(-1); }
+        break;
+      case "d": case "D":                                 // screen: page down
+        if (screenOpen) { e.preventDefault(); pageScreen(1); }
         break;
       case "U":                                           // next user request
         if (!tailOpen && !screenOpen && !switchOpen) { e.preventDefault(); jumpUserRequest(1); }
@@ -5075,10 +5172,14 @@ footer .jump-pair button.icon.mini {
     }
   }
   sendBtn.addEventListener("click", send);
+  // Portrait (phone) → Enter inserts a newline (default), send via the Send
+  // button. Landscape (desktop) → Enter sends, Shift/Opt+Enter insert a newline.
+  const isPhone = () => window.innerHeight >= window.innerWidth;
   inputEl.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
     // Don't submit while an IME is composing (e.g. confirming Chinese input).
     if (e.isComposing || e.keyCode === 229) return;
+    if (isPhone()) return;             // phone: let Enter do its default newline
     if (e.altKey) {
       // Opt+Enter → newline (the browser default inserts nothing for Alt+Enter,
       // so do it manually), then re-autosize.
@@ -5090,11 +5191,11 @@ footer .jump-pair button.icon.mini {
       return;
     }
     if (e.shiftKey) return;            // Shift+Enter → default newline
-    e.preventDefault(); send();        // Enter (or Cmd/Ctrl+Enter) → submit
+    e.preventDefault(); send();        // desktop Enter → send
   });
   inputEl.addEventListener("input", () => {
     inputEl.style.height = "auto";
-    inputEl.style.height = Math.min(inputEl.scrollHeight, window.innerHeight * 0.3) + "px";
+    inputEl.style.height = Math.max(44, Math.min(inputEl.scrollHeight, window.innerHeight * 0.4)) + "px";
   });
 
   // ---------- image upload ----------
@@ -5215,11 +5316,12 @@ footer .jump-pair button.icon.mini {
       await uploadFiles(files);
     }
   });
-  document.getElementById("jump-bottom").addEventListener("click", () => {
+  document.getElementById("jump-bottom").addEventListener("click", (e) => {
+    e.stopPropagation();   // in the tail-controls pill → don't toggle auto-refresh
     shouldAutoscroll = true; mainEl.scrollTop = mainEl.scrollHeight;
   });
-  document.getElementById("jump-prev-user").addEventListener("click", () => jumpUserRequest(-1));
-  document.getElementById("jump-next-user").addEventListener("click", () => jumpUserRequest(1));
+  document.getElementById("jump-prev-user").addEventListener("click", (e) => { e.stopPropagation(); jumpUserRequest(-1); });
+  document.getElementById("jump-next-user").addEventListener("click", (e) => { e.stopPropagation(); jumpUserRequest(1); });
 
   // ---------- new session dialog ----------
   const newDlg = document.getElementById("newdlg");

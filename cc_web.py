@@ -1500,11 +1500,24 @@ def _session_dict(jsonl: Path, mtime: float, named: Optional[dict],
     views = _session_views(jsonl, st)
     exs = views["user"] if card_mode == "user" else views["both"]
     last_user = exs[-1]["user"] if exs else None
+    # "Last use" = the last real (human) message time, NOT the file mtime. The
+    # jsonl mtime gets bumped by background rewrites (autonomous-loop ticks,
+    # resume, file sync) even when the conversation didn't change, which made
+    # untouched sessions look freshly used. last_user["ts"] already excludes the
+    # isMeta scheduler/watcher turns. Fall back to mtime when there are no msgs.
+    use_epoch = mtime
+    _last_ts = last_user["ts"] if last_user else ""
+    if _last_ts:
+        try:
+            use_epoch = _dt.datetime.fromisoformat(
+                _last_ts.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            use_epoch = mtime
     d = {
         "claude_session_id": sid,
         "title": (named.get("title") if named else ""),
         "project_path": (named.get("project_path") if named else "") or views.get("project_path") or "",
-        "last_visit": _dt.datetime.fromtimestamp(mtime).strftime("%m-%d %H:%M"),
+        "last_visit": _dt.datetime.fromtimestamp(use_epoch).strftime("%m-%d %H:%M"),
         "file_size": file_size,
         "first_user_msg": views["first_user_msg"],
         "first_ts": views["first_ts"],
@@ -1518,7 +1531,8 @@ def _session_dict(jsonl: Path, mtime: float, named: Optional[dict],
         "summary": s_summary,
         "summary_title": s_title,
         "user_name": _user_name_of(sid),
-        "mtime": mtime,
+        "mtime": use_epoch,   # sort by real last-use, not file mtime
+        "file_mtime": mtime,  # keep the raw file mtime available if ever needed
     }
     # "tabs" cards carry the live iTerm tab name + window/tab (title + sort)
     # and the iterm session id so the frontend can Close the tab directly.
@@ -1582,8 +1596,11 @@ def build_picker_sessions(live_tabs: Optional[list[dict]] = None,
     def _empty(d: dict) -> bool:
         return len(d.get("exchanges") or []) <= 1
 
-    # (2) recent — most recent non-empty, excluding live tabs.
+    # (2) recent — most recent non-empty, excluding live tabs. Candidate set is
+    # picked by file mtime (cheap), then re-sorted by real last-use so a session
+    # whose file was merely touched (not conversed in) doesn't jump to the top.
     n = 0
+    recent_ds: list[dict] = []
     for mtime, jsonl, sid in all_items:
         if n >= recent_n:
             break
@@ -1593,10 +1610,13 @@ def build_picker_sessions(live_tabs: Optional[list[dict]] = None,
         seen.add(sid)
         if _empty(d):
             continue
-        out.append(d); n += 1
+        recent_ds.append(d); n += 1
+    recent_ds.sort(key=lambda d: d.get("mtime", 0), reverse=True)
+    out.extend(recent_ds)
 
     # (3) named — most recent non-empty named, excluding the above.
     n = 0
+    named_ds: list[dict] = []
     for mtime, jsonl, sid in all_items:
         if n >= named_n:
             break
@@ -1606,7 +1626,9 @@ def build_picker_sessions(live_tabs: Optional[list[dict]] = None,
         seen.add(sid)
         if _empty(d):
             continue
-        out.append(d); n += 1
+        named_ds.append(d); n += 1
+    named_ds.sort(key=lambda d: d.get("mtime", 0), reverse=True)
+    out.extend(named_ds)
 
     return out
 
@@ -1685,7 +1707,7 @@ def _head_tail_trunc(s: str, total: int) -> str:
 # Code stamps the recorded turn isMeta=true + promptSource='system'. We surface them
 # as 'System' (not 'You') and, in brief mode, collapse the long body to head+tail so
 # a wall-of-text watcher prompt doesn't drown out the real conversation.
-AUTO_BRIEF_BUDGET = 240   # head + tail chars kept for an auto tick in brief mode
+SYS_BRIEF_BUDGET = 240   # head + tail chars kept for any System msg in brief mode
 
 # While a tick is still PENDING it arrives via a queue-operation entry that carries
 # NO metadata (no isMeta/promptSource), so the only signal is the loop-wrapper
@@ -1727,15 +1749,15 @@ def _is_auto_injected(e: dict) -> bool:
     return False
 
 
-def _collapse_auto_content(new_content):
-    """Collapse a brief-mode auto tick's body to a simple head+tail blurb."""
+def _collapse_sys_brief(new_content):
+    """Collapse a brief-mode System msg body to a simple head+tail blurb."""
     if isinstance(new_content, str):
-        return _head_tail_trunc(new_content, AUTO_BRIEF_BUDGET)
+        return _head_tail_trunc(new_content, SYS_BRIEF_BUDGET)
     if isinstance(new_content, list):
         joined = "\n".join(
             p.get("text", "") for p in new_content
             if isinstance(p, dict) and p.get("type") == "text")
-        return [{"type": "text", "text": _head_tail_trunc(joined, AUTO_BRIEF_BUDGET)}]
+        return [{"type": "text", "text": _head_tail_trunc(joined, SYS_BRIEF_BUDGET)}]
     return new_content
 
 
@@ -1906,15 +1928,13 @@ def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
                     "_queued": True,
                     "message": {"content": content},
                 }
-                if _is_command_noise(content):
-                    qe["_system"] = True
-                elif _looks_like_auto_prompt(content):
-                    # scheduler/watcher tick still sitting in the queue — no
-                    # metadata to go on, so recognise the loop-wrapper phrasing.
-                    # It's not "You"; and in brief mode collapse to head+tail.
+                # Command noise, or a scheduler/watcher tick still queued (no
+                # metadata yet → recognised by loop-wrapper phrasing): render as
+                # System, not "You", and collapse to head+tail in brief mode.
+                if _is_command_noise(content) or _looks_like_auto_prompt(content):
                     qe["_system"] = True
                     if mode == "brief":
-                        qe["message"]["content"] = _head_tail_trunc(content, AUTO_BRIEF_BUDGET)
+                        qe["message"]["content"] = _head_tail_trunc(content, SYS_BRIEF_BUDGET)
                 out.append(qe)
             continue
         if t not in ("user", "assistant"):
@@ -1928,8 +1948,10 @@ def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
             if e.get("isMeta") and not auto:
                 continue
             trimmed = _trim_brief(e)
-            if trimmed and auto:
-                trimmed["message"]["content"] = _collapse_auto_content(
+            # System msgs — watcher/scheduler ticks AND tool/command-injected
+            # user entries — collapse to a head+tail blurb in brief mode.
+            if trimmed and (auto or (t == "user" and _is_system_user_entry(e))):
+                trimmed["message"]["content"] = _collapse_sys_brief(
                     trimmed["message"]["content"])
         elif mode == "medium":
             trimmed = _trim_medium(e)
