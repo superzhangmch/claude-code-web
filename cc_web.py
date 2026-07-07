@@ -2829,7 +2829,8 @@ async def get_tabs():
     the user-set name, then the LLM title, then the iTerm tab name."""
     out: list[dict] = []
     try:
-        await bridge.ensure_connected()
+        # No ensure_connected() here — list_claude_tabs() builds its own fresh
+        # connection, so a prior connect+refresh is wasted (~100-200ms/click).
         for t in await bridge.list_claude_tabs():
             meta = _claude_session_meta(t.pid)
             sid = (meta or {}).get("sessionId") or (t.claude_session_id or "")

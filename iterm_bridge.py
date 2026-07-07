@@ -86,34 +86,39 @@ class ItermBridge:
                 self.app = None
         if self.app is None:
             return []
+        procs = _claude_procs_by_tty()          # ONE ps for all foreground claudes
+        flat = [(wi, ti, session)
+                for wi, window in enumerate(self.app.windows)
+                for ti, tab in enumerate(window.tabs)
+                for session in tab.sessions]
+
+        async def _gv(session, var):
+            try:
+                return await session.async_get_variable(var)
+            except Exception:
+                return None
+
+        # tty for every session, concurrently; keep only those with a claude.
+        ttys = await asyncio.gather(*[_gv(s, "tty") for _, _, s in flat])
+        hits = [(wi, ti, s, tty, procs[_norm_tty(tty)])
+                for (wi, ti, s), tty in zip(flat, ttys)
+                if tty and _norm_tty(tty) in procs]
+        names = await asyncio.gather(*[_gv(s, "session.name") for _, _, s, _, _ in hits])
         refs: list[ClaudeSessionRef] = []
-        for wi, window in enumerate(self.app.windows):
-            for ti, tab in enumerate(window.tabs):
-                for session in tab.sessions:
-                    try:
-                        tty = await session.async_get_variable("tty")
-                    except Exception:
-                        tty = None
-                    if not tty:
-                        continue
-                    info = _claude_on_tty(tty)
-                    if info is None:
-                        continue
-                    pid, cwd, resume_sid = info
-                    try:
-                        name = await session.async_get_variable("session.name") or ""
-                    except Exception:
-                        name = ""
-                    refs.append(ClaudeSessionRef(
-                        iterm_session_id=session.session_id,
-                        tty=tty,
-                        pid=pid,
-                        cwd=cwd,
-                        name=name,
-                        window_index=wi,
-                        tab_index=ti,
-                        claude_session_id=resume_sid,   # ground truth from --resume argv
-                    ))
+        for (wi, ti, session, tty, (pid, resume_sid)), name in zip(hits, names):
+            cwd = _pid_cwd(pid)
+            if not cwd:
+                continue
+            refs.append(ClaudeSessionRef(
+                iterm_session_id=session.session_id,
+                tty=tty,
+                pid=pid,
+                cwd=cwd,
+                name=name or "",
+                window_index=wi,
+                tab_index=ti,
+                claude_session_id=resume_sid,   # ground truth from --resume argv
+            ))
         return refs
 
     # Backward-compat shim — old code still calls this name.
@@ -135,26 +140,37 @@ class ItermBridge:
                 self.app = None
         if self.app is None:
             return []
+        # Flatten to (wi, ti, session), then fetch tty+name for ALL sessions
+        # concurrently (was 2 sequential RPCs per session), and detect claude
+        # tabs with ONE `ps` (was one `ps -t` per session).
+        flat = [(wi, ti, session)
+                for wi, window in enumerate(self.app.windows)
+                for ti, tab in enumerate(window.tabs)
+                for session in tab.sessions]
+
+        async def _vars(session):
+            try:
+                tty = await session.async_get_variable("tty")
+            except Exception:
+                tty = None
+            try:
+                name = await session.async_get_variable("session.name") or ""
+            except Exception:
+                name = ""
+            return tty, name
+
+        infos = await asyncio.gather(*[_vars(s) for _, _, s in flat])
+        claude_ttys = _claude_ttys()
         out: list[dict] = []
-        for wi, window in enumerate(self.app.windows):
-            for ti, tab in enumerate(window.tabs):
-                for session in tab.sessions:
-                    try:
-                        tty = await session.async_get_variable("tty")
-                    except Exception:
-                        tty = None
-                    try:
-                        name = await session.async_get_variable("session.name") or ""
-                    except Exception:
-                        name = ""
-                    out.append({
-                        "iterm_session_id": session.session_id,
-                        "window_index": wi,
-                        "tab_index": ti,
-                        "name": name,
-                        "tty": tty or "",
-                        "is_claude": bool(tty and _claude_on_tty(tty)),
-                    })
+        for (wi, ti, session), (tty, name) in zip(flat, infos):
+            out.append({
+                "iterm_session_id": session.session_id,
+                "window_index": wi,
+                "tab_index": ti,
+                "name": name,
+                "tty": tty or "",
+                "is_claude": bool(tty and _norm_tty(tty) in claude_ttys),
+            })
         return out
 
     async def send_text_to(self, iterm_session_id: str, text: str) -> bool:
@@ -470,6 +486,66 @@ def _resume_sid_from_cmd(cmd: str) -> str:
     session, no screen-content guessing needed."""
     m = _RESUME_RE.search(cmd)
     return m.group(1) if m else ""
+
+
+def _norm_tty(tty: str) -> str:
+    """Normalize a tty to a comparable id: '/dev/ttys005' → 's005', 'ttys005'
+    → 's005', 's005' → 's005'. (macOS `ps -o tty` prints 's005'; iTerm's tty
+    variable is '/dev/ttys005'.)"""
+    t = tty.rsplit("/", 1)[-1]
+    return t[3:] if t.startswith("tty") else t
+
+
+def _claude_ttys() -> set[str]:
+    """ONE `ps` over all processes → set of normalized ttys that have a
+    FOREGROUND claude. Replaces N per-tab `ps -t` calls in list_all_tabs."""
+    try:
+        out = subprocess.run(
+            ["ps", "-A", "-o", "tty=,stat=,command="],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+    except Exception:
+        return set()
+    ttys: set[str] = set()
+    for line in out.splitlines():
+        parts = line.split(None, 2)   # tty, stat, command
+        if len(parts) != 3:
+            continue
+        tty, stat, cmd = parts
+        if "+" not in stat:           # foreground process group only
+            continue
+        if _is_claude_cmd(cmd):
+            ttys.add(_norm_tty(tty))
+    return ttys
+
+
+def _claude_procs_by_tty() -> dict[str, tuple[int, str]]:
+    """ONE `ps` over all processes → {normalized_tty: (pid, resume_sid)} for
+    FOREGROUND claudes. Replaces the N per-tty `ps -t` calls in
+    list_claude_tabs (cwd is still resolved per hit by the caller)."""
+    try:
+        out = subprocess.run(
+            ["ps", "-A", "-o", "tty=,pid=,stat=,command="],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+    except Exception:
+        return {}
+    res: dict[str, tuple[int, str]] = {}
+    for line in out.splitlines():
+        parts = line.split(None, 3)   # tty, pid, stat, command
+        if len(parts) != 4:
+            continue
+        tty, pid_str, stat, cmd = parts
+        if "+" not in stat:           # foreground process group only
+            continue
+        if not _is_claude_cmd(cmd):
+            continue
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            continue
+        res.setdefault(_norm_tty(tty), (pid, _resume_sid_from_cmd(cmd)))
+    return res
 
 
 def _claude_on_tty(tty_path: str) -> Optional[tuple[int, str, str]]:
