@@ -12,6 +12,18 @@ from typing import Optional
 
 import iterm2
 
+# iTerm2 RPC hard timeout: a hung/half-open websocket await must never wedge the
+# asyncio event loop (which would freeze every concurrent request).
+_RPC_TIMEOUT = 8
+
+
+async def _gv(session, var, timeout=5):
+    """Read an iTerm2 session variable with a hard timeout; None on any failure."""
+    try:
+        return await asyncio.wait_for(session.async_get_variable(var), timeout)
+    except Exception:
+        return None
+
 
 @dataclass
 class ClaudeSessionRef:
@@ -51,13 +63,14 @@ class ItermBridge:
         async with self._lock:
             if self.app is not None:
                 try:
-                    self.app = await iterm2.async_get_app(self.connection)
-                    await self.app.async_refresh()   # force-refresh stale window model
+                    self.app = await asyncio.wait_for(
+                        iterm2.async_get_app(self.connection), _RPC_TIMEOUT)
+                    await asyncio.wait_for(self.app.async_refresh(), _RPC_TIMEOUT)
                     return
                 except Exception:
                     self.connection = None
                     self.app = None
-            await self.connect()
+            await asyncio.wait_for(self.connect(), _RPC_TIMEOUT)
 
     async def list_claude_tabs(self) -> list[ClaudeSessionRef]:
         """Enumerate all iTerm2 tabs with a live foreground `claude` process.
@@ -75,28 +88,24 @@ class ItermBridge:
         so the extra connect (~100-200 ms) is fine here."""
         async with self._lock:
             try:
-                self.connection = await iterm2.Connection.async_create()
-                self.app = await iterm2.async_get_app(self.connection)
+                self.connection = await asyncio.wait_for(
+                    iterm2.Connection.async_create(), _RPC_TIMEOUT)
+                self.app = await asyncio.wait_for(
+                    iterm2.async_get_app(self.connection), _RPC_TIMEOUT)
                 # Force a full layout fetch — in some event-loop contexts
                 # async_get_app returns before the window model is fully
                 # populated, yielding a partial tab list.
-                await self.app.async_refresh()
+                await asyncio.wait_for(self.app.async_refresh(), _RPC_TIMEOUT)
             except Exception:
                 self.connection = None
                 self.app = None
         if self.app is None:
             return []
-        procs = _claude_procs_by_tty()          # ONE ps for all foreground claudes
+        procs = await asyncio.to_thread(_claude_procs_by_tty)   # ps off the loop
         flat = [(wi, ti, session)
                 for wi, window in enumerate(self.app.windows)
                 for ti, tab in enumerate(window.tabs)
                 for session in tab.sessions]
-
-        async def _gv(session, var):
-            try:
-                return await session.async_get_variable(var)
-            except Exception:
-                return None
 
         # tty for every session, concurrently; keep only those with a claude.
         ttys = await asyncio.gather(*[_gv(s, "tty") for _, _, s in flat])
@@ -104,9 +113,10 @@ class ItermBridge:
                 for (wi, ti, s), tty in zip(flat, ttys)
                 if tty and _norm_tty(tty) in procs]
         names = await asyncio.gather(*[_gv(s, "session.name") for _, _, s, _, _ in hits])
+        # lsof (cwd) off the loop AND concurrently, not one-at-a-time.
+        cwds = await asyncio.gather(*[asyncio.to_thread(_pid_cwd, h[4][0]) for h in hits])
         refs: list[ClaudeSessionRef] = []
-        for (wi, ti, session, tty, (pid, resume_sid)), name in zip(hits, names):
-            cwd = _pid_cwd(pid)
+        for (wi, ti, session, tty, (pid, resume_sid)), name, cwd in zip(hits, names, cwds):
             if not cwd:
                 continue
             refs.append(ClaudeSessionRef(
@@ -132,35 +142,29 @@ class ItermBridge:
         tty, and whether a foreground claude is running on it."""
         async with self._lock:
             try:
-                self.connection = await iterm2.Connection.async_create()
-                self.app = await iterm2.async_get_app(self.connection)
-                await self.app.async_refresh()
+                self.connection = await asyncio.wait_for(
+                    iterm2.Connection.async_create(), _RPC_TIMEOUT)
+                self.app = await asyncio.wait_for(
+                    iterm2.async_get_app(self.connection), _RPC_TIMEOUT)
+                await asyncio.wait_for(self.app.async_refresh(), _RPC_TIMEOUT)
             except Exception:
                 self.connection = None
                 self.app = None
         if self.app is None:
             return []
         # Flatten to (wi, ti, session), then fetch tty+name for ALL sessions
-        # concurrently (was 2 sequential RPCs per session), and detect claude
-        # tabs with ONE `ps` (was one `ps -t` per session).
+        # concurrently (was 2 sequential RPCs per session, no timeout), and
+        # detect claude tabs with ONE `ps` off the loop.
         flat = [(wi, ti, session)
                 for wi, window in enumerate(self.app.windows)
                 for ti, tab in enumerate(window.tabs)
                 for session in tab.sessions]
 
         async def _vars(session):
-            try:
-                tty = await session.async_get_variable("tty")
-            except Exception:
-                tty = None
-            try:
-                name = await session.async_get_variable("session.name") or ""
-            except Exception:
-                name = ""
-            return tty, name
+            return (await _gv(session, "tty"), (await _gv(session, "session.name")) or "")
 
         infos = await asyncio.gather(*[_vars(s) for _, _, s in flat])
-        claude_ttys = _claude_ttys()
+        claude_ttys = await asyncio.to_thread(_claude_ttys)
         out: list[dict] = []
         for (wi, ti, session), (tty, name) in zip(flat, infos):
             out.append({
@@ -324,19 +328,24 @@ class ItermBridge:
         lines = None
         if scrollback:
             try:
-                info = await session.async_get_line_info()
+                info = await asyncio.wait_for(session.async_get_line_info(), _RPC_TIMEOUT)
                 grid = info.mutable_area_height
                 history = info.scrollback_buffer_height
                 overflow = info.overflow
                 avail = history + grid
                 want = min(max_lines, avail)
                 first = overflow + avail - want
-                line_contents = await session.async_get_contents(first, want)
+                line_contents = await asyncio.wait_for(
+                    session.async_get_contents(first, want), _RPC_TIMEOUT)
                 lines = [lc.string.replace("\x00", " ").rstrip() for lc in line_contents]
             except Exception:
                 lines = None
         if lines is None:
-            contents = await session.async_get_screen_contents()
+            try:
+                contents = await asyncio.wait_for(
+                    session.async_get_screen_contents(), _RPC_TIMEOUT)
+            except Exception:
+                return None
             lines = []
             for y in range(contents.number_of_lines):
                 line = contents.line(y)
@@ -589,12 +598,18 @@ def _claude_on_tty(tty_path: str) -> Optional[tuple[int, str, str]]:
 
 
 def _is_claude_cmd(cmd: str) -> bool:
-    # cmd can be like "claude" or "/usr/local/bin/node /path/to/claude --flag"
+    """True only when `claude` is the EXECUTABLE (argv[0]) or the script run by a
+    node/bun/deno interpreter (argv[1]). NOT merely a path ARGUMENT that happens
+    to contain a `claude` component (e.g. `tail -f /var/log/claude`, `cd
+    /work/claude`), which the old any-token check wrongly flagged as a claude tab."""
     tokens = cmd.split()
-    for t in tokens:
-        base = os.path.basename(t)
-        if base == "claude":
-            return True
+    if not tokens:
+        return False
+    if os.path.basename(tokens[0]) == "claude":
+        return True
+    if (len(tokens) >= 2 and os.path.basename(tokens[0]) in ("node", "bun", "deno")
+            and os.path.basename(tokens[1]) == "claude"):
+        return True
     return False
 
 

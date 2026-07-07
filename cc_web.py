@@ -112,7 +112,10 @@ def _load_auth_token() -> str:
 
 
 AUTH_TOKEN = _load_auth_token()
-log.info("auth token: %s  (override with $CC_WEB_TOKEN or edit %s)", AUTH_TOKEN, CONF_PATH)
+# Don't log the token VALUE (it lands in /tmp/cc-web.log in plaintext). The
+# ephemeral-generation path above still prints its value since that's the only
+# way to learn it; a configured token is already known to the operator.
+log.info("auth token loaded (%d chars; from $CC_WEB_TOKEN or %s)", len(AUTH_TOKEN), CONF_PATH)
 
 
 def require_token(authorization: Optional[str] = Header(default=None)) -> None:
@@ -1303,17 +1306,36 @@ def _pending_confirm_gate_open(b: Binding) -> bool:
     return now - jsonl_mtime >= PENDING_CONFIRM_IDLE_SEC
 
 
+# A pid's start time is immutable, so cache the (blocking) `ps` behind a short
+# TTL. verify_binding runs on every poll of every open client; without this it
+# forked `ps` per request on the event-loop thread (a slow/stalled `ps` then
+# froze the whole server). os.kill(pid,0) below still catches death instantly.
+_PID_START_CACHE: dict[int, tuple[float, float]] = {}   # pid -> (start_time, cached_at)
+_PID_START_TTL = 4.0
+
+
+def _pid_start_cached(pid: int) -> float:
+    now = time.monotonic()
+    c = _PID_START_CACHE.get(pid)
+    if c and now - c[1] < _PID_START_TTL:
+        return c[0]
+    from iterm_bridge import _pid_start_time
+    st = _pid_start_time(pid)
+    if len(_PID_START_CACHE) > 512:      # bound growth over a long-running server
+        _PID_START_CACHE.clear()
+    _PID_START_CACHE[pid] = (st, now)
+    return st
+
+
 def _pid_alive_with_start(pid: int, expected_start: float, tolerance: float = 1.5) -> bool:
     """Verify pid is still alive AND its start time matches (catches pid reuse)."""
     try:
-        os.kill(pid, 0)
+        os.kill(pid, 0)          # cheap, instant death detection (no staleness)
     except ProcessLookupError:
         return False
     except Exception:
         return False
-    # Check start time
-    from iterm_bridge import _pid_start_time
-    actual_start = _pid_start_time(pid)
+    actual_start = _pid_start_cached(pid)   # cached `ps` (start time is immutable)
     if actual_start <= 0:
         return False
     return abs(actual_start - expected_start) <= tolerance
@@ -2826,9 +2848,9 @@ async def get_sessions(card: str = "both"):
         "sessions": build_picker_sessions(live_tabs=live_tabs,
                                           recent_n=max(10, n_claude_tabs),
                                           card_mode=card),
-        "battery": _get_battery(),
+        "battery": await asyncio.to_thread(_get_battery),
         "claude_store": store,
-        "runaway": _runaway_processes(live_tabs),
+        "runaway": await asyncio.to_thread(_runaway_processes, live_tabs),
     }
 
 
@@ -3004,8 +3026,9 @@ async def search_sessions(q: Optional[str] = None, cwd: Optional[str] = None,
             for t in terms:
                 rg_args += ["-e", t]
             try:
-                proc = subprocess.run(rg_args + ["--", *paths],
-                                      capture_output=True, text=True, timeout=20)
+                proc = await asyncio.to_thread(
+                    subprocess.run, rg_args + ["--", *paths],
+                    capture_output=True, text=True, timeout=20)
                 out = proc.stdout
             except Exception as e:
                 log.warning("search rg failed: %s", e)
@@ -3094,7 +3117,7 @@ async def get_cpu_history():
     """
     snapshots = list(_cpu_history)
     if not snapshots:
-        return {"samples_at": [], "series": [], "interval_sec": CPU_SAMPLE_INTERVAL_SEC, "mem_top": _sample_top_mem_groups(10)}
+        return {"samples_at": [], "series": [], "interval_sec": CPU_SAMPLE_INTERVAL_SEC, "mem_top": await asyncio.to_thread(_sample_top_mem_groups, 10)}
     # Sleep gaps are implicitly absent: when the Mac sleeps both
     # processes AND the sampler are frozen, so the buffer only ever
     # contains awake-time samples. We therefore use the full buffer
@@ -3222,7 +3245,7 @@ async def get_cpu_history():
         "samples_at": samples_at,
         "series": series,
         "interval_sec": CPU_SAMPLE_INTERVAL_SEC,
-        "mem_top": _sample_top_mem_groups(10),
+        "mem_top": await asyncio.to_thread(_sample_top_mem_groups, 10),
     }
 
 
@@ -3890,7 +3913,7 @@ async def get_session_info(claude_session_id: str):
     cwd = (named.get("project_path") if named else "") or _project_path_from_jsonl(jsonl_path) or ""
     entries = jsonl_cache.entries(jsonl_path)
     b = bindings.get_by_session(sid)
-    processes = _ps_descendants(b.pid) if b else []
+    processes = (await asyncio.to_thread(_ps_descendants, b.pid)) if b else []
     return {
         "session_id": sid,
         "title": (named.get("title") if named else ""),
@@ -3924,6 +3947,9 @@ def _screen_delta(cache_key: str, text: str, ver: str) -> dict:
     cur_lines = text.split("\n")
     new_ver = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
     prev = _SCREEN_DELTA_CACHE.get(cache_key)
+    # Bound growth: one entry per (session[:tail]) accrues forever otherwise.
+    if len(_SCREEN_DELTA_CACHE) > 256 and cache_key not in _SCREEN_DELTA_CACHE:
+        _SCREEN_DELTA_CACHE.clear()
     _SCREEN_DELTA_CACHE[cache_key] = {"ver": new_ver, "lines": cur_lines}
     if ver and ver == new_ver:
         return {"ver": new_ver, "same": True}
@@ -4090,6 +4116,17 @@ def _looks_text(p: Path, size: int) -> bool:
         return False
 
 
+# Filesystem endpoints are confined to the user's home tree so an authenticated
+# caller can't read arbitrary files (/etc, ssh keys, other users' data). resolve()
+# above collapses symlinks/.. before this check, so escapes are caught.
+def _fs_allowed(p: Path) -> bool:
+    try:
+        home = Path.home().resolve()
+        return p == home or home in p.parents
+    except Exception:
+        return False
+
+
 @app.get("/api/fs/list", dependencies=[Depends(require_token)])
 def fs_list(path: str = "", offset: int = 0, limit: int = FS_PAGE_SIZE, q: str = ""):
     """List a local directory (paginated). Empty path → home dir.
@@ -4103,6 +4140,8 @@ def fs_list(path: str = "", offset: int = 0, limit: int = FS_PAGE_SIZE, q: str =
         p = p.resolve()
     except OSError:
         raise HTTPException(status_code=400, detail="bad path")
+    if not _fs_allowed(p):
+        raise HTTPException(status_code=403, detail="path outside allowed root")
     if not p.is_dir():
         raise HTTPException(status_code=404, detail="not a directory")
     try:
@@ -4171,6 +4210,8 @@ def fs_file(path: str, token: str = "",
         p = p.resolve()
     except OSError:
         raise HTTPException(status_code=400, detail="bad path")
+    if not _fs_allowed(p):
+        raise HTTPException(status_code=403, detail="path outside allowed root")
     if not p.is_file():
         raise HTTPException(status_code=404, detail="not a file")
     try:

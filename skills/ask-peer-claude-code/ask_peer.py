@@ -56,8 +56,11 @@ def _req(method, url, token, body=None, timeout=30):
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
-_ERR_RE = re.compile(r"(API Error|overloaded|rate.?limit|错误|failed to|ECONNRESET|"
-                     r"internal server error|请求失败|Error: )", re.I)
+# Only genuine transport/API failures — not words a normal reply might contain
+# ("failed to compile", "错误处理", "Error:" in sample output) which caused
+# false "maybe_error" flags.
+_ERR_RE = re.compile(r"(API Error|overloaded|rate.?limit|ECONNRESET|Connection reset|"
+                     r"internal server error|\b(529|503 Service Unavailable)\b)", re.I)
 
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
                    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -75,7 +78,9 @@ def _resolve_to(base, token, to):
     except Exception as e:
         return None, f"could not list tabs to resolve '{to}': {e}"
     sids = [t.get("sid", "") for t in tabs if t.get("sid")]
-    hits = [s for s in sids if to in s]
+    hits = [s for s in sids if s.startswith(to)]   # prefer prefix (safer than substring)
+    if not hits:
+        hits = [s for s in sids if to in s]        # fall back to substring
     if len(hits) == 1:
         return hits[0], f"resolved '{to}' → {hits[0]}"
     if not hits:
@@ -165,6 +170,7 @@ def main():
 
     t0 = time.time()
     idle_streak = 0
+    seen_active = False   # have we observed the peer actually working (non-idle)?
     while time.time() - t0 < a.timeout:
         time.sleep(a.interval)
         try:
@@ -183,7 +189,11 @@ def main():
         reply = _assistant_text(st)
         if st.get("claude_idle") and reply:
             idle_streak += 1
-            if idle_streak >= 2:            # stable idle → turn really done
+            # Accept when we SAW it working then go idle (strong "turn done"
+            # signal — avoids returning on a transient end_turn mid-work), or,
+            # for a reply so fast we never caught it non-idle, after a longer
+            # stable-idle streak as a fallback.
+            if seen_active or idle_streak >= 3:
                 status = "maybe_error" if _ERR_RE.search(reply[-400:]) else "done"
                 note = ("looks like an API/error state — consider re-sending '继续'"
                         if status == "maybe_error" else "")
@@ -195,8 +205,14 @@ def main():
                 return
         else:
             idle_streak = 0
+            if not st.get("claude_idle"):
+                seen_active = True      # peer is actively working
 
-    print(json.dumps({"status": "timeout", "reply": _assistant_text(state(since=baseline)),
+    try:
+        final_reply = _assistant_text(state(since=baseline))
+    except Exception:
+        final_reply = ""                # server unreachable at timeout — still emit JSON
+    print(json.dumps({"status": "timeout", "reply": final_reply,
                       "idle": False, "elapsed": round(time.time() - t0, 1),
                       "since_idx": baseline,
                       "note": f"peer not idle within {a.timeout}s — still working?"},

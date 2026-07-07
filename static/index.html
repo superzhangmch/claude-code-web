@@ -2072,6 +2072,7 @@ footer button.send {
   let pauseReason = null;
   let polling = false;
   let pollTimer = null;
+  let sessionGone = false;   // set on 410 (pid gone) → stop re-polling a dead session
   // Tracks the most-recent block currently at the bottom of the transcript
   // *if* that block is a tool_use. A tool_result that comes next can then
   // be folded into the same card. Reset whenever the bottom is no longer
@@ -2324,7 +2325,7 @@ footer button.send {
           const prev = screenLines;
           const lines = new Array(j.n);
           for (let i = 0; i < j.n; i++) lines[i] = (i + k >= 0 && i + k < prev.length) ? prev[i + k] : "";
-          for (const [i, v] of j.changed) lines[i] = (typeof v === "string") ? v : v.c.repeat(v.n);
+          for (const [i, v] of j.changed) if (i >= 0 && i < j.n) lines[i] = (typeof v === "string") ? v : v.c.repeat(v.n);
           screenLines = lines; screenVer = j.ver;
           screenBody.textContent = lines.join("\n") || "(empty)";
           screenStat.textContent = `Δ ${j.changed.length} line${j.changed.length === 1 ? "" : "s"}`
@@ -4136,7 +4137,8 @@ footer button.send {
     setSessionHash(sid);
     metaEl.textContent = label || sid.slice(0, 8);
     entryCache = []; lastIdx = null; earliestIdxLoaded = null; hasMoreHistory = false;
-    claudeIdle = false; isPaused = false;
+    claudeIdle = false; isPaused = false; sessionGone = false;
+    warnEl.classList.remove("show");   // clear any stale pid-gone/mismatch banner
     transcriptEl.innerHTML = "";
     showTranscript();
     activityDeadline = Date.now() + _activityWindow();
@@ -4913,7 +4915,7 @@ footer button.send {
         const k = j.scroll || 0; const prev = tailLines;
         const lines = new Array(j.n);
         for (let i = 0; i < j.n; i++) lines[i] = (i + k >= 0 && i + k < prev.length) ? prev[i + k] : "";
-        for (const [i, v] of j.changed) lines[i] = (typeof v === "string") ? v : v.c.repeat(v.n);
+        for (const [i, v] of j.changed) if (i >= 0 && i < j.n) lines[i] = (typeof v === "string") ? v : v.c.repeat(v.n);
         tailLines = lines; tailVer = j.ver;
         tailPre.textContent = lines.join("\n") || "(empty)";
       } else {                       // base mismatch → refetch full once
@@ -5077,15 +5079,18 @@ footer button.send {
     if (Date.now() > activityDeadline) { setPaused(true, "timeout"); return; }
     if (polling) { schedulePoll(POLL_INTERVAL_MS); return; }
     polling = true;
+    const sid = attachedSid;   // guard: bail if the user switches session mid-fetch
     try {
       const params = new URLSearchParams();
-      params.set("claude_session_id", attachedSid);
+      params.set("claude_session_id", sid);
       params.set("mode", renderMode);
       params.set("rounds", "5");
       if (lastIdx !== null) params.set("since_idx", String(lastIdx));
       const resp = await authedFetch("/api/state?" + params.toString());
+      if (sid !== attachedSid) return;   // switched away while awaiting → drop this response
       if (resp.status === 410) {
-        // pid gone
+        // pid gone — stop re-polling a dead session (was looping every 5s forever)
+        sessionGone = true;
         warnEl.classList.add("show");
         warnEl.textContent = "⚠ tab/pid is gone. tap back ←  to pick a different session.";
         setStatus("err");
@@ -5098,6 +5103,7 @@ footer button.send {
       }
       if (!resp.ok) { setStatus("err"); return; }
       const m = await resp.json();
+      if (sid !== attachedSid) return;   // switched away during json() → don't ingest into the new session
       claudeIdle = m.claude_idle === true;
       setStatus("ok"); setReady(m.claude_idle); updateAutoload();
       const entries = m.transcript || [];
@@ -5122,7 +5128,7 @@ footer button.send {
       setStatus("err");
     } finally {
       polling = false;
-      if (isPaused) {}
+      if (isPaused || sessionGone) {}
       else if (Date.now() > activityDeadline) setPaused(true, "timeout");
       else if (attachedSid) schedulePoll(claudeIdle ? IDLE_POLL_INTERVAL_MS : POLL_INTERVAL_MS);
     }
