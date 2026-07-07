@@ -1315,7 +1315,7 @@ _PID_START_TTL = 4.0
 
 
 def _pid_start_cached(pid: int) -> float:
-    now = time.monotonic()
+    now = _time.monotonic()
     c = _PID_START_CACHE.get(pid)
     if c and now - c[1] < _PID_START_TTL:
         return c[0]
