@@ -1750,10 +1750,15 @@ def _is_auto_injected(e: dict) -> bool:
 
 
 def _collapse_sys_brief(new_content):
-    """Collapse a brief-mode System msg body to a simple head+tail blurb."""
+    """Collapse a System msg body (watcher ticks, task-notifications, command
+    noise) to a head+tail blurb — used in BOTH brief and medium. Leaves any
+    tool_use/tool_result content untouched so medium still shows those in full."""
     if isinstance(new_content, str):
         return _head_tail_trunc(new_content, SYS_BRIEF_BUDGET)
     if isinstance(new_content, list):
+        if any(isinstance(p, dict) and p.get("type") not in ("text", None)
+               for p in new_content):
+            return new_content   # has tool_use/tool_result → don't collapse
         joined = "\n".join(
             p.get("text", "") for p in new_content
             if isinstance(p, dict) and p.get("type") == "text")
@@ -1955,6 +1960,11 @@ def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
                     trimmed["message"]["content"])
         elif mode == "medium":
             trimmed = _trim_medium(e)
+            # Long System msgs (watcher ticks etc.) get head+tail truncated in
+            # medium too; tool_use/tool_result stay full (handled inside).
+            if trimmed and t == "user" and (_is_auto_injected(e) or _is_system_user_entry(e)):
+                trimmed["message"]["content"] = _collapse_sys_brief(
+                    trimmed["message"]["content"])
         else:
             trimmed = _trim_all(e)
         if trimmed:
