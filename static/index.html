@@ -2037,11 +2037,12 @@ footer button.send {
     const single = new Set(tabs.map(t => t.window_index || 0)).size <= 1;
     switchMenu.innerHTML = "";
     for (const t of tabs) {
+      if (!t.sid) continue;                     // no sid → not enterable, skip
       const wt = single ? `t${(t.tab_index || 0) + 1}`
         : `w${(t.window_index || 0) + 1}t${(t.tab_index || 0) + 1}`;
       const b = document.createElement("button");
       b.className = "sw-item" + (t.sid === attachedSid ? " current" : "");
-      b.textContent = `${wt} · ${t.name || ("[" + t.sid.slice(0, 4) + "]")}`;
+      b.textContent = `${wt} · [${t.sid.slice(0, 4)}]${t.name ? " · " + t.name : ""}`;
       b.addEventListener("click", () => {
         hideSwitchMenu();
         if (t.sid !== attachedSid) enterTranscript(t.sid, t.name || "");
@@ -4157,7 +4158,8 @@ footer button.send {
     attachedSid = sid;
     attachedShort = (sid || "").slice(0, 4);
     setSessionHash(sid);
-    metaEl.textContent = label || sid.slice(0, 8);
+    metaEl.textContent = sid;          // session-id (CSS ellipsis-truncates when long)
+    metaEl.title = sid;                // full id on hover
     entryCache = []; lastIdx = null; earliestIdxLoaded = null; hasMoreHistory = false;
     claudeIdle = false; isPaused = false; sessionGone = false;
     warnEl.classList.remove("show");   // clear any stale pid-gone/mismatch banner
