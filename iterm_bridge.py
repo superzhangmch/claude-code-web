@@ -25,6 +25,20 @@ async def _gv(session, var, timeout=5):
         return None
 
 
+async def _close_conn(old, current) -> None:
+    """Close a superseded iTerm2 connection so its websocket/background task
+    doesn't leak (enumeration builds a fresh connection each call). Guarded —
+    iterm2's close API/behaviour varies across versions."""
+    if old is None or old is current:
+        return
+    try:
+        close = getattr(old, "async_close", None)
+        if close:
+            await asyncio.wait_for(close(), _RPC_TIMEOUT)
+    except Exception:
+        pass
+
+
 @dataclass
 class ClaudeSessionRef:
     iterm_session_id: str
@@ -87,6 +101,7 @@ class ItermBridge:
         triggered by user actions (attach / sessions list / resume / new tab),
         so the extra connect (~100-200 ms) is fine here."""
         async with self._lock:
+            old = self.connection
             try:
                 self.connection = await asyncio.wait_for(
                     iterm2.Connection.async_create(), _RPC_TIMEOUT)
@@ -99,6 +114,7 @@ class ItermBridge:
             except Exception:
                 self.connection = None
                 self.app = None
+            await _close_conn(old, self.connection)   # don't leak the previous websocket
         if self.app is None:
             return []
         procs = await asyncio.to_thread(_claude_procs_by_tty)   # ps off the loop
@@ -141,6 +157,7 @@ class ItermBridge:
         as list_claude_tabs. Each entry: window/tab index, session id, name,
         tty, and whether a foreground claude is running on it."""
         async with self._lock:
+            old = self.connection
             try:
                 self.connection = await asyncio.wait_for(
                     iterm2.Connection.async_create(), _RPC_TIMEOUT)
@@ -150,6 +167,7 @@ class ItermBridge:
             except Exception:
                 self.connection = None
                 self.app = None
+            await _close_conn(old, self.connection)   # don't leak the previous websocket
         if self.app is None:
             return []
         # Flatten to (wi, ti, session), then fetch tty+name for ALL sessions
