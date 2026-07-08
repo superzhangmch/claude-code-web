@@ -23,6 +23,23 @@ Output: one JSON object:
 import argparse, json, os, re, sys, time, urllib.request, urllib.error
 
 
+def _known_hosts():
+    """cc-web hosts to auto-search when --host is omitted (the "sid → url" step).
+    Read from $CC_WEB_HOSTS (comma-separated) or a `hosts=` line in
+    ~/.claude/cc_web.conf — kept OUT of the committed code so no private IPs
+    live in the repo. Returns [] if unconfigured (then only local is tried)."""
+    raw = os.environ.get("CC_WEB_HOSTS", "")
+    if not raw:
+        try:
+            for line in open(os.path.expanduser("~/.claude/cc_web.conf")):
+                if line.strip().startswith("hosts="):
+                    raw = line.split("=", 1)[1].strip()
+                    break
+        except Exception:
+            pass
+    return [h.strip() for h in raw.split(",") if h.strip()]
+
+
 def _conf_token():
     p = os.path.expanduser("~/.claude/cc_web.conf")
     try:
@@ -125,16 +142,31 @@ def main():
     ap.add_argument("message", nargs="?", default=None)
     a = ap.parse_args()
 
-    host = a.host or _local_ip()
     token = a.token or _conf_token()
-    base = f"http://{host}:8765"
 
-    # Expand a short/prefix --to into the full session id (unique match only).
-    full, rnote = _resolve_to(base, token, a.to)
+    # Host resolution (the "sid → url" step). Explicit --host wins; otherwise
+    # auto-locate the session across known hosts (local first), so the caller can
+    # pass just a session id without knowing which machine it's on.
+    if a.host:
+        candidates = [a.host]
+    else:
+        local = _local_ip()
+        candidates = [local] + [h for h in _known_hosts() if h != local]
+    host = full = None
+    tried = []
+    for h in candidates:
+        f_id, rnote = _resolve_to(f"http://{h}:8765", token, a.to)
+        if f_id:
+            host, full = h, f_id
+            break
+        tried.append(f"{h}: {rnote}")
     if full is None:
-        print(json.dumps({"status": "error", "note": rnote}, ensure_ascii=False))
+        print(json.dumps({"status": "error",
+                          "note": "session not found on any known host — " + " | ".join(tried)},
+                         ensure_ascii=False))
         return
     a.to = full
+    base = f"http://{host}:8765"
 
     def state(since=None):
         url = (f"{base}/api/state?claude_session_id={a.to}"
@@ -152,7 +184,7 @@ def main():
     baseline = st0.get("since_idx", 0)
 
     if a.no_send:
-        print(json.dumps({"status": "peek", "idle": st0.get("claude_idle"),
+        print(json.dumps({"status": "peek", "host": host, "idle": st0.get("claude_idle"),
                           "pending_confirm": st0.get("pending_confirm"),
                           "since_idx": baseline,
                           "reply": _assistant_text(st0)}, ensure_ascii=False))
@@ -197,8 +229,8 @@ def main():
                 status = "maybe_error" if _ERR_RE.search(reply[-400:]) else "done"
                 note = ("looks like an API/error state — consider re-sending '继续'"
                         if status == "maybe_error" else "")
-                print(json.dumps({"status": status, "reply": reply, "idle": True,
-                                  "pending_confirm": None,
+                print(json.dumps({"status": status, "host": host, "reply": reply,
+                                  "idle": True, "pending_confirm": None,
                                   "elapsed": round(time.time() - t0, 1),
                                   "since_idx": st.get("since_idx", baseline),
                                   "note": note}, ensure_ascii=False))
