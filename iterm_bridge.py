@@ -14,7 +14,7 @@ import iterm2
 
 # iTerm2 RPC hard timeout: a hung/half-open websocket await must never wedge the
 # asyncio event loop (which would freeze every concurrent request).
-_RPC_TIMEOUT = 8
+_RPC_TIMEOUT = 5
 
 
 async def _gv(session, var, timeout=5):
@@ -212,15 +212,18 @@ class ItermBridge:
         if session is None:
             return False
         async with self._send_lock:
-            if text.endswith("\r"):
-                body = text[:-1]
-                if body:
-                    await session.async_send_text(body)
-                    await asyncio.sleep(0.1)
-                await session.async_send_text("\r")
-                await asyncio.sleep(0.4)  # let Ink process submit + clear input
-            else:
-                await session.async_send_text(text)
+            try:
+                if text.endswith("\r"):
+                    body = text[:-1]
+                    if body:
+                        await asyncio.wait_for(session.async_send_text(body), _RPC_TIMEOUT)
+                        await asyncio.sleep(0.1)
+                    await asyncio.wait_for(session.async_send_text("\r"), _RPC_TIMEOUT)
+                    await asyncio.sleep(0.4)  # let Ink process submit + clear input
+                else:
+                    await asyncio.wait_for(session.async_send_text(text), _RPC_TIMEOUT)
+            except Exception:
+                return False
         return True
 
     async def open_resume_claude_tab(self, cwd: str, session_id: str, label: str) -> Optional[str]:
@@ -431,7 +434,7 @@ _UI_NOISE_TOKENS = (
 
 async def _read_screen_lines(session) -> list[str]:
     try:
-        contents = await session.async_get_screen_contents()
+        contents = await asyncio.wait_for(session.async_get_screen_contents(), _RPC_TIMEOUT)
     except Exception:
         return []
     out = []

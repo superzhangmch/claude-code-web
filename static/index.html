@@ -1670,12 +1670,20 @@ footer button.send {
   function hideLogin() { loginEl.classList.remove("show"); }
 
   async function tryLogin(token) {
-    const resp = await fetch("/api/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token }),
-    });
-    return resp.ok;
+    // Timed out / unreachable → treat as "not logged in" and show the login
+    // form, rather than hanging on a blank page forever.
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 12000);
+      const resp = await fetch("/api/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token }),
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      return resp.ok;
+    } catch { return false; }
   }
 
   loginForm.addEventListener("submit", async (e) => {
@@ -1705,21 +1713,39 @@ footer button.send {
   }
   renderTraffic();
 
+  // Every request gets a timeout via AbortController. Without it, a slow/hung
+  // server (e.g. a wedged iTerm2 bridge call, or a network stall) left the page
+  // awaiting forever with a blank/"loading…" screen — the "半天打不开" symptom.
+  // On timeout the fetch rejects with AbortError so callers can show a retry
+  // instead of hanging. Override per-call with opts.timeoutMs (attach/resume
+  // touch iTerm2 and legitimately need longer).
+  const DEFAULT_TIMEOUT_MS = 12000;
   async function authedFetch(url, opts = {}) {
     opts.headers = { ...(opts.headers || {}), "Authorization": "Bearer " + authToken };
     opts.cache = "no-store";
     const reqBytes = opts.body ? (typeof opts.body === "string" ? new Blob([opts.body]).size : 0) : 0;
-    const resp = await fetch(url, opts);
-    if (resp.status === 401) {
-      authToken = ""; localStorage.removeItem(TOKEN_KEY); showLogin(false);
+    let timer = null;
+    if (!opts.signal) {
+      const ctrl = new AbortController();
+      opts.signal = ctrl.signal;
+      const ms = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
+      timer = setTimeout(() => ctrl.abort(new DOMException("timeout", "AbortError")), ms);
     }
     try {
-      const buf = await resp.clone().arrayBuffer();
-      traffic.in_bytes += reqBytes;
-      traffic.out_bytes += buf.byteLength;
-      renderTraffic();
-    } catch {}
-    return resp;
+      const resp = await fetch(url, opts);
+      if (resp.status === 401) {
+        authToken = ""; localStorage.removeItem(TOKEN_KEY); showLogin(false);
+      }
+      try {
+        const buf = await resp.clone().arrayBuffer();
+        traffic.in_bytes += reqBytes;
+        traffic.out_bytes += buf.byteLength;
+        renderTraffic();
+      } catch {}
+      return resp;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   // ---------- markdown rendering ----------
@@ -3549,11 +3575,23 @@ footer button.send {
     }
   }
 
+  function _pickerError(msg) {
+    pickerListEl.innerHTML = "<div style='color:#ff6a6a;font-size:12px;padding:20px;text-align:center'>"
+      + msg + " —— <a href='#' id='picker-retry' style='color:var(--accent)'>点此重试</a></div>";
+    const rt = document.getElementById("picker-retry");
+    if (rt) rt.onclick = (ev) => { ev.preventDefault(); refreshPicker(); };
+  }
   async function refreshPicker() {
     pickerListEl.innerHTML = "<div style='color:var(--muted);font-size:12px;padding:20px;text-align:center'>loading…</div>";
-    const resp = await authedFetch("/api/sessions?card=" + cardMode);
+    let resp;
+    try {
+      resp = await authedFetch("/api/sessions?card=" + cardMode);
+    } catch (e) {
+      _pickerError(e && e.name === "AbortError" ? "加载超时" : "加载失败");
+      return;
+    }
     if (!resp.ok) {
-      pickerListEl.innerHTML = "<div style='color:#ff6a6a;font-size:12px'>failed to load</div>";
+      _pickerError("加载失败 (" + resp.status + ")");
       return;
     }
     const data = await resp.json();
@@ -4076,10 +4114,12 @@ footer button.send {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ claude_session_id: sid }),
+        timeoutMs: 20000,  // attach resolves via iTerm2 (list tabs, read screens)
       });
     } catch (e) {
       hideLoading();
-      alert("Attach failed: " + e);
+      alert(e && e.name === "AbortError"
+        ? "Attach 超时(iTerm2 可能无响应)—— 请重试" : "Attach failed: " + e);
       return;
     }
     if (!resp.ok) {
@@ -4112,11 +4152,19 @@ footer button.send {
         : "No iTerm2 tab matches this session's cwd — so it isn't currently running.";
       if (confirm(`${why}${cwdHint}\n\nResume it on iTerm2 (opens a new tab + \`claude --resume\`)?`)) {
         showLoading("Resuming… (opening tab + waiting for claude)");
-        const r = await authedFetch("/api/resume", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ claude_session_id: sid }),
-        });
+        let r;
+        try {
+          r = await authedFetch("/api/resume", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ claude_session_id: sid }),
+            timeoutMs: 40000,  // opens a tab + waits for claude to boot
+          });
+        } catch (e) {
+          hideLoading();
+          alert(e && e.name === "AbortError" ? "Resume 超时 —— 请重试" : "Resume failed: " + e);
+          return;
+        }
         hideLoading();
         if (!r.ok) { alert("Resume failed: " + await r.text()); return; }
         const rd = await r.json();
