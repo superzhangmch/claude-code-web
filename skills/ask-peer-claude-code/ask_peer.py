@@ -105,6 +105,25 @@ def _resolve_to(base, token, to):
     return None, f"'{to}' is ambiguous — matches {hits}; use a longer id"
 
 
+def _user_texts(state):
+    """User-message texts from the transcript delta — used to confirm our sent
+    message actually landed as a prompt in the peer's transcript (触达)."""
+    out = []
+    for e in state.get("transcript", []):
+        if e.get("_system"):
+            continue
+        m = e.get("message") or {}
+        if (e.get("type") or m.get("role")) != "user":
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            out.append(c)
+        elif isinstance(c, list):
+            out.append(" ".join(b.get("text", "") for b in c
+                                 if isinstance(b, dict) and b.get("type") == "text"))
+    return out
+
+
 def _assistant_text(state):
     """Concatenate assistant (non-system) text from the transcript delta."""
     out = []
@@ -138,6 +157,11 @@ def main():
     ap.add_argument("--mode", default="brief")
     ap.add_argument("--rounds", type=int, default=4)
     ap.add_argument("--no-send", action="store_true")
+    ap.add_argument("--no-wait", action="store_true",
+                    help="fire-and-confirm: send, confirm delivery (message landed "
+                         "in the peer's transcript), return WITHOUT waiting for a reply")
+    ap.add_argument("--deliver-timeout", type=float, default=20,
+                    help="how long to wait for delivery confirmation in --no-wait mode")
     ap.add_argument("--raw", action="store_true")
     ap.add_argument("message", nargs="?", default=None)
     a = ap.parse_args()
@@ -199,6 +223,36 @@ def main():
 
     _req("POST", f"{base}/api/input", token,
          {"claude_session_id": a.to, "text": msg}, timeout=30)
+
+    # Fire-and-confirm (e.g. delegating a task): return once the message has
+    # landed in the peer's transcript — don't block for the reply. If the peer
+    # is busy the prompt is queued and shows up once its current turn ends, so
+    # we report peer_idle to explain a not-yet-confirmed delivery.
+    if a.no_wait:
+        needle = msg.strip()[:48]
+        t0 = time.time()
+        delivered = False
+        last_idle = st0.get("claude_idle")
+        while time.time() - t0 < a.deliver_timeout:
+            time.sleep(a.interval)
+            try:
+                st = state(since=baseline)
+            except Exception:
+                continue
+            last_idle = st.get("claude_idle")
+            if any(needle in u for u in _user_texts(st)):
+                delivered = True
+                break
+        print(json.dumps({"status": "sent", "host": host, "delivered": delivered,
+                          "peer_idle": last_idle,
+                          "elapsed": round(time.time() - t0, 1),
+                          "note": ("message landed in the peer's transcript"
+                                   if delivered else
+                                   "POST accepted (text is in the peer's tab); not yet "
+                                   "seen in transcript — likely queued because the peer "
+                                   "is busy, it will be picked up when its turn ends")},
+                         ensure_ascii=False))
+        return
 
     t0 = time.time()
     idle_streak = 0

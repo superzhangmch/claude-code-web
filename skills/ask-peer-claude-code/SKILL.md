@@ -36,17 +36,29 @@ session,也**不要"无缘无故"**找一个陌生 session 交流 —— 没有�
 - 想让对方以后能主动找你:在回复里带上你自己的 session id + host(用
   `my-session-id` skill 拿自己的 id)。
 
+## Two modes: wait-for-answer vs fire-and-confirm
+Pick based on whether you need the reply:
+- **等答案 (default)**: send, then poll until the peer's turn ends and return
+  its `reply`. Use when you need the result (a question / consult).
+- **只保证触达 (`--no-wait`)**: send, confirm the message **landed in the peer's
+  transcript**, and return immediately **without** waiting for the reply. Use for
+  **委派任务 / 通知 / hand-off** — you dispatched it and don't need to sit and wait.
+  Returns `delivered` (true = recorded as a prompt) + `peer_idle` (if the peer was
+  busy, delivery may be queued → `delivered:false` now, picked up when its turn ends;
+  the text is already in its tab regardless).
+
 ## The script
-`ask_peer.py` — sends, then polls the peer until its turn ends, prints JSON:
-`{status, reply, pending_confirm, idle, elapsed, since_idx, note}`
-where `status ∈ done | pending_confirm | timeout | maybe_error | peek`.
+`ask_peer.py` — prints one JSON object; `status ∈ done | pending_confirm |
+timeout | maybe_error | peek | sent`.
 
 **Prefer stdin for the message** (no shell-quoting pain, handles multi-line/code):
 
 ```bash
 PY=~/.claude/skills/ask-peer-claude-code/ask_peer.py
-# ask something and wait for the reply (host auto-located from the id):
+# ask & WAIT for the reply (host auto-located from the id):
 echo "你现在在干啥?进度如何?" | python3 "$PY" --to <PEER_SID> --from <MY_SID>
+# DELEGATE a task — just confirm it's delivered, don't wait for the result:
+echo "帮我把 X 跑一下,做完自己收尾" | python3 "$PY" --to <PEER_SID> --from <MY_SID> --no-wait
 # peek only (what is it doing right now? — no message sent):
 python3 "$PY" --to <PEER_SID> --no-send
 # pin a host explicitly if you already know it:
@@ -62,9 +74,13 @@ hosts configured in `~/.claude/cc_web.conf` (`hosts=<ip1>,<ip2>`) or
 `--token` (default: from `~/.claude/cc_web.conf`) ·
 `--from` your own session id (added as a source prefix so the peer knows it's a
 peer, not a human) · `--timeout` sec (default 480) · `--mode brief|medium` ·
-`--no-send` peek · `--raw` send verbatim (use to answer a pending prompt/choice).
+`--no-send` peek · `--no-wait` fire-and-confirm delivery (task delegation),
+`--deliver-timeout` sec (default 20) · `--raw` send verbatim (answer a prompt/choice).
 
 ## Handling the result `status`
+- **sent** (`--no-wait`) → delivered. `delivered:true` = the peer recorded it as a
+  prompt; `false` + `peer_idle:false` = it's queued behind the peer's current turn
+  (still in its tab, will run after). You're done — don't wait around.
 - **done** → `reply` is the peer's answer. Continue your reasoning; ask again if needed.
 - **pending_confirm** → the peer is asking something (a choice menu or free text).
   Decide the answer, then send it with `--raw` (e.g. the choice number, or text).
