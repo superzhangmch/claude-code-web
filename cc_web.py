@@ -202,67 +202,109 @@ def extract_recent_context(
     dropping responses, accumulating by `_round_weight` until the budget is hit
     (so trivial turns don't crowd out informative ones), capped at `max_rounds`.
     Always also returns first_user_msg/ts for the header preview."""
-    exchanges: list[dict] = []  # [{user: {text, ts}, response: {text, ts}|None}]
-    pending_response_text: str = ""
-    pending_response_ts: str = ""
-    last_cwd: Optional[str] = None
+    exchanges, last_cwd = _scan_exchanges(_iter_jsonl_file(jsonl_path), max_user_chars, max_response_chars)
+    return _finish_ctx(exchanges, last_cwd, exchanges, n_exchanges, weighted_target, max_rounds)
+
+
+def _iter_jsonl_file(jsonl_path: Path):
+    """Yield parsed JSON objects from a JSONL file, one per line."""
     try:
         with jsonl_path.open("r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 try:
-                    e = json.loads(line)
+                    yield json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                cwd = e.get("cwd")
-                if cwd:
-                    last_cwd = cwd  # most-recent cwd, captured in this one pass
-                t = e.get("type")
-                if t == "user" and not (e.get("isMeta") or e.get("isSidechain") or e.get("toolUseResult")):
-                    msg = e.get("message") or {}
-                    content = msg.get("content") if isinstance(msg, dict) else None
-                    text = ""
-                    if isinstance(content, str) and content.strip():
-                        text = content.strip()
-                    elif isinstance(content, list):
-                        for p in content:
-                            if isinstance(p, dict) and p.get("type") == "text" and p.get("text"):
-                                text = p["text"].strip()
-                                break
-                    if not text or _is_command_noise(text):
-                        continue
-                    # Close out the previous exchange's response (if any) before starting new one
-                    if exchanges and exchanges[-1]["response"] is None and pending_response_text:
-                        exchanges[-1]["response"] = _trunc_msg(pending_response_text, pending_response_ts, max_response_chars)
-                    pending_response_text = ""
-                    pending_response_ts = ""
-                    exchanges.append({
-                        "user": {"text": text[:max_user_chars] + ("…" if len(text) > max_user_chars else ""),
-                                  "ts": e.get("timestamp", "") or ""},
-                        "response": None,
-                    })
-                elif t == "assistant" and not e.get("isSidechain"):
-                    msg = e.get("message") or {}
-                    content = msg.get("content") if isinstance(msg, dict) else None
-                    text = ""
-                    if isinstance(content, str) and content.strip():
-                        text = content.strip()
-                    elif isinstance(content, list):
-                        parts = []
-                        for p in content:
-                            if isinstance(p, dict) and p.get("type") == "text" and p.get("text"):
-                                parts.append(p["text"])
-                        text = "\n\n".join(parts).strip()
-                    if text:
-                        # Track the latest assistant text reply since the last user msg.
-                        # When next user msg arrives, this becomes that exchange's response.
-                        pending_response_text = text
-                        pending_response_ts = e.get("timestamp", "") or ""
-    except Exception:
-        pass
+    except OSError:
+        return
+
+
+def _iter_jsonl_bytes(raw: bytes, drop_first: bool, drop_last: bool):
+    """Yield parsed JSON objects from a raw byte WINDOW of a JSONL file.
+    `drop_first`/`drop_last` discard the leading/trailing fragment, which is a
+    partial (broken) line when the window began/ended mid-line — i.e. after a
+    tail seek (drop_first) or a head-only read (drop_last)."""
+    lines = raw.decode("utf-8", "replace").split("\n")
+    if drop_first and lines:
+        lines = lines[1:]
+    if drop_last and lines:
+        lines = lines[:-1]
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+
+def _scan_exchanges(entries, max_user_chars: int, max_response_chars: int):
+    """Walk parsed JSONL entries → (exchanges, last_cwd). Each exchange pairs a
+    real user message with the LAST assistant text before the next user msg
+    (what the user actually saw as 'the reply')."""
+    exchanges: list[dict] = []  # [{user: {text, ts}, response: {text, ts}|None}]
+    pending_response_text: str = ""
+    pending_response_ts: str = ""
+    last_cwd: Optional[str] = None
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        cwd = e.get("cwd")
+        if cwd:
+            last_cwd = cwd  # most-recent cwd, captured in this one pass
+        t = e.get("type")
+        if t == "user" and not (e.get("isMeta") or e.get("isSidechain") or e.get("toolUseResult")):
+            msg = e.get("message") or {}
+            content = msg.get("content") if isinstance(msg, dict) else None
+            text = ""
+            if isinstance(content, str) and content.strip():
+                text = content.strip()
+            elif isinstance(content, list):
+                for p in content:
+                    if isinstance(p, dict) and p.get("type") == "text" and p.get("text"):
+                        text = p["text"].strip()
+                        break
+            if not text or _is_command_noise(text):
+                continue
+            # Close out the previous exchange's response (if any) before starting new one
+            if exchanges and exchanges[-1]["response"] is None and pending_response_text:
+                exchanges[-1]["response"] = _trunc_msg(pending_response_text, pending_response_ts, max_response_chars)
+            pending_response_text = ""
+            pending_response_ts = ""
+            exchanges.append({
+                "user": {"text": text[:max_user_chars] + ("…" if len(text) > max_user_chars else ""),
+                          "ts": e.get("timestamp", "") or ""},
+                "response": None,
+            })
+        elif t == "assistant" and not e.get("isSidechain"):
+            msg = e.get("message") or {}
+            content = msg.get("content") if isinstance(msg, dict) else None
+            text = ""
+            if isinstance(content, str) and content.strip():
+                text = content.strip()
+            elif isinstance(content, list):
+                parts = []
+                for p in content:
+                    if isinstance(p, dict) and p.get("type") == "text" and p.get("text"):
+                        parts.append(p["text"])
+                text = "\n\n".join(parts).strip()
+            if text:
+                # Track the latest assistant text reply since the last user msg.
+                # When next user msg arrives, this becomes that exchange's response.
+                pending_response_text = text
+                pending_response_ts = e.get("timestamp", "") or ""
     # Close out trailing response (if claude already replied to the latest user msg)
     if exchanges and exchanges[-1]["response"] is None and pending_response_text:
         exchanges[-1]["response"] = _trunc_msg(pending_response_text, pending_response_ts, max_response_chars)
+    return exchanges, last_cwd
 
+
+def _finish_ctx(exchanges, last_cwd, first_exchanges, n_exchanges, weighted_target, max_rounds):
+    """Shape scanned exchanges into the extract_recent_context return dict.
+    `first_exchanges` supplies first_user_msg/ts — it's a SEPARATE list from
+    `exchanges` in the head+tail path (first msg comes from the head window,
+    recent exchanges from the tail)."""
     if weighted_target is not None:
         picked: list[dict] = []
         total = 0.0
@@ -275,13 +317,103 @@ def extract_recent_context(
         out_exchanges = picked
     else:
         out_exchanges = exchanges[-n_exchanges:] if n_exchanges > 0 else exchanges
-
+    fe = first_exchanges or exchanges
     return {
         "exchanges": out_exchanges,
-        "first_user_msg": exchanges[0]["user"]["text"] if exchanges else "",
-        "first_ts": exchanges[0]["user"]["ts"] if exchanges else "",
+        "first_user_msg": fe[0]["user"]["text"] if fe else "",
+        "first_ts": fe[0]["user"]["ts"] if fe else "",
         "project_path": last_cwd or "",
     }
+
+
+# Big transcripts (100 MB+) must not be read whole just to preview them. All
+# non-search consumers only need the FIRST user message (head) + the RECENT
+# exchanges/cwd (tail); the middle is never displayed.
+#
+# Strategy: adaptive doubling. Start with a SMALL read and grow it (×2) only if
+# it didn't yield enough complete lines/exchanges — so normal sessions cost a
+# tiny read, and only pathological giant-line sessions read more. Hard-capped
+# well below any full-file read.
+_CTX_SMALL_FILE = 4_000_000     # ≤ this → exact full read (cheap, identical behaviour)
+_CTX_READ_START = 128_000       # first adaptive read (doubles if it's not enough)
+_CTX_READ_CAP = 16_000_000      # never read more than this from one end
+
+
+def _tail_exchanges(path: Path, size: int, want: int,
+                    max_user_chars: int, max_response_chars: int):
+    """Read the file TAIL, growing the window until it yields >= `want`
+    exchanges (or we hit BOF / the cap). Each step reads only the NEW earlier
+    segment and PREPENDS it — the already-read bytes are never re-read from
+    disk. Returns (exchanges, last_cwd)."""
+    buf = b""
+    have_from = size            # buf currently holds bytes [have_from, size)
+    to_read = _CTX_READ_START
+    try:
+        with path.open("rb") as f:
+            while True:
+                new_from = max(0, have_from - to_read)
+                f.seek(new_from)
+                buf = f.read(have_from - new_from) + buf   # prepend the earlier chunk
+                have_from = new_from
+                got = size - have_from                     # total bytes read so far
+                # buf starts mid-line unless we reached BOF → drop leading fragment
+                exs, last_cwd = _scan_exchanges(
+                    _iter_jsonl_bytes(buf, drop_first=(have_from > 0), drop_last=False),
+                    max_user_chars, max_response_chars)
+                if len(exs) >= want or have_from == 0 or got >= _CTX_READ_CAP:
+                    return exs, last_cwd
+                to_read = got      # next read = current total → the window doubles
+    except OSError:
+        return [], None
+
+
+def _head_exchanges(path: Path, size: int,
+                    max_user_chars: int, max_response_chars: int):
+    """Read the file HEAD, growing until it yields >= 1 exchange (the first user
+    message) or we hit EOF / the cap. Each step reads only the NEXT segment and
+    APPENDS it (the file position advances) — no bytes are re-read."""
+    buf = b""
+    to_read = _CTX_READ_START
+    try:
+        with path.open("rb") as f:
+            while True:
+                chunk = f.read(to_read)      # continues from current position
+                buf += chunk
+                eof = len(chunk) < to_read   # short read → reached EOF
+                # drop the trailing (maybe cut-off) fragment unless at EOF
+                exs, _ = _scan_exchanges(
+                    _iter_jsonl_bytes(buf, drop_first=False, drop_last=not eof),
+                    max_user_chars, max_response_chars)
+                if exs or eof or len(buf) >= _CTX_READ_CAP:
+                    return exs
+                to_read = len(buf)   # next read = current total → the window doubles
+    except OSError:
+        return []
+
+
+def extract_recent_context_ht(jsonl_path: Path, n_exchanges: int = 3,
+                              max_user_chars: int = 100, max_response_chars: int = 200,
+                              weighted_target: Optional[float] = None,
+                              max_rounds: int = 12) -> dict:
+    """Same shape as extract_recent_context, but for LARGE files reads only the
+    HEAD (first user message) + TAIL (recent exchanges + cwd) via adaptive
+    doubling, skipping the middle. Small files fall back to an exact full read."""
+    try:
+        size = jsonl_path.stat().st_size
+    except OSError:
+        return {"exchanges": [], "first_user_msg": "", "first_ts": "", "project_path": ""}
+    if size <= _CTX_SMALL_FILE:
+        return extract_recent_context(jsonl_path, n_exchanges=n_exchanges,
+                                      max_user_chars=max_user_chars,
+                                      max_response_chars=max_response_chars,
+                                      weighted_target=weighted_target, max_rounds=max_rounds)
+    # how many recent exchanges the caller could possibly need. Cover max_rounds
+    # unconditionally: _session_views calls with n_exchanges=0 then does its OWN
+    # weighted pick over up to max_rounds, so the tail must hold that many.
+    want = max(n_exchanges, max_rounds, 3)
+    tail_exs, last_cwd = _tail_exchanges(jsonl_path, size, want, max_user_chars, max_response_chars)
+    head_exs = _head_exchanges(jsonl_path, size, max_user_chars, max_response_chars)
+    return _finish_ctx(tail_exs, last_cwd, head_exs, n_exchanges, weighted_target, max_rounds)
 
 
 def _trunc_msg(text: str, ts: str, max_chars: int) -> dict:
@@ -299,18 +431,25 @@ def _project_path_from_jsonl(path: Path) -> Optional[str]:
     A session's cwd can change over its lifetime (cd into another repo,
     resume in a different dir, etc.), so the first cwd is not reliable —
     the live iTerm tab sits in the *current* cwd, which is the last one
-    recorded. Returns that."""
+    recorded. Returns that.
+
+    Reads only the file TAIL — the last cwd is at the end, so scanning a
+    100 MB+ transcript from the top would be pointless (this is on the attach
+    path)."""
+    # cwd is recorded on essentially every entry, so the LAST cwd is at EOF —
+    # read only a bounded tail instead of the whole (100 MB+) transcript.
+    TAIL = 2_000_000
     last = None
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                cwd = e.get("cwd")
-                if cwd:
-                    last = cwd
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            frm = max(0, size - TAIL)
+            f.seek(frm)
+            raw = f.read()
+        for e in _iter_jsonl_bytes(raw, drop_first=(frm > 0), drop_last=False):
+            cwd = e.get("cwd")
+            if cwd:
+                last = cwd
     except OSError:
         pass
     return last
@@ -320,19 +459,27 @@ def _project_cwds_from_jsonl(path: Path) -> set[str]:
     """Every distinct cwd the session has ever recorded. Used to match
     candidate iTerm tabs: the live tab's cwd should be one of these even
     if the session moved between directories during its life."""
+    # Bounded head+tail read instead of the whole (100 MB+) transcript: the
+    # session's starting cwd is in the head, its current/recent cwds in the
+    # tail. A cwd only ever visited in the untouched middle is not captured —
+    # acceptable, since the live tab we're matching sits in the current cwd.
+    HEAD = 256_000
+    TAIL = 2_000_000
     cwds: set[str] = set()
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                cwd = e.get("cwd")
-                if cwd:
-                    cwds.add(cwd)
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            head = f.read(HEAD)
+            frm = max(HEAD, size - TAIL)
+            f.seek(frm)
+            tail = f.read()
     except OSError:
-        pass
+        return cwds
+    for raw, drop in ((head, False), (tail, frm > 0)):
+        for e in _iter_jsonl_bytes(raw, drop_first=drop, drop_last=(raw is head and size > HEAD)):
+            cwd = e.get("cwd")
+            if cwd:
+                cwds.add(cwd)
     return cwds
 
 
@@ -430,13 +577,20 @@ def pick_jsonl_fingerprints(jsonl_path: Path, k: int = FINGERPRINT_COUNT) -> lis
     weight 1.0. Returns up to ~k entries (will fill more if user msgs exist)."""
     user_lines: list[str] = []
     asst_lines: list[str] = []
+    # We only keep the most-recent (tail) distinct lines below, and they're
+    # matched against the tab's CURRENT screen — so read a bounded tail, never
+    # the whole (100 MB+) transcript.
+    TAIL = 4_000_000
     try:
-        with jsonl_path.open("r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+        size = jsonl_path.stat().st_size
+        with jsonl_path.open("rb") as f:
+            frm = max(0, size - TAIL)
+            f.seek(frm)
+            raw = f.read()
+    except OSError:
+        return []
+    try:
+        for e in _iter_jsonl_bytes(raw, drop_first=(frm > 0), drop_last=False):
                 t = e.get("type")
                 if t not in ("user", "assistant"):
                     continue
@@ -453,10 +607,10 @@ def pick_jsonl_fingerprints(jsonl_path: Path, k: int = FINGERPRINT_COUNT) -> lis
                         if isinstance(p, dict) and p.get("type") == "text" and p.get("text"):
                             texts.append(p["text"])
                 for t_text in texts:
-                    for raw in t_text.splitlines():
-                        if _is_command_noise(raw):
+                    for rawline in t_text.splitlines():
+                        if _is_command_noise(rawline):
                             continue
-                        s = _normalize_for_match(raw)
+                        s = _normalize_for_match(rawline)
                         if len(s) < 15 if is_user else len(s) < 25:
                             continue
                         if any(tok in s for tok in _NOISE_TOKENS):
@@ -670,7 +824,7 @@ async def llm_pick_candidate(jsonl_path: Path, scored: list[dict]) -> dict:
         log.info("llm_pick: cache hit (age=%.1fs)", now - cached[0])
         return cached[1]
 
-    ctx = extract_recent_context(jsonl_path, n_exchanges=5,
+    ctx = extract_recent_context_ht(jsonl_path, n_exchanges=5,
                                  max_user_chars=400, max_response_chars=500)
     exchanges = ctx.get("exchanges") or []
 
@@ -1358,11 +1512,106 @@ def verify_binding(b: Binding) -> bool:
 
 # ---------- JSONL cache (delta reads) ----------
 
+def _is_round_start_entry(e) -> bool:
+    """A user message that begins a new 'round' (mirrors the round logic
+    _last_n_rounds and the transcript numbering rely on)."""
+    if not isinstance(e, dict):
+        return False
+    if e.get("type") != "user" or e.get("isMeta") or e.get("isSidechain") or e.get("toolUseResult"):
+        return False
+    msg = e.get("message") or {}
+    c = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(c, str):
+        return bool(c.strip())
+    if isinstance(c, list):
+        return any(isinstance(p, dict) and p.get("type") == "text" and p.get("text") for p in c)
+    return False
+
+
+def _number_entries(entries: list[dict], start_idx: int, start_round: int):
+    """Assign sequential _idx from start_idx and cumulative _round (bumped on
+    each round-start) — the old from-1 scheme, but from an arbitrary base."""
+    idx = start_idx
+    rnd = start_round
+    for e in entries:
+        e["_idx"] = idx
+        idx += 1
+        if _is_round_start_entry(e):
+            rnd += 1
+        e["_round"] = rnd
+    return idx, rnd
+
+
+def _parse_window_bytes(raw: bytes, frm: int):
+    """Parse a byte window read starting at file offset `frm`. If frm>0 the
+    leading fragment is a partial line → dropped. Returns (entries, anchor_off)
+    where anchor_off is the byte offset of the first COMPLETE line kept."""
+    if frm > 0:
+        nl = raw.find(b"\n")
+        if nl < 0:
+            return [], frm + len(raw)      # window landed inside one huge line
+        body = raw[nl + 1:]
+        anchor = frm + nl + 1
+    else:
+        body = raw
+        anchor = 0
+    entries: list[dict] = []
+    for line in body.split(b"\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries, anchor
+
+
+# Transcript window: we NEVER read a whole (100 MB+) transcript. Cold-open
+# tail-loads the last _JSONL_LOAD_ROUNDS rounds anchored at a byte offset, and
+# numbers entries from a big base so "load earlier" hands out base-1, base-2…
+# (always positive, still +1-contiguous so the client's gap detection holds).
+# load-earlier reads earlier bytes from disk on demand; nothing older is held
+# unless the user asks. Windows are tiny, so a generous session LRU is cheap.
+_JSONL_BASE = 1_000_000_000
+_JSONL_LOAD_ROUNDS = 8
+_JSONL_MAX_SESSIONS = 32
+
+
 class JsonlCache:
     def __init__(self) -> None:
         self._cache: dict[Path, dict] = {}
 
+    def _touch(self, path: Path) -> None:
+        if path in self._cache:                 # move to MRU end
+            self._cache[path] = self._cache.pop(path)
+
+    def _evict(self) -> None:
+        while len(self._cache) > _JSONL_MAX_SESSIONS:
+            del self._cache[next(iter(self._cache))]
+
+    def _grow_read(self, path: Path, upto: int, want_rounds: int):
+        """Read backward from byte `upto`, doubling, until >= want_rounds rounds
+        (or BOF / cap). Reads only NEW earlier bytes each step (prepend, never
+        re-read). Returns (entries, anchor_off)."""
+        buf = b""
+        have_from = upto
+        to_read = _CTX_READ_START
+        with path.open("rb") as f:
+            while True:
+                new_from = max(0, have_from - to_read)
+                f.seek(new_from)
+                buf = f.read(have_from - new_from) + buf
+                have_from = new_from
+                entries, anchor = _parse_window_bytes(buf, have_from)
+                rounds = sum(1 for e in entries if _is_round_start_entry(e))
+                if rounds >= want_rounds or have_from == 0 or (upto - have_from) >= _CTX_READ_CAP:
+                    return entries, anchor
+                to_read = upto - have_from       # next read = current total → window doubles
+
     def entries(self, path: Optional[Path]) -> list[dict]:
+        """Recent-window entries (cold tail-load, then incremental append).
+        Returns the loaded TAIL window — NOT the whole file."""
         if path is None:
             return []
         try:
@@ -1371,51 +1620,94 @@ class JsonlCache:
             self._cache.pop(path, None)
             return []
         c = self._cache.get(path)
-        if c is not None and c["size"] == st.st_size and c["mtime"] == st.st_mtime:
+        if c and c["size"] == st.st_size and c["mtime"] == st.st_mtime and c["ino"] == st.st_ino:
+            self._touch(path)
             return c["entries"]
-        if c is not None and (st.st_size < c["offset"] or c.get("ino") != st.st_ino):
-            c = None
-        start = c["offset"] if c else 0
-        entries = list(c["entries"]) if c else []
-        try:
-            with path.open("rb") as f:
-                f.seek(start)
-                remaining = f.read()
-        except OSError:
-            return entries
-        new_offset = start + len(remaining)
-        for line in remaining.decode("utf-8", "replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
+        if c and (st.st_size < c["eof_off"] or c["ino"] != st.st_ino):
+            c = None                              # truncated / replaced → reload
+        if c is None:
             try:
-                e = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            e["_idx"] = len(entries) + 1
-            prev_round = entries[-1].get("_round", 0) if entries else 0
-            is_round_start = False
-            if e.get("type") == "user" and not e.get("isMeta") \
-                    and not e.get("isSidechain") and not e.get("toolUseResult"):
-                msg_obj = e.get("message") or {}
-                cc = msg_obj.get("content") if isinstance(msg_obj, dict) else None
-                if isinstance(cc, str) and cc.strip():
-                    is_round_start = True
-                elif isinstance(cc, list) and any(
-                    isinstance(p, dict) and p.get("type") == "text" and p.get("text")
-                    for p in cc
-                ):
-                    is_round_start = True
-            e["_round"] = prev_round + (1 if is_round_start else 0)
-            entries.append(e)
-        self._cache[path] = {
-            "size": st.st_size,
-            "mtime": st.st_mtime,
-            "ino": st.st_ino,
-            "offset": new_offset,
-            "entries": entries,
-        }
+                entries, anchor = self._grow_read(path, st.st_size, _JSONL_LOAD_ROUNDS)
+            except OSError:
+                return []
+            _number_entries(entries, _JSONL_BASE, _JSONL_BASE)
+            c = {"size": st.st_size, "mtime": st.st_mtime, "ino": st.st_ino,
+                 "anchor_off": anchor, "eof_off": st.st_size, "entries": entries}
+        else:
+            try:
+                with path.open("rb") as f:
+                    f.seek(c["eof_off"])          # a line boundary → no partial line
+                    raw = f.read()
+            except OSError:
+                self._touch(path)
+                return c["entries"]
+            new: list[dict] = []
+            for line in raw.split(b"\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    new.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            if new:
+                ent = c["entries"]
+                si = (ent[-1]["_idx"] + 1) if ent else _JSONL_BASE
+                sr = ent[-1]["_round"] if ent else _JSONL_BASE
+                _number_entries(new, si, sr)
+                ent.extend(new)
+            c["size"] = st.st_size
+            c["mtime"] = st.st_mtime
+            c["ino"] = st.st_ino
+            c["eof_off"] = st.st_size
+        self._cache[path] = c
+        self._touch(path)
+        self._evict()
+        return c["entries"]
+
+    def has_earlier(self, path: Optional[Path]) -> bool:
+        c = self._cache.get(path) if path else None
+        return bool(c and c["anchor_off"] > 0)
+
+    def earlier(self, path: Optional[Path], want_rounds: int = _JSONL_LOAD_ROUNDS) -> list[dict]:
+        """Extend the window BACKWARD by reading earlier bytes from disk; returns
+        the newly loaded earlier entries (numbered just below the window)."""
+        c = self._cache.get(path) if path else None
+        if not c or c["anchor_off"] <= 0:
+            return []
+        try:
+            entries, anchor = self._grow_read(path, c["anchor_off"], want_rounds)
+        except OSError:
+            return []
+        if not entries:
+            c["anchor_off"] = 0
+            return []
+        cur = c["entries"]
+        cur_min_idx = cur[0]["_idx"] if cur else _JSONL_BASE
+        cur_min_round = cur[0]["_round"] if cur else _JSONL_BASE
+        rcount = sum(1 for e in entries if _is_round_start_entry(e))
+        _number_entries(entries, cur_min_idx - len(entries), cur_min_round - rcount - 1)
+        cur[:0] = entries                          # prepend earlier rounds
+        c["anchor_off"] = anchor
+        self._touch(path)
         return entries
+
+    def approx_total(self, path: Optional[Path]) -> int:
+        """Estimated total entry count (window count scaled by file size) — for
+        display only; we never read the whole file just to count."""
+        c = self._cache.get(path) if path else None
+        if not c or not c["entries"]:
+            return 0
+        span = c["eof_off"] - c["anchor_off"]
+        n = len(c["entries"])
+        if span <= 0:
+            return n
+        avg = span / n
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = c["size"]
+        return max(n, int(size / avg)) if avg > 0 else n
 
 
 jsonl_cache = JsonlCache()
@@ -1480,7 +1772,7 @@ def _session_views(jsonl: Path, st) -> dict:
     cached = _SESSION_CTX_CACHE.get(ck) if ck else None
     if cached is not None:
         return cached
-    full = extract_recent_context(jsonl, n_exchanges=0, max_user_chars=64,
+    full = extract_recent_context_ht(jsonl, n_exchanges=0, max_user_chars=64,
                                   max_response_chars=100)
     all_exs = full["exchanges"]
     picked: list[dict] = []
@@ -2348,7 +2640,7 @@ def _summary_scan_once() -> None:
             missing_emb = bool(ent) and "summary_emb" not in ent
             if ent and ent.get("size") == st.st_size and not missing_emb:
                 continue
-            ctx = extract_recent_context(jl, n_exchanges=0,
+            ctx = extract_recent_context_ht(jl, n_exchanges=0,
                                          max_user_chars=400, max_response_chars=400)
             exs = ctx["exchanges"]
             rounds = len(exs)
@@ -3600,7 +3892,7 @@ async def post_tab_attach(payload: TabAttachPayload):
     titles = {e["session_id"]: e for e in load_session_index()}
     out = []
     for c in scored[:6]:
-        ctx = extract_recent_context(c["jsonl"], n_exchanges=1, max_user_chars=80, max_response_chars=0)
+        ctx = extract_recent_context_ht(c["jsonl"], n_exchanges=1, max_user_chars=80, max_response_chars=0)
         named = titles.get(c["sid"])
         out.append({
             "claude_session_id": c["sid"],
@@ -3735,8 +4027,20 @@ async def get_state(
         else:
             sliced = delta
     elif before_idx is not None:
+        # load-earlier: serve the rounds just before `before_idx`. Take them from
+        # the loaded window first (it may already hold rounds below before_idx
+        # that weren't in the initial display), extending backward from DISK only
+        # when the window runs out. earlier() prepends in place, so all_entries
+        # (the same list) grows as we go — no full history is ever held.
+        want = rounds or 5
         older = [e for e in all_entries if e.get("_idx", 0) < before_idx]
-        sliced = _last_n_rounds(older, rounds or 5)
+        guard = 0
+        while (sum(1 for e in older if _is_user_msg(e)) < want
+               and jsonl_cache.has_earlier(b.jsonl_path) and guard < 100):
+            jsonl_cache.earlier(b.jsonl_path)
+            older = [e for e in all_entries if e.get("_idx", 0) < before_idx]
+            guard += 1
+        sliced = _last_n_rounds(older, want)
     elif rounds is not None:
         sliced = _last_n_rounds(all_entries, rounds)
     else:
@@ -3747,7 +4051,9 @@ async def get_state(
     if all_entries:
         new_since_idx = all_entries[-1].get("_idx", since_idx)
 
-    has_more = bool(transcript and transcript[0].get("_idx", 0) > 1)
+    # Is there earlier history on disk before the loaded window? (Not
+    # "_idx > 1" anymore — the window is numbered from a big base.)
+    has_more = jsonl_cache.has_earlier(b.jsonl_path)
 
     # Only read the screen (an iTerm RPC) when the idle-gate is open — while
     # claude is actively working we skip it every poll. strip_input=False: the
@@ -3885,7 +4191,7 @@ async def get_session_history(claude_session_id: str, n: int = 10):
     if jsonl_path is None:
         raise HTTPException(status_code=404, detail="unknown session_id")
     n = max(1, min(n, 100))
-    ctx = extract_recent_context(jsonl_path, n_exchanges=n,
+    ctx = extract_recent_context_ht(jsonl_path, n_exchanges=n,
                                  max_user_chars=200, max_response_chars=300)
     return {"exchanges": ctx["exchanges"]}
 
@@ -3909,9 +4215,10 @@ async def get_session_info(claude_session_id: str):
     except OSError:
         jsonl_size = 0
         jsonl_mtime = ""
-    ctx = extract_recent_context(jsonl_path, n_exchanges=1, max_user_chars=200, max_response_chars=200)
+    ctx = extract_recent_context_ht(jsonl_path, n_exchanges=1, max_user_chars=200, max_response_chars=200)
     cwd = (named.get("project_path") if named else "") or _project_path_from_jsonl(jsonl_path) or ""
-    entries = jsonl_cache.entries(jsonl_path)
+    jsonl_cache.entries(jsonl_path)                 # warm the window (tail only)
+    entry_count = jsonl_cache.approx_total(jsonl_path)
     b = bindings.get_by_session(sid)
     processes = (await asyncio.to_thread(_ps_descendants, b.pid)) if b else []
     return {
@@ -3922,7 +4229,7 @@ async def get_session_info(claude_session_id: str):
         "jsonl_path": str(jsonl_path),
         "jsonl_size": jsonl_size,
         "jsonl_mtime": jsonl_mtime,
-        "entry_count": len(entries),
+        "entry_count": entry_count,
         "first_user_msg": ctx.get("first_user_msg", ""),
         "first_ts": ctx.get("first_ts", ""),
         "binding": _serialize_binding(b) if b else None,
