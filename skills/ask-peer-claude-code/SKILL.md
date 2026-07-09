@@ -26,6 +26,19 @@ session。只有下面两种情况才发起联系:
 session,也**不要"无缘无故"**找一个陌生 session 交流 —— 没有以上理由,就不发任何
 消息。(peek `--no-send` 同样受此约束。)
 
+## 绝不阻塞主流程(默认后台 / 异步)
+调用本 skill **默认绝不能 hang 住你当前的对话主流程**——对方可能要跑几分钟。
+**除非用户明确说"就地等它 / 同步等结果"**,否则用下面两种非阻塞方式之一:
+
+- **后台 (background)** —— 用 Bash 工具的 `run_in_background: true` 跑(命令本身可以是
+  默认的"等回复"模式)。命令在后台等对方,你**立刻继续**当前对话;对方回合结束、命令
+  返回时你会被**自动通知**拿到 `reply`。→ **既不阻塞、又能拿到答案。**
+- **异步 fire-and-forget (`--no-wait`)** —— 发送并确认触达后**立即返回,根本不等回复**。
+  适合**委派任务 / 通知 / hand-off**;需要结果的话之后再 peek(`--no-send`)查。
+
+**怎么选**:需要那个答案 → **后台(`run_in_background:true`)**;纯委派、不关心结果 →
+**`--no-wait`**。两者都满足"不 hang 主流程"。只有用户明确要就地等,才前台阻塞运行。
+
 ## 两个角色 (both directions)
 - **主动问别人 (caller)**: 在上面两种情况下,用本 skill 去问/委派/查另一个 session
   的状态 —— 只要知道对方的 session id(host 可省,脚本会在已知机器间自动定位)。
@@ -55,15 +68,21 @@ timeout | maybe_error | peek | sent`.
 
 ```bash
 PY=~/.claude/skills/ask-peer-claude-code/ask_peer.py
-# ask & WAIT for the reply (host auto-located from the id):
+# DEFAULT when you need the reply — run this via the Bash tool with
+# run_in_background: true, so it does NOT block your conversation; you get the
+# reply in the completion notification:
 echo "你现在在干啥?进度如何?" | python3 "$PY" --to <PEER_SID> --from <MY_SID>
-# DELEGATE a task — just confirm it's delivered, don't wait for the result:
+# DELEGATE a task — confirm delivery and return immediately (no reply awaited):
 echo "帮我把 X 跑一下,做完自己收尾" | python3 "$PY" --to <PEER_SID> --from <MY_SID> --no-wait
 # peek only (what is it doing right now? — no message sent):
 python3 "$PY" --to <PEER_SID> --no-send
 # pin a host explicitly if you already know it:
 python3 "$PY" --to <PEER_SID> --host <IP> --no-send
 ```
+
+> Reminder: the first form waits (up to `--timeout`) for the peer's turn to end.
+> Run it **in the background** (Bash `run_in_background: true`) — never foreground —
+> unless the user explicitly asked you to wait in place.
 
 Args: `--to` peer session id (required; a short prefix/substring is OK — it's
 resolved against the host's live claude tabs, **unique match only**; 0 or >1
