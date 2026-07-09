@@ -10,11 +10,11 @@ or disturbs the peer beyond delivering the message.
 Usage:
   ask_peer.py --to <SID> [--host IP] [--token T] [--from SID]
               [--timeout SEC] [--mode brief|medium] [--rounds N]
-              [--no-send] [--raw] [MESSAGE]
+              [--no-send] [--no-wait] [MESSAGE]
 
   MESSAGE from arg or stdin (stdin avoids all shell-quoting issues — preferred
-  for multi-line / code). --no-send just reads current state (peek). --raw sends
-  MESSAGE verbatim (no peer-prefix) — use for answering a pending prompt / choice.
+  for multi-line / code). --no-send just reads current state (peek). Every sent
+  message is tagged "[⇄ from peer claude <id>]" — there is no untagged send.
 
 Output: one JSON object:
   {status, reply, pending_confirm, idle, elapsed, since_idx, note}
@@ -162,7 +162,6 @@ def main():
                          "in the peer's transcript), return WITHOUT waiting for a reply")
     ap.add_argument("--deliver-timeout", type=float, default=20,
                     help="how long to wait for delivery confirmation in --no-wait mode")
-    ap.add_argument("--raw", action="store_true")
     ap.add_argument("message", nargs="?", default=None)
     a = ap.parse_args()
 
@@ -217,9 +216,11 @@ def main():
     msg = a.message
     if msg is None:
         msg = sys.stdin.read()
-    if not a.raw:
-        who = f" {a.frm[:8]}" if a.frm else ""
-        msg = f"[⇄ from peer claude{who}] {msg}"
+    # ALWAYS tag peer messages. There is no untagged send: the receiving session
+    # must be able to tell a peer relay from a real human, and the tag is the
+    # only signal. (No --raw — see SKILL.md.)
+    who = f" {a.frm[:8]}" if a.frm else ""
+    msg = f"[⇄ from peer claude{who}] {msg}"
 
     _req("POST", f"{base}/api/input", token,
          {"claude_session_id": a.to, "text": msg}, timeout=30)
@@ -269,7 +270,9 @@ def main():
                               "reply": _assistant_text(st), "idle": True,
                               "elapsed": round(time.time() - t0, 1),
                               "since_idx": st.get("since_idx", baseline),
-                              "note": "peer is asking something — answer with --raw"},
+                              "note": "peer is blocked on a TUI prompt/menu — this needs a "
+                                      "human to resolve in the peer's tab; peer messages can't "
+                                      "operate its menu"},
                              ensure_ascii=False))
             return
         reply = _assistant_text(st)

@@ -102,19 +102,21 @@ hosts configured in `~/.claude/cc_web.conf` (`hosts=<ip1>,<ip2>`) or
 `--from` your own session id (added as a source prefix so the peer knows it's a
 peer, not a human) · `--timeout` sec (default 480) · `--mode brief|medium` ·
 `--no-send` peek · `--no-wait` fire-and-confirm delivery (task delegation),
-`--deliver-timeout` sec (default 20) · `--raw` send verbatim — **no from-peer tag**,
-so the peer will read it as human input; use ONLY for short prompt/choice answers
-(a number, `继续`), never for a substantive message you want tagged as peer.
+`--deliver-timeout` sec (default 20). **Every message is auto-tagged
+`[⇄ from peer claude <id>]` — there is no raw/untagged send** (removed on
+purpose: an untagged message would be indistinguishable from a human's).
 
 ## Handling the result `status`
 - **sent** (`--no-wait`) → delivered. `delivered:true` = the peer recorded it as a
   prompt; `false` + `peer_idle:false` = it's queued behind the peer's current turn
   (still in its tab, will run after). You're done — don't wait around.
 - **done** → `reply` is the peer's answer. Continue your reasoning; ask again if needed.
-- **pending_confirm** → the peer is asking something (a choice menu or free text).
-  Decide the answer, then send it with `--raw` (e.g. the choice number, or text).
+- **pending_confirm** → the peer is blocked on a TUI prompt/menu (e.g. a tool-
+  permission dialog). This skill **can't** operate the peer's menu — a tagged text
+  message won't pick a menu item — so a **human resolves it in the peer's tab**.
+  Just surface it; don't try to auto-answer.
 - **maybe_error** → reply text looks like an API error / interruption; re-send
-  `继续` (with `--raw`) to make it retry.
+  `继续` (a normal tagged message) to make it retry.
 - **timeout** → peer still working after the window; peek again later or raise `--timeout`.
 - If `brief` is unclear, ask it directly ("你现在在干啥?") or add `--mode medium`,
   or grab a screen snapshot: `GET /api/screen?claude_session_id=<SID>` (current
