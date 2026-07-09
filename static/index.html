@@ -1767,6 +1767,12 @@ footer button.send {
 
   // ---------- markdown rendering ----------
   marked.setOptions({ gfm: true, breaks: true });
+  // Escape RAW inline/block HTML in message text, so literal "<hello>", "<div>",
+  // "<SID>" etc. render as text instead of being parsed as (usually empty) HTML
+  // elements and swallowed. Code blocks/spans are already escaped by marked, so
+  // they're unaffected (no double-escaping). Also a nice XSS defense-in-depth.
+  const _escHtml = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  marked.use({ renderer: { html(t) { return _escHtml(typeof t === "string" ? t : (t && (t.text || t.raw)) || ""); } } });
   const URL_RE = /(https?:\/\/[^\s<>"'）)\]]+)/g;
   function renderMarkdown(text) {
     let html = "";

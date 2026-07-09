@@ -99,11 +99,14 @@ matches → error, so it never mis-delivers) · `--host` cc-web tailscale IP
 hosts configured in `~/.claude/cc_web.conf` (`hosts=<ip1>,<ip2>`) or
 `$CC_WEB_HOSTS`, local first, and reports the resolved `host` in its JSON) ·
 `--token` (default: from `~/.claude/cc_web.conf`) ·
-`--from` your own session id (added as a source prefix so the peer knows it's a
-peer, not a human) · `--timeout` sec (default 480) · `--mode brief|medium` ·
+`--from` your own session id (goes in the tag so the peer knows it's a peer,
+not a human) · `--from-name` an OPTIONAL human name for the tag (defaults to
+`name=` in `~/.claude/cc_web.conf` / `$CC_WEB_NAME`) — just so the user can
+recognize / refer to the peer without memorizing the id; omit it and the tag is
+id-only · `--timeout` sec (default 480) · `--mode brief|medium` ·
 `--no-send` peek · `--no-wait` fire-and-confirm delivery (task delegation),
 `--deliver-timeout` sec (default 20). **Every message is auto-tagged
-`[⇄ from peer claude <id>]` — there is no raw/untagged send** (removed on
+`[⇄ from peer claude <id> (name)]` — there is no raw/untagged send** (removed on
 purpose: an untagged message would be indistinguishable from a human's).
 
 ## Handling the result `status`

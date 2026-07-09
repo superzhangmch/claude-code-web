@@ -51,6 +51,22 @@ def _conf_token():
     return os.environ.get("CC_WEB_TOKEN", "")
 
 
+def _conf_name():
+    """This session/machine's human-friendly peer name (user-set), for the
+    message tag so recipients recognize the sender without memorizing an id.
+    From $CC_WEB_NAME or a `name=` line in ~/.claude/cc_web.conf."""
+    v = os.environ.get("CC_WEB_NAME", "")
+    if not v:
+        try:
+            for line in open(os.path.expanduser("~/.claude/cc_web.conf")):
+                if line.strip().startswith("name="):
+                    v = line.split("=", 1)[1].strip()
+                    break
+        except Exception:
+            pass
+    return v
+
+
 def _local_ip():
     for ts in ("/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"):
         if os.path.exists(ts):
@@ -152,6 +168,9 @@ def main():
     ap.add_argument("--host", default=None)
     ap.add_argument("--token", default=None)
     ap.add_argument("--from", dest="frm", default="")
+    ap.add_argument("--from-name", dest="frm_name", default=None,
+                    help="human name in the tag (recipients recognize you without the id); "
+                         "defaults to name= in ~/.claude/cc_web.conf or $CC_WEB_NAME")
     ap.add_argument("--timeout", type=float, default=480)
     ap.add_argument("--interval", type=float, default=3)
     ap.add_argument("--mode", default="brief")
@@ -219,7 +238,15 @@ def main():
     # ALWAYS tag peer messages. There is no untagged send: the receiving session
     # must be able to tell a peer relay from a real human, and the tag is the
     # only signal. (No --raw — see SKILL.md.)
-    who = f" {a.frm[:8]}" if a.frm else ""
+    # Tag: "[⇄ from peer claude <id8> (name)]". id and name are both OPTIONAL —
+    # name is just a human-friendly label (so the user recognizes the peer and
+    # can refer to it by name); when unset the tag is just the id (or bare).
+    name = a.frm_name if a.frm_name is not None else _conf_name()
+    who = ""
+    if a.frm:
+        who += f" {a.frm[:8]}"
+    if name:
+        who += f" ({name})"
     msg = f"[⇄ from peer claude{who}] {msg}"
 
     _req("POST", f"{base}/api/input", token,
