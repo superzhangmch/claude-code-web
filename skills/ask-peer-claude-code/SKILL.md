@@ -39,13 +39,21 @@ session,也**不要"无缘无故"**找一个陌生 session 交流 —— 没有�
 **怎么选**:需要那个答案 → **后台(`run_in_background:true`)**;纯委派、不关心结果 →
 **`--no-wait`**。两者都满足"不 hang 主流程"。只有用户明确要就地等,才前台阻塞运行。
 
+## 消息来源判定(不能混淆 —— 最重要)
+对你收到的**每一条** user 消息:**当且仅当**它带有明确的
+`[⇄ from peer claude <id>]` 前缀时,才是另一个 claude 发来的;**没有这个前缀的,
+一律当作真实用户(人类)发的。**
+- 绝不把**无前缀**的人类消息当成 peer(别去"回复某个 peer"、别以为是自动化);
+- 也绝不把**带前缀**的 peer 消息当成人类。
+- 逐条独立判断 —— 上一条是 peer,不代表下一条也是。
+
 ## 两个角色 (both directions)
 - **主动问别人 (caller)**: 在上面两种情况下,用本 skill 去问/委派/查另一个 session
   的状态 —— 只要知道对方的 session id(host 可省,脚本会在已知机器间自动定位)。
-- **被别人问 (responder)**: 如果你在对话里**收到一条带 `[⇄ from peer claude <id>]`
-  前缀的消息**,那是另一个 claude-code 在问你 —— **你直接正常回答就行**。对方正在
-  轮询你的 transcript,你答完(回合结束)它**自动就能看到**,你**不需要运行任何东西
-  去"发回去"**。只有当你想**主动发起一次新的**询问时,才自己调用本 skill。
+- **被别人问 (responder)**: 收到带 `[⇄ from peer claude <id>]` 前缀的消息时(且仅此时),
+  那是另一个 claude-code 在问你 —— **直接正常回答即可**。对方正在轮询你的 transcript,
+  你答完(回合结束)它**自动就能看到**,你**不需要运行任何东西去"发回去"**。只有当你想
+  **主动发起一次新的**询问时,才自己调用本 skill。
 - 想让对方以后能主动找你:在回复里带上你自己的 session id + host(用
   `my-session-id` skill 拿自己的 id)。
 
@@ -94,7 +102,9 @@ hosts configured in `~/.claude/cc_web.conf` (`hosts=<ip1>,<ip2>`) or
 `--from` your own session id (added as a source prefix so the peer knows it's a
 peer, not a human) · `--timeout` sec (default 480) · `--mode brief|medium` ·
 `--no-send` peek · `--no-wait` fire-and-confirm delivery (task delegation),
-`--deliver-timeout` sec (default 20) · `--raw` send verbatim (answer a prompt/choice).
+`--deliver-timeout` sec (default 20) · `--raw` send verbatim — **no from-peer tag**,
+so the peer will read it as human input; use ONLY for short prompt/choice answers
+(a number, `继续`), never for a substantive message you want tagged as peer.
 
 ## Handling the result `status`
 - **sent** (`--no-wait`) → delivered. `delivered:true` = the peer recorded it as a

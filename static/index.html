@@ -113,7 +113,7 @@ header {
   padding-top: calc(10px + env(safe-area-inset-top));
   background: #000;
   border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 4px;
   flex-shrink: 0;
   overflow: hidden;
 }
@@ -154,12 +154,14 @@ header .mode-group .mode-pick.active {
   border-color: var(--accent);
 }
 header .meta {
-  color: var(--muted); font-size: 12px; margin-left: auto;
+  color: var(--muted); font-size: 12px; margin-right: auto; text-align: left;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  flex-shrink: 1; min-width: 0; max-width: 50%;
+  flex-shrink: 1; min-width: 0; max-width: 55%;
 }
 header .traffic {
-  color: #6b7280; font: 11px ui-monospace, Menlo, monospace;
+  color: #6b7280; font: 9px ui-monospace, Menlo, monospace;
+  display: inline-flex; flex-direction: column; line-height: 1.15;
+  text-align: right; flex-shrink: 0;
 }
 header .ready {
   display: inline-flex; align-items: center; justify-content: center;
@@ -347,12 +349,26 @@ body.light .hl { color: #c81e1e; }
 #picker-list .group-delim:first-child { margin-top: 0; }
 header .battery {
   font: 12px ui-monospace, Menlo, monospace;
-  color: var(--muted);
+  color: var(--muted); cursor: pointer;
 }
 header .battery.low { color: #ff8b6a; font-weight: 600; }
-header .battery .b-icon { margin-right: 3px; }
-header .battery { cursor: pointer; }
 header .battery:hover { color: var(--text); }
+/* picker battery: horizontal battery icon with % stacked below */
+#battery {
+  display: inline-flex; flex-direction: column; align-items: center;
+  gap: 1px; line-height: 1; font-size: 9px; flex-shrink: 0;
+}
+#battery .batt-ico {
+  position: relative; width: 18px; height: 9px; box-sizing: border-box;
+  border: 1px solid currentColor; border-radius: 2px; padding: 1px;
+}
+#battery .batt-ico::after {                 /* the little + terminal nub */
+  content: ""; position: absolute; right: -2.5px; top: 2.5px;
+  width: 1.5px; height: 3px; background: currentColor; border-radius: 0 1px 1px 0;
+}
+#battery .batt-fill { height: 100%; background: currentColor; border-radius: 1px; }
+#battery.charging .batt-fill { background: #4ade80; }   /* green while charging */
+#battery .batt-pct { font: 8px ui-monospace, Menlo, monospace; }
 #cpu-modal .modal-card.cpu-card {
   width: 95vw; max-width: 900px; max-height: 85vh;
   display: flex; flex-direction: column; gap: 8px;
@@ -1347,6 +1363,7 @@ footer button.send {
     <span id="meta" class="meta"></span>
     <span id="ready" class="ready" style="display:none"></span>
     <span id="traffic" class="traffic"></span>
+    <span id="battery" class="battery" style="display:none" title="Click for CPU history"></span>
     <a id="remote-btn" class="battery" href="/remote/" title="Remote control" style="text-decoration:none">🖥</a>
     <span id="mode-group" class="mode-group" style="display:none">
       <button class="btn mode-pick" data-mode="brief" title="brief">▁</button>
@@ -1355,7 +1372,6 @@ footer button.send {
     </span>
     <button id="screen-btn" class="btn icon" style="display:none" title="iTerm screen + session info">&gt;_</button>
     <button id="switch-btn" class="btn icon" style="display:none" title="切换到其它 tab">⇆</button>
-    <span id="battery" class="battery" style="display:none" title="Click for CPU history"></span>
     <button id="tabs-btn" class="btn icon" style="display:none" title="Show all iTerm2 tabs">&gt;_</button>
     <button id="files-btn" class="btn icon" style="display:none" title="Browse local files">📁</button>
     <button id="refresh-btn" class="btn icon" style="display:none" title="Refresh list">↻</button>
@@ -1702,14 +1718,15 @@ footer button.send {
   // Traffic counter — whole units, no decimals. (Named distinctly from the
   // CPU-mem fmtBytes below, since duplicate function names in one scope clash.)
   function fmtTraffic(n) {
-    if (n < 1024) return n + " B";
-    if (n < 1024 * 1024) return Math.round(n / 1024) + " KB";
-    if (n < 1024 * 1024 * 1024) return Math.round(n / 1024 / 1024) + " MB";
-    return Math.round(n / 1024 / 1024 / 1024) + " GB";
+    if (n < 1024) return "" + n;                                  // bytes: just the number
+    if (n < 1024 * 1024) return Math.round(n / 1024) + "K";
+    if (n < 1024 * 1024 * 1024) return Math.round(n / 1024 / 1024) + "M";
+    return Math.round(n / 1024 / 1024 / 1024) + "G";
   }
   const trafficEl = document.getElementById("traffic");
   function renderTraffic() {
-    trafficEl.textContent = "↓" + fmtTraffic(traffic.out_bytes) + " ↑" + fmtTraffic(traffic.in_bytes);
+    trafficEl.innerHTML = "<span>↓" + fmtTraffic(traffic.out_bytes) + "</span>"
+                        + "<span>↑" + fmtTraffic(traffic.in_bytes) + "</span>";
   }
   renderTraffic();
 
@@ -2097,6 +2114,9 @@ footer button.send {
   // ---------- state ----------
   let attachedSid = null;        // currently-viewing claude_session_id
   let attachedShort = "";        // first 4 chars (for mismatch comparison)
+  let attachedName = "";         // tab name shown in the top bar
+  let attachedTab = "";          // tab index label (tX / wYtX) shown in the top bar
+  let metaExpanded = false;      // top-bar id: collapsed (4 chars) ↔ full, toggled by click
   let entryCache = [];
   let earliestIdxLoaded = null;
   let lastIdx = null;
@@ -3506,17 +3526,14 @@ footer button.send {
       batteryEl.style.display = "none";
       return;
     }
-    // Plug icon when on AC, otherwise show charge level. Low (<20%) is
-    // highlighted so the user notices their host is about to die.
-    const icon = b.charging ? "🔌" : (b.pct >= 80 ? "🔋"
-                  : b.pct >= 40 ? "🔋"
-                  : "🪫");
-    batteryEl.textContent = "";
-    const ic = document.createElement("span");
-    ic.className = "b-icon"; ic.textContent = icon;
-    batteryEl.appendChild(ic);
-    batteryEl.appendChild(document.createTextNode(b.pct + "%"));
-    batteryEl.classList.toggle("low", !b.charging && b.pct < 20);
+    // Horizontal battery icon (CSS) with the fill = charge level, and the % in
+    // small text stacked below. Green fill while charging; red (.low) < 20%.
+    const pct = Math.max(0, Math.min(100, Math.round(b.pct)));
+    batteryEl.classList.toggle("low", !b.charging && pct < 20);
+    batteryEl.classList.toggle("charging", !!b.charging);
+    batteryEl.innerHTML =
+      '<span class="batt-ico"><span class="batt-fill" style="width:' + pct + '%"></span></span>' +
+      '<span class="batt-pct">' + (b.charging ? "⚡" : "") + pct + '%</span>';
     batteryEl.style.display = "";
     batteryEl.title = b.on_ac ? `on AC · ${b.state}` : b.state;
   }
@@ -4202,12 +4219,46 @@ footer button.send {
     if (sid) attachSession(sid, "");
   }
 
+  // Top bar (left-aligned): "<sid4> <tX> <tab-name>"; click toggles the id
+  // between the 4-char short form and the full session id.
+  function setMeta() {
+    const id = metaExpanded ? attachedSid : attachedShort;
+    metaEl.textContent = [id, attachedTab, attachedName].filter(Boolean).join(" ");
+    metaEl.title = attachedSid;        // full id always on hover
+  }
+  metaEl.style.cursor = "pointer";
+  metaEl.addEventListener("click", () => {
+    if (!attachedSid) return;
+    metaExpanded = !metaExpanded;
+    setMeta();
+  });
+  // Pull the authoritative tab name from /api/tabs (same source as the switcher
+  // popup) so the top bar matches it regardless of how we entered.
+  async function refreshMetaName(sid) {
+    try {
+      const r = await authedFetch("/api/tabs");
+      if (!r.ok) return;
+      const tabs = (await r.json()).tabs || [];
+      if (sid !== attachedSid) return;               // switched away meanwhile
+      const t = tabs.find(x => x.sid === sid);
+      if (!t) return;
+      const single = new Set(tabs.map(x => x.window_index || 0)).size <= 1;
+      attachedTab = single ? `t${(t.tab_index || 0) + 1}`
+                           : `w${(t.window_index || 0) + 1}t${(t.tab_index || 0) + 1}`;
+      attachedName = t.name || t.tab_name || attachedName;
+      setMeta();
+    } catch {}
+  }
+
   function enterTranscript(sid, label) {
     attachedSid = sid;
     attachedShort = (sid || "").slice(0, 4);
+    attachedName = label || "";
+    attachedTab = "";
+    metaExpanded = false;
     setSessionHash(sid);
-    metaEl.textContent = sid;          // session-id (CSS ellipsis-truncates when long)
-    metaEl.title = sid;                // full id on hover
+    setMeta();
+    refreshMetaName(sid);
     entryCache = []; lastIdx = null; earliestIdxLoaded = null; hasMoreHistory = false;
     claudeIdle = false; isPaused = false; sessionGone = false;
     warnEl.classList.remove("show");   // clear any stale pid-gone/mismatch banner
@@ -4736,10 +4787,15 @@ footer button.send {
         when = ` · ${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
       } catch {}
     }
-    const r = (b.round != null) ? ("r" + b.round + " · ") : "";
+    // _idx/_round come from the transcript window numbered off a big base
+    // (1e9) so "load earlier" can count down without going negative. That base
+    // is an implementation detail — strip it for display so we show small
+    // human-readable numbers (r42 · #1302), not r1000000042 · #1000001302.
+    const _disp = n => (typeof n === "number" && n >= 1000000000) ? n - 1000000000 : n;
+    const r = (b.round != null) ? ("r" + _disp(b.round) + " · ") : "";
     const sidTag = b.sid ? ` · ${String(b.sid).slice(0, 4)}` : "";
     const queuedTag = b.queued ? " · queued" : "";
-    idx.textContent = r + "#" + (b.idx ?? "?") + sidTag + queuedTag + when;
+    idx.textContent = r + "#" + (b.idx != null ? _disp(b.idx) : "?") + sidTag + queuedTag + when;
     role.appendChild(label); role.appendChild(idx);
     // Per-kind buttons (wrap toggle, copy) get appended below — the wrap
     // button needs the content box to point at, so we build the box first
@@ -4903,7 +4959,7 @@ footer button.send {
     });
     warnEl.classList.remove("show");
     // re-attach
-    await attachSession(attachedSid, metaEl.textContent);
+    await attachSession(attachedSid, attachedName);
   });
 
   // ---------- mode picker (3 inline buttons) ----------
@@ -4922,7 +4978,7 @@ footer button.send {
 
   // ---------- back / detach ----------
   backBtn.addEventListener("click", () => {
-    attachedSid = null; attachedShort = "";
+    attachedSid = null; attachedShort = ""; attachedName = ""; attachedTab = "";
     warnEl.classList.remove("show");
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
     showPicker();
@@ -5172,7 +5228,7 @@ footer button.send {
       }
       if (resp.status === 409) {
         // not bound (server restart?). re-attach.
-        await attachSession(attachedSid, metaEl.textContent);
+        await attachSession(attachedSid, attachedName);
         return;
       }
       if (!resp.ok) { setStatus("err"); return; }
