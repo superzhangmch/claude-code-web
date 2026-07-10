@@ -1517,7 +1517,8 @@ def _is_round_start_entry(e) -> bool:
     _last_n_rounds and the transcript numbering rely on)."""
     if not isinstance(e, dict):
         return False
-    if e.get("type") != "user" or e.get("isMeta") or e.get("isSidechain") or e.get("toolUseResult"):
+    if (e.get("type") != "user" or e.get("isMeta") or e.get("isSidechain")
+            or e.get("toolUseResult") or e.get("isCompactSummary")):
         return False
     msg = e.get("message") or {}
     c = msg.get("content") if isinstance(msg, dict) else None
@@ -2293,6 +2294,8 @@ def _is_system_user_entry(e: dict) -> bool:
     user input: a <task-notification>/<command-*>/<local-command-*>/<bash-*>
     wrapper, or a tool result (toolUseResult, or tool_result content). The
     transcript labels these 'System' instead of 'You'."""
+    if e.get("isCompactSummary"):      # context-compaction summary (huge, auto-injected)
+        return True
     if e.get("toolUseResult"):
         return True
     msg = e.get("message") or {}
@@ -2345,7 +2348,7 @@ def _snippet_around(text: str, q: str, width: int = 70) -> str:
 def _is_user_msg(e: dict) -> bool:
     if e.get("type") != "user":
         return False
-    if e.get("isMeta") or e.get("isSidechain") or e.get("toolUseResult"):
+    if e.get("isMeta") or e.get("isSidechain") or e.get("toolUseResult") or e.get("isCompactSummary"):
         return False
     msg = e.get("message") or e
     content = msg.get("content") if isinstance(msg, dict) else None
