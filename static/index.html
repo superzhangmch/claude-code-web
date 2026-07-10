@@ -154,9 +154,9 @@ header .mode-group .mode-pick.active {
   border-color: var(--accent);
 }
 header .meta {
-  color: var(--muted); font-size: 12px; margin-right: auto; text-align: left;
+  color: var(--muted); font-size: 12px; text-align: left;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  flex-shrink: 1; min-width: 0; max-width: 55%;
+  flex-shrink: 0; min-width: 0; max-width: 45%;
 }
 header .traffic {
   color: #6b7280; font: 9px ui-monospace, Menlo, monospace;
@@ -369,6 +369,32 @@ header .battery:hover { color: var(--text); }
 #battery .batt-fill { height: 100%; background: currentColor; border-radius: 1px; }
 #battery.charging .batt-fill { background: #4ade80; }   /* green while charging */
 #battery .batt-pct { font: 8px ui-monospace, Menlo, monospace; }
+/* Quick-switch tab bar (top of #main, both views). Left-packed; overflows off
+   the right (overflow:hidden). Each tab restores instantly from cache. */
+/* Lives IN the header, between the meta (left) and the right-side buttons.
+   flex:1 1 0 → it's the ONLY shrinkable item, so it fills the middle gap and,
+   when the row overflows, it (and only it) shrinks — extra tabs are clipped
+   off the right (auto-hidden). Header is nowrap + overflow:hidden, so nothing
+   ever wraps and the right-side buttons are never pushed off. */
+#tab-bar {
+  display: flex; align-items: center; gap: 5px;
+  flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap;
+}
+/* everything else in the header keeps its size (only #tab-bar shrinks) */
+header > *:not(#tab-bar) { flex-shrink: 0; }
+.qtab {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+  max-width: 168px; padding: 3px 8px; border-radius: 6px;
+  background: var(--panel2); border: 1px solid var(--border);
+  color: var(--muted); font-size: 12px; cursor: pointer;
+}
+.qtab.active { color: var(--text); border-color: var(--accent); }
+.qtab .qtab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qtab .qtab-x {
+  border: 0; background: none; color: var(--muted); cursor: pointer;
+  font-size: 13px; line-height: 1; padding: 0 1px; flex-shrink: 0;
+}
+.qtab .qtab-x:hover { color: #ff6a6a; }
 #cpu-modal .modal-card.cpu-card {
   width: 95vw; max-width: 900px; max-height: 85vh;
   display: flex; flex-direction: column; gap: 8px;
@@ -1361,6 +1387,7 @@ footer button.send {
   <header>
     <span id="status-dot" class="dot off" style="display:none"></span>
     <span id="meta" class="meta"></span>
+    <div id="tab-bar"></div>
     <span id="ready" class="ready" style="display:none"></span>
     <span id="traffic" class="traffic"></span>
     <span id="battery" class="battery" style="display:none" title="Click for CPU history"></span>
@@ -2128,6 +2155,11 @@ footer button.send {
   let lastIdx = null;
   let hasMoreHistory = false;
   let claudeIdle = false;
+  // ---------- quick-switch tabs (client-side, MRU, memory-capped) ----------
+  const MAX_TABS = 5;                    // at most N kept sessions (bounds memory)
+  const OPEN_TABS_KEY = "cc_web_open_tabs";
+  let openTabs = [];                     // [{sid, name}] MRU, front = most recent
+  let tabState = {};                     // sid → cached transcript state (instant switch)
   let isPaused = false;
   // Why polling stopped, when isPaused is true:
   //   "manual"  → user tapped while polling was active. Tap-to-resume
@@ -4240,13 +4272,22 @@ footer button.send {
   });
   // Pull the authoritative tab name from /api/tabs (same source as the switcher
   // popup) so the top bar matches it regardless of how we entered.
+  // One /api/tabs fetch refreshes BOTH the top bar (current session) and the
+  // quick-tab bar (window/tab index + name for every open tab). `sid` may be
+  // null (startup / picker) — then it only refreshes the tab bar.
   async function refreshMetaName(sid) {
     try {
       const r = await authedFetch("/api/tabs");
       if (!r.ok) return;
       const tabs = (await r.json()).tabs || [];
-      if (sid !== attachedSid) return;               // switched away meanwhile
-      const t = tabs.find(x => x.sid === sid);
+      const byId = {}; tabs.forEach(t => { byId[t.sid] = t; });
+      for (const ot of openTabs) {                    // update index/name for the tab bar
+        const t = byId[ot.sid];
+        if (t) { ot.wi = t.window_index; ot.ti = t.tab_index; ot.name = t.name || t.tab_name || ot.name; }
+      }
+      saveOpenTabs(); renderTabBar();
+      if (sid !== attachedSid) return;                // top-bar part: only for current
+      const t = byId[sid];
       if (!t) return;
       const single = new Set(tabs.map(x => x.window_index || 0)).size <= 1;
       attachedTab = single ? `t${(t.tab_index || 0) + 1}`
@@ -4256,7 +4297,88 @@ footer button.send {
     } catch {}
   }
 
+  const tabBarEl = document.getElementById("tab-bar");
+  function loadOpenTabs() {
+    try { openTabs = JSON.parse(localStorage.getItem(OPEN_TABS_KEY)) || []; }
+    catch { openTabs = []; }
+    if (!Array.isArray(openTabs)) openTabs = [];
+    openTabs = openTabs.filter(t => t && t.sid).slice(0, MAX_TABS);
+  }
+  function saveOpenTabs() {
+    try {
+      localStorage.setItem(OPEN_TABS_KEY,
+        JSON.stringify(openTabs.map(t => ({ sid: t.sid, name: t.name || "", wi: t.wi, ti: t.ti }))));
+    } catch {}
+  }
+  function renderTabBar() {
+    tabBarEl.innerHTML = "";
+    // Stable display order = iTerm tab order (window_index, tab_index) so tabs
+    // DON'T jump around when you switch; unknown-index tabs go last.
+    const disp = openTabs.slice().sort((a, b) => {
+      const ak = a.wi != null, bk = b.wi != null;
+      if (ak && bk) return (a.wi - b.wi) || (a.ti - b.ti);
+      return ak ? -1 : (bk ? 1 : 0);
+    });
+    const single = new Set(openTabs.filter(t => t.wi != null).map(t => t.wi)).size <= 1;
+    for (const t of disp) {
+      const el = document.createElement("div");
+      el.className = "qtab" + (t.sid === attachedSid ? " active" : "");
+      el.title = t.sid;
+      const tx = (t.ti != null)
+        ? (single ? `t${t.ti + 1}` : `w${(t.wi || 0) + 1}t${t.ti + 1}`) : "";
+      const nm = document.createElement("span");
+      nm.className = "qtab-name";
+      nm.textContent = (tx ? tx + " " : "") + ((t.name && t.name.trim()) ? t.name : t.sid.slice(0, 4));
+      nm.addEventListener("click", () => { if (t.sid !== attachedSid) enterTranscript(t.sid, t.name || ""); });
+      const x = document.createElement("button");
+      x.className = "qtab-x"; x.textContent = "✕"; x.title = "close tab";
+      x.addEventListener("click", (e) => { e.stopPropagation(); closeTab(t.sid); });
+      el.appendChild(nm); el.appendChild(x);
+      tabBarEl.appendChild(el);
+    }
+  }
+  function addOpenTab(sid, name) {
+    if (!sid) return;
+    openTabs = openTabs.filter(t => t.sid !== sid);
+    openTabs.unshift({ sid, name: name || "" });
+    while (openTabs.length > MAX_TABS) {          // LRU close: drop oldest + its cache
+      const ev = openTabs.pop();
+      if (ev && ev.sid) delete tabState[ev.sid];
+    }
+    saveOpenTabs(); renderTabBar();
+  }
+  function setTabName(sid, name) {
+    const t = openTabs.find(x => x.sid === sid);
+    if (t && name && t.name !== name) { t.name = name; saveOpenTabs(); renderTabBar(); }
+  }
+  function closeTab(sid) {
+    openTabs = openTabs.filter(t => t.sid !== sid);
+    delete tabState[sid];
+    saveOpenTabs();
+    if (sid === attachedSid) {                    // closed the one we're viewing
+      attachedSid = null;                         // so enterTranscript won't re-snapshot it
+      if (openTabs.length) { enterTranscript(openTabs[0].sid, openTabs[0].name || ""); }
+      else {
+        attachedShort = ""; attachedName = ""; attachedTab = "";
+        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+        renderTabBar(); showPicker();
+      }
+    } else {
+      renderTabBar();
+    }
+  }
+  function saveTabState(sid) {
+    if (!sid) return;
+    tabState[sid] = {
+      entryCache: entryCache.slice(),
+      lastIdx, earliestIdxLoaded, hasMoreHistory,
+      scrollTop: transcriptEl.scrollTop,
+    };
+  }
+
   function enterTranscript(sid, label) {
+    if (attachedSid && attachedSid !== sid) saveTabState(attachedSid);  // snapshot outgoing
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
     attachedSid = sid;
     attachedShort = (sid || "").slice(0, 4);
     attachedName = label || "";
@@ -4265,13 +4387,29 @@ footer button.send {
     setSessionHash(sid);
     setMeta();
     refreshMetaName(sid);
-    entryCache = []; lastIdx = null; earliestIdxLoaded = null; hasMoreHistory = false;
-    claudeIdle = false; isPaused = false; sessionGone = false;
+    isPaused = false; sessionGone = false;
     warnEl.classList.remove("show");   // clear any stale pid-gone/mismatch banner
-    transcriptEl.innerHTML = "";
-    showTranscript();
+    const cached = tabState[sid];
+    if (cached) {
+      // INSTANT switch — restore from memory, render, no network; then refresh
+      entryCache = cached.entryCache.slice();
+      lastIdx = cached.lastIdx;
+      earliestIdxLoaded = cached.earliestIdxLoaded;
+      hasMoreHistory = cached.hasMoreHistory;
+      claudeIdle = false;
+      showTranscript();
+      rebuild(true);                                   // render from cache, keep scroll
+      transcriptEl.scrollTop = (cached.scrollTop != null) ? cached.scrollTop : transcriptEl.scrollHeight;
+    } else {
+      // first open of this session → normal load
+      entryCache = []; lastIdx = null; earliestIdxLoaded = null; hasMoreHistory = false;
+      claudeIdle = false;
+      transcriptEl.innerHTML = "";
+      showTranscript();
+    }
+    addOpenTab(sid, attachedName || attachedShort);
     activityDeadline = Date.now() + _activityWindow();
-    pollOnce();
+    pollOnce();                                        // cached → append delta; fresh → replace
   }
 
   // ---------- candidate dialog ----------
@@ -4887,12 +5025,12 @@ footer button.send {
     if (atTop) _lastBottomToolUse = saved;
   }
 
-  function rebuild() {
+  function rebuild(noScroll) {
     transcriptEl.innerHTML = "";
     _lastBottomToolUse = null;
     renderEntriesInto(transcriptEl, entryCache);
     updateLoadEarlier();
-    scrollToBottom();
+    if (!noScroll) scrollToBottom();
   }
 
   function updateLoadEarlier() {
@@ -4984,9 +5122,11 @@ footer button.send {
 
   // ---------- back / detach ----------
   backBtn.addEventListener("click", () => {
+    if (attachedSid) saveTabState(attachedSid);   // snapshot so returning is instant
     attachedSid = null; attachedShort = ""; attachedName = ""; attachedTab = "";
     warnEl.classList.remove("show");
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    renderTabBar();                                // keep tabs, just un-highlight
     showPicker();
   });
 
@@ -5527,6 +5667,8 @@ footer button.send {
     if (!await tryLogin(authToken)) {
       authToken = ""; localStorage.removeItem(TOKEN_KEY); showLogin(false); return;
     }
+    loadOpenTabs(); renderTabBar();   // restore the tab bar (content re-loads on click)
+    if (openTabs.length) refreshMetaName(attachedSid);   // fill wXtX / names for the bar
     openFromHash();
   }
   start();
