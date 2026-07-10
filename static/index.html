@@ -371,17 +371,46 @@ header .battery:hover { color: var(--text); }
 #battery .batt-pct { font: 8px ui-monospace, Menlo, monospace; }
 /* Quick-switch tab bar (top of #main, both views). Left-packed; overflows off
    the right (overflow:hidden). Each tab restores instantly from cache. */
-/* Lives IN the header, between the meta (left) and the right-side buttons.
-   flex:1 1 0 → it's the ONLY shrinkable item, so it fills the middle gap and,
-   when the row overflows, it (and only it) shrinks — extra tabs are clipped
-   off the right (auto-hidden). Header is nowrap + overflow:hidden, so nothing
-   ever wraps and the right-side buttons are never pushed off. */
+/* #meta-stack wraps the meta + the tab bar and is the ONLY shrinkable header
+   item, so it fills the middle gap (buttons stay right) and clips its overflow.
+   Desktop: a row (meta then tabs). Phone: a 2-row COLUMN — meta on the top half,
+   tabs on the bottom half — so both fit in ~one header line, buttons alongside. */
+#meta-stack {
+  display: flex; align-items: center; gap: 6px;
+  flex: 1 1 0; min-width: 0; overflow: hidden;
+}
 #tab-bar {
   display: flex; align-items: center; gap: 5px;
   flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap;
 }
-/* everything else in the header keeps its size (only #tab-bar shrinks) */
-header > *:not(#tab-bar) { flex-shrink: 0; }
+/* only #meta-stack shrinks; header is nowrap+overflow:hidden so no wrap and the
+   right-side buttons are never pushed off */
+header > *:not(#meta-stack) { flex-shrink: 0; }
+@media (max-width: 640px) {
+  /* two half-rows LEFT-floated (align-items:flex-start), buttons stay right
+     (meta-stack still flex:1, pushing them over); rows vertically centered */
+  #meta-stack { flex-direction: column; align-items: flex-start; justify-content: center; gap: 1px; }
+  header .meta { font-size: 9px; max-width: 100%; line-height: 1.2; }
+  #tab-bar { flex: 0 0 auto; gap: 4px; margin: 0; }
+  #tab-bar .qtab {
+    padding: 0 6px; font-size: 9px; max-width: 96px; margin: 0;
+    line-height: 1; border-radius: 4px;
+  }
+  #tab-bar .qtab-name { line-height: 1; }
+  #tab-bar .qtab-x { font-size: 10px; line-height: 1; padding: 0; }
+  #meta-stack { gap: 0; }
+  header .meta { line-height: 1.2; }
+  /* tightest header: zero top/bottom padding (keep only the notch safe-area),
+     no button margins, shorter buttons. NOTE: the header can't go below the two
+     stacked 10px text half-rows (~26px) — that's the floor, not the buttons. */
+  header { padding: env(safe-area-inset-top) 8px 0; gap: 3px; }
+  /* drop the FIXED height (that's what padding couldn't beat) → button height
+     = its text; zero vertical padding, tight line-height */
+  header button, header a.btn, header a.icon { height: auto; min-height: 0; margin: 0; }
+  header button.btn, header a.btn, header .mode-pick {
+    padding: 1px 5px; font-size: 10px; line-height: 1.2;
+  }
+}
 .qtab {
   display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
   max-width: 168px; padding: 3px 8px; border-radius: 6px;
@@ -1386,8 +1415,10 @@ footer button.send {
 <body>
   <header>
     <span id="status-dot" class="dot off" style="display:none"></span>
-    <span id="meta" class="meta"></span>
-    <div id="tab-bar"></div>
+    <div id="meta-stack">
+      <span id="meta" class="meta"></span>
+      <div id="tab-bar"></div>
+    </div>
     <span id="ready" class="ready" style="display:none"></span>
     <span id="traffic" class="traffic"></span>
     <span id="battery" class="battery" style="display:none" title="Click for CPU history"></span>
@@ -4320,15 +4351,21 @@ footer button.send {
       return ak ? -1 : (bk ? 1 : 0);
     });
     const single = new Set(openTabs.filter(t => t.wi != null).map(t => t.wi)).size <= 1;
+    const mob = window.matchMedia("(max-width: 640px)").matches;   // compact labels on phones
     for (const t of disp) {
       const el = document.createElement("div");
       el.className = "qtab" + (t.sid === attachedSid ? " active" : "");
       el.title = t.sid;
       const tx = (t.ti != null)
         ? (single ? `t${t.ti + 1}` : `w${(t.wi || 0) + 1}t${t.ti + 1}`) : "";
+      const full = (t.name && t.name.trim()) ? t.name : t.sid.slice(0, 4);
       const nm = document.createElement("span");
       nm.className = "qtab-name";
-      nm.textContent = (tx ? tx + " " : "") + ((t.name && t.name.trim()) ? t.name : t.sid.slice(0, 4));
+      // phone: ACTIVE tab = "cur" (its title already shows in the meta half-row
+      // above); every other tab is just its wXtX/tX chip. desktop = full name.
+      nm.textContent = mob
+        ? (t.sid === attachedSid ? "cur" : (tx || full.slice(0, 4)))
+        : ((tx ? tx + " " : "") + full);
       nm.addEventListener("click", () => { if (t.sid !== attachedSid) enterTranscript(t.sid, t.name || ""); });
       const x = document.createElement("button");
       x.className = "qtab-x"; x.textContent = "✕"; x.title = "close tab";
@@ -5671,6 +5708,13 @@ footer button.send {
     if (openTabs.length) refreshMetaName(attachedSid);   // fill wXtX / names for the bar
     openFromHash();
   }
+  // Re-render the tab bar on resize/rotate so labels switch between the
+  // desktop (full) and phone (compact "cur" / "tX first6") forms.
+  let _tabResizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(_tabResizeTimer);
+    _tabResizeTimer = setTimeout(renderTabBar, 150);
+  });
   start();
 })();
 </script>
