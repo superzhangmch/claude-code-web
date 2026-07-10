@@ -177,28 +177,25 @@ header .ready.busy::before {
   border: 2px solid #3a2c1f; border-top-color: #e0a070;
   animation: spin 0.8s linear infinite;
 }
-header button.icon, header a.icon {
+/* Unified header buttons: .btn and .icon share identical box metrics so the
+   whole row (▁ >_ ⇆ 📁 ↻ ← +) is uniform. Height comes from the shared
+   height:24px rule above; this pins width/padding/font/radius/colour. */
+header button.icon, header a.icon,
+header button.btn, header a.btn {
   background: var(--panel2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
-  font-size: 14px; line-height: 1; padding: 3px 5px;
-  min-width: 22px;
+  font-size: 13px; line-height: 1; padding: 0 7px;
+  min-width: 28px;
   cursor: pointer;
   text-decoration: none;
 }
-header button.icon:hover, header a.icon:hover { border-color: var(--accent); }
+header button.icon:hover, header a.icon:hover,
+header button.btn:hover, header a.btn:hover { border-color: var(--accent); }
 /* Terminal/screen buttons: render their ">_" prompt glyph as a tight monospace
    shell prompt rather than a thin proportional ">". */
 #tabs-btn, #screen-btn {
   font-family: ui-monospace, Menlo, monospace;
   font-weight: 700; letter-spacing: -1px;
-}
-header button.btn, header a.btn {
-  background: var(--panel2); color: var(--muted);
-  border: 1px solid var(--border);
-  padding: 3px 5px; border-radius: 4px;
-  min-width: 22px;
-  font: inherit; font-size: 11px; cursor: pointer;
-  text-decoration: none;
 }
 
 #warn {
@@ -371,10 +368,10 @@ header .battery:hover { color: var(--text); }
 #battery .batt-pct { font: 8px ui-monospace, Menlo, monospace; }
 /* Quick-switch tab bar (top of #main, both views). Left-packed; overflows off
    the right (overflow:hidden). Each tab restores instantly from cache. */
-/* #meta-stack wraps the meta + the tab bar and is the ONLY shrinkable header
-   item, so it fills the middle gap (buttons stay right) and clips its overflow.
-   Desktop: a row (meta then tabs). Phone: a 2-row COLUMN — meta on the top half,
-   tabs on the bottom half — so both fit in ~one header line, buttons alongside. */
+/* #meta-stack holds [✕ close] [tab bar] [meta title] and is the ONLY shrinkable
+   header item, so it fills the middle gap (buttons stay right).
+   Desktop: a single nowrap row that clips its overflow (meta ellipsises).
+   Phone: flex-wraps into a natural [✕][chips…][title] flow (see media query). */
 #meta-stack {
   display: flex; align-items: center; gap: 6px;
   flex: 1 1 0; min-width: 0; overflow: hidden;
@@ -387,19 +384,27 @@ header .battery:hover { color: var(--text); }
    right-side buttons are never pushed off */
 header > *:not(#meta-stack) { flex-shrink: 0; }
 @media (max-width: 640px) {
-  /* two half-rows LEFT-floated (align-items:flex-start), buttons stay right
-     (meta-stack still flex:1, pushing them over); rows vertically centered */
-  #meta-stack { flex-direction: column; align-items: flex-start; justify-content: center; gap: 1px; }
-  header .meta { font-size: 9px; max-width: 100%; line-height: 1.2; }
-  #tab-bar { flex: 0 0 auto; gap: 4px; margin: 0; }
-  #tab-bar .qtab {
-    padding: 0 6px; font-size: 9px; max-width: 96px; margin: 0;
+  /* Phone: one natural-wrapping flow — [✕ close] [tab chips…] [session title].
+     meta-stack wraps; #tab-bar uses display:contents so its chips join the same
+     wrap flow; the title (.meta) fills the rest of the width and wraps normally. */
+  #meta-stack {
+    flex-direction: row; flex-wrap: wrap; align-items: center;
+    align-content: flex-start; justify-content: flex-start;
+    gap: 3px 5px; overflow: hidden; max-height: 30px;   /* ≤ 2 rows, then clip */
+  }
+  #meta-stack > #closetab-btn { flex: 0 0 auto; }
+  #tab-bar { display: contents; }
+  header .meta {
+    flex: 1 1 55%; min-width: 0; max-width: 100%;
+    white-space: normal; overflow: visible; text-overflow: clip;
+    font-size: 9px; line-height: 1.25;
+  }
+  #tab-bar .qtab, #closetab-btn {
+    padding: 1px 6px; font-size: 9px; max-width: 120px; margin: 0;
     line-height: 1; border-radius: 4px;
   }
   #tab-bar .qtab-name { line-height: 1; }
   #tab-bar .qtab-x { font-size: 10px; line-height: 1; padding: 0; }
-  #meta-stack { gap: 0; }
-  header .meta { line-height: 1.2; }
   /* tightest header: zero top/bottom padding (keep only the notch safe-area),
      no button margins, shorter buttons. NOTE: the header can't go below the two
      stacked 10px text half-rows (~26px) — that's the floor, not the buttons. */
@@ -407,9 +412,17 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
   /* drop the FIXED height (that's what padding couldn't beat) → button height
      = its text; zero vertical padding, tight line-height */
   header button, header a.btn, header a.icon { height: auto; min-height: 0; margin: 0; }
-  header button.btn, header a.btn, header .mode-pick {
-    padding: 1px 5px; font-size: 10px; line-height: 1.2;
+  header button.btn, header a.btn,
+  header button.icon, header a.icon, header .mode-pick {
+    padding: 1px 6px; font-size: 11px; line-height: 1.2; min-width: 24px;
   }
+  /* traffic + battery % as small as the 9px meta on the left */
+  header .traffic { font-size: 8px; }
+  #battery { font-size: 8px; }
+  #battery .batt-pct { font-size: 8px; }
+  /* smaller battery icon on phones */
+  #battery .batt-ico { width: 14px; height: 7px; border-radius: 1.5px; }
+  #battery .batt-ico::after { right: -2px; top: 2px; width: 1.5px; height: 3px; }
 }
 .qtab {
   display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
@@ -424,6 +437,11 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
   font-size: 13px; line-height: 1; padding: 0 1px; flex-shrink: 0;
 }
 .qtab .qtab-x:hover { color: #ff6a6a; }
+/* shared close-current-tab button: styled as a .qtab chip (same bg/border/
+   radius/padding/font); just cancel the fixed header-button height so it's the
+   same height as the chips, and give it a red close-hover. */
+#closetab-btn { height: auto; min-height: 0; min-width: 0; }
+#closetab-btn:hover { color: #ff6a6a; border-color: var(--accent); }
 #cpu-modal .modal-card.cpu-card {
   width: 95vw; max-width: 900px; max-height: 85vh;
   display: flex; flex-direction: column; gap: 8px;
@@ -1416,17 +1434,16 @@ footer button.send {
   <header>
     <span id="status-dot" class="dot off" style="display:none"></span>
     <div id="meta-stack">
-      <span id="meta" class="meta"></span>
+      <button id="closetab-btn" class="qtab" style="display:none" title="Close current tab">✕</button>
       <div id="tab-bar"></div>
+      <span id="meta" class="meta"></span>
     </div>
     <span id="ready" class="ready" style="display:none"></span>
     <span id="traffic" class="traffic"></span>
     <span id="battery" class="battery" style="display:none" title="Click for CPU history"></span>
     <a id="remote-btn" class="battery" href="/remote/" title="Remote control" style="text-decoration:none">🖥</a>
     <span id="mode-group" class="mode-group" style="display:none">
-      <button class="btn mode-pick" data-mode="brief" title="brief">▁</button>
-      <button class="btn mode-pick" data-mode="medium" title="medium">▄</button>
-      <button class="btn mode-pick" data-mode="all" title="all">█</button>
+      <button id="mode-btn" class="btn icon" title="Display detail: brief / medium / all">▁</button>
     </span>
     <button id="screen-btn" class="btn icon" style="display:none" title="iTerm screen + session info">&gt;_</button>
     <button id="switch-btn" class="btn icon" style="display:none" title="切换到其它 tab">⇆</button>
@@ -1437,6 +1454,11 @@ footer button.send {
     <button id="new-btn" class="btn">+</button>
   </header>
   <div id="switch-menu" class="switch-menu" style="display:none"></div>
+  <div id="mode-menu" class="switch-menu" style="display:none">
+    <button class="sw-item mode-opt" data-mode="brief">▁ brief（默认）</button>
+    <button class="sw-item mode-opt" data-mode="medium">▄ medium</button>
+    <button class="sw-item mode-opt" data-mode="all">█ all</button>
+  </div>
 
   <div id="cpu-modal" class="modal">
     <div class="modal-card cpu-card">
@@ -1903,8 +1925,14 @@ footer button.send {
   const metaEl = document.getElementById("meta");
   const readyEl = document.getElementById("ready");
   const modeGroup = document.getElementById("mode-group");
-  const modePicks = Array.from(document.querySelectorAll(".mode-pick"));
+  const modeBtn = document.getElementById("mode-btn");
+  const modeMenu = document.getElementById("mode-menu");
+  const modeOpts = Array.from(document.querySelectorAll(".mode-opt"));
+  const MODE_ICON = { brief: "▁", medium: "▄", all: "█" };
   const backBtn = document.getElementById("back-btn");
+  const closeTabBtn = document.getElementById("closetab-btn");
+  closeTabBtn.addEventListener("click", () => { if (attachedSid) closeTab(attachedSid); });
+  const remoteBtn = document.getElementById("remote-btn");
   const newBtn = document.getElementById("new-btn");
   const tabsBtn = document.getElementById("tabs-btn");
   const filesBtn = document.getElementById("files-btn");
@@ -2352,6 +2380,8 @@ footer button.send {
     tvEl.classList.remove("show");
     footerEl.classList.add("hidden");
     backBtn.style.display = "none";
+    closeTabBtn.style.display = "none";
+    remoteBtn.style.display = "";       // 🖥 remote shown on the picker
     modeGroup.style.display = "none";
     screenBtn.style.display = "none";
     switchBtn.style.display = "none"; hideSwitchMenu();
@@ -2383,6 +2413,8 @@ footer button.send {
     tvEl.classList.add("show");
     footerEl.classList.remove("hidden");
     backBtn.style.display = "";
+    closeTabBtn.style.display = "";
+    remoteBtn.style.display = "none";   // hide 🖥 remote in the session detail view
     modeGroup.style.display = "";
     screenBtn.style.display = "";
     switchBtn.style.display = "";
@@ -3583,9 +3615,10 @@ footer button.send {
   // info button / modal. loadInfo() is called from openScreenInfo above.)
 
   function refreshModeButtons() {
-    for (const b of modePicks) {
-      if (b.dataset.mode === renderMode) b.classList.add("active");
-      else b.classList.remove("active");
+    modeBtn.textContent = MODE_ICON[renderMode] || "▁";     // button shows current mode
+    for (const b of modeOpts) {
+      if (b.dataset.mode === renderMode) b.classList.add("current");
+      else b.classList.remove("current");
     }
   }
 
@@ -4341,6 +4374,18 @@ footer button.send {
         JSON.stringify(openTabs.map(t => ({ sid: t.sid, name: t.name || "", wi: t.wi, ti: t.ti }))));
     } catch {}
   }
+  // Tab chip name budget: 8 "units" — a CJK char costs 2, everything else 1,
+  // so ~8 latin letters or ~4 Chinese chars. Appends … when clamped.
+  function clampTabName(s) {
+    s = (s || "").trim();
+    let out = "", budget = 8;
+    for (const ch of s) {
+      const cost = /[㐀-鿿豈-﫿＀-￯]/.test(ch) ? 2 : 1;
+      if (budget < cost) { out += "…"; break; }
+      budget -= cost; out += ch;
+    }
+    return out;
+  }
   function renderTabBar() {
     tabBarEl.innerHTML = "";
     // Stable display order = iTerm tab order (window_index, tab_index) so tabs
@@ -4361,16 +4406,16 @@ footer button.send {
       const full = (t.name && t.name.trim()) ? t.name : t.sid.slice(0, 4);
       const nm = document.createElement("span");
       nm.className = "qtab-name";
-      // phone: ACTIVE tab = "cur" (its title already shows in the meta half-row
-      // above); every other tab is just its wXtX/tX chip. desktop = full name.
+      // phone: the ACTIVE tab shows just "tX" (its name already shows in the
+      // title line, so repeating it wastes space); other tabs = "tX <name>"
+      // with the name clamped to ~8 latin / 4 CJK chars. desktop = "tX <full>".
       nm.textContent = mob
-        ? (t.sid === attachedSid ? "cur" : (tx || full.slice(0, 4)))
+        ? (t.sid === attachedSid ? (tx || "cur") : ((tx ? tx + " " : "") + clampTabName(full)))
         : ((tx ? tx + " " : "") + full);
-      nm.addEventListener("click", () => { if (t.sid !== attachedSid) enterTranscript(t.sid, t.name || ""); });
-      const x = document.createElement("button");
-      x.className = "qtab-x"; x.textContent = "✕"; x.title = "close tab";
-      x.addEventListener("click", (e) => { e.stopPropagation(); closeTab(t.sid); });
-      el.appendChild(nm); el.appendChild(x);
+      el.appendChild(nm);
+      // whole chip switches; no per-tab ✕ (too easy to misclick) — closing is
+      // done by the single shared close button, which only closes the current.
+      el.addEventListener("click", () => { if (t.sid !== attachedSid) enterTranscript(t.sid, t.name || ""); });
       tabBarEl.appendChild(el);
     }
   }
@@ -5143,9 +5188,16 @@ footer button.send {
     await attachSession(attachedSid, attachedName);
   });
 
-  // ---------- mode picker (3 inline buttons) ----------
-  for (const b of modePicks) {
+  // ---------- mode picker (single button → dropdown; brief default) ----------
+  function hideModeMenu() { modeMenu.style.display = "none"; }
+  modeBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    hideSwitchMenu();
+    modeMenu.style.display = (modeMenu.style.display === "none" || !modeMenu.style.display) ? "" : "none";
+  });
+  for (const b of modeOpts) {
     b.addEventListener("click", () => {
+      hideModeMenu();
       const m = b.dataset.mode;
       if (m === renderMode) return;
       renderMode = m;
@@ -5156,6 +5208,9 @@ footer button.send {
       pollOnce();
     });
   }
+  document.addEventListener("click", (e) => {
+    if (modeMenu.style.display !== "none" && !modeMenu.contains(e.target) && e.target !== modeBtn) hideModeMenu();
+  });
 
   // ---------- back / detach ----------
   backBtn.addEventListener("click", () => {
