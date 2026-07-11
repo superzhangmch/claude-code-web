@@ -20,25 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import shlex
 import subprocess
 from typing import Optional
-
-_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def _typed_from_colored(colored: str) -> str:
-    """From a `capture-pane -e` dump, return the real typed input on the cursor
-    line: text before the reverse-video cursor (SGR 7), SGR-stripped, minus the
-    ❯/> prompt. The dim ghost lives AFTER the cursor, so it's excluded."""
-    for line in reversed(colored.split("\n")):
-        if "\x1b[7m" in line:                       # reverse-video cursor → input line
-            pre = _SGR_RE.sub("", line.split("\x1b[7m", 1)[0]).lstrip()
-            if pre[:1] in ("❯", ">"):
-                pre = pre[1:]
-            return pre.strip()
-    return ""
 
 from iterm_bridge import (        # pure, iterm2-free helpers — reused as-is
     ClaudeSessionRef,
@@ -216,13 +200,29 @@ class TmuxBridge:
 
     async def input_typed_text(self, iterm_session_id: str) -> str:
         """The text the human has actually TYPED into the input box, excluding
-        the greyed autosuggest/placeholder ghost. The cursor (reverse-video, SGR
-        7) sits at the end of real input and BEFORE the dim ghost — so the plain
-        text on the cursor line up to the cursor, minus the ❯ prompt, is it."""
-        r = await asyncio.to_thread(_run, ["capture-pane", "-e", "-p", "-t", iterm_session_id])
-        if r is None or r.returncode != 0:
+        the greyed autosuggest/placeholder ghost. Uses tmux's OWN cursor
+        position (#{cursor_x}/#{cursor_y}) — structural, no assumption about how
+        the terminal renders the cursor/ghost. Real input = the cursor line up to
+        the cursor column (the ghost lives after the cursor), minus the prompt."""
+        pos = await asyncio.to_thread(
+            _run, ["display-message", "-p", "-t", iterm_session_id,
+                   "#{cursor_x}\t#{cursor_y}"])
+        if pos is None or pos.returncode != 0:
             return ""
-        return _typed_from_colored(r.stdout)
+        try:
+            cx, cy = (int(v) for v in pos.stdout.strip().split("\t"))
+        except (ValueError, TypeError):
+            return ""
+        cap = await asyncio.to_thread(_run, ["capture-pane", "-p", "-t", iterm_session_id])
+        if cap is None or cap.returncode != 0:
+            return ""
+        lines = cap.stdout.split("\n")
+        if not (0 <= cy < len(lines)):
+            return ""
+        pre = lines[cy][:cx].lstrip()
+        if pre[:1] in ("❯", ">"):        # drop the prompt glyph if present
+            pre = pre[1:]
+        return pre.strip()
 
     async def send_text_to(self, iterm_session_id: str, text: str) -> bool:
         """Inject keystrokes into a pane. A trailing CR is treated as a submit:
