@@ -4118,6 +4118,72 @@ async def get_state(
     }
 
 
+@app.get("/api/tool", dependencies=[Depends(require_token)])
+async def get_tool_detail(
+    claude_session_id: Optional[str] = None,
+    idx: Optional[int] = None,
+    tool_id: Optional[str] = None,
+    mode: str = "medium",
+):
+    """On-demand detail for ONE tool_use (used by brief-mode inline expand).
+    The tool is already on screen, so it lives in the currently-cached window —
+    look it up by (idx, tool_id) and truncate server-side (medium = head/tail
+    128 per arg; all = full, base64 only). No offset/length needed."""
+    if not claude_session_id or tool_id is None:
+        raise HTTPException(status_code=400, detail="claude_session_id and tool_id required")
+    b = bindings.get_by_session(claude_session_id)
+    if b is None:
+        raise HTTPException(status_code=409, detail="session not bound")
+    if b.jsonl_path is None or not b.jsonl_path.exists():
+        real = find_jsonl_for_session(claude_session_id)
+        if real is not None:
+            b.jsonl_path = real
+            bindings._persist()
+    all_entries = jsonl_cache.entries(b.jsonl_path)
+
+    def _find_tool():
+        # Prefer the exact entry by _idx; fall back to a scan by tool_id (the
+        # window may have been renumbered/rotated between render and click).
+        cand = [e for e in all_entries if idx is not None and e.get("_idx") == idx]
+        pools = [cand, all_entries] if cand else [all_entries]
+        for pool in pools:
+            for e in pool:
+                content = (e.get("message") or {}).get("content")
+                if not isinstance(content, list):
+                    continue
+                for p in content:
+                    if isinstance(p, dict) and p.get("type") == "tool_use" and p.get("id") == tool_id:
+                        return p
+        return None
+
+    def _find_result():
+        # The paired tool_result lives in a later entry (type=user) whose
+        # content carries a tool_result block with tool_use_id == tool_id.
+        for e in all_entries:
+            content = (e.get("message") or {}).get("content")
+            if not isinstance(content, list):
+                continue
+            for p in content:
+                if isinstance(p, dict) and p.get("type") == "tool_result" and p.get("tool_use_id") == tool_id:
+                    return p
+        return None
+
+    p = _find_tool()
+    if p is None:
+        raise HTTPException(status_code=404, detail="tool not found in window")
+    raw_input = p.get("input")
+    if mode == "all":
+        shown = _trim_args_base64_only(raw_input)
+    else:
+        shown = _trim_medium_args(raw_input)
+    result = None
+    rp = _find_result()
+    if rp is not None:
+        rc = _trim_medium_result_content(rp.get("content"))
+        result = {"content": rc, "is_error": bool(rp.get("is_error"))}
+    return {"name": p.get("name"), "input": shown, "result": result}
+
+
 @app.post("/api/input", dependencies=[Depends(require_token)])
 async def post_input(payload: InputPayload):
     b = bindings.get_by_session(payload.claude_session_id)

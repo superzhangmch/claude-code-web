@@ -707,6 +707,12 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 /* minimal tool-call stack: tight padding, no header; NARROW + equal gaps top &
    bottom (negative top cancels the previous block's 14px bottom margin). */
 .msg.system.stack-tool { padding: 3px 10px; margin: -10px 0 4px 0; }
+/* stacked tool names are clickable → inline-expand server-truncated detail */
+.sys-item.tool-click { cursor: pointer; }
+.sys-item.tool-click:hover { text-decoration: underline; text-underline-offset: 2px; }
+.sys-item.tool.open { color: var(--text); font-weight: 600; }
+/* expanded detail matches normal (medium) tool display — not the muted sys grey */
+.msg.system .tool-detail { margin-top: 6px; color: var(--text); }
 .msg .markdown p { margin: 0 0 .7em 0; }
 .msg .markdown p:last-child { margin-bottom: 0; }
 .msg .markdown h1, .msg .markdown h2, .msg .markdown h3 { margin: .8em 0 .4em 0; line-height: 1.3; }
@@ -743,8 +749,8 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
   word-break: break-word; background: var(--code-bg);
   border-radius: 4px; padding: 8px 10px;
 }
-.msg .tool-call .tname { color: #4ec9b0; font-weight: 600; }
-.msg .tool-call .targs { color: #cbd0da; margin-top: 4px; max-height: 180px; overflow-y: auto; }
+.msg .tool-call .tname { color: var(--accent); font-weight: 600; }
+.msg .tool-call .targs { color: var(--text); margin-top: 4px; max-height: 180px; overflow-y: auto; }
 .msg .tool-call .targs-table-wrap {
   margin-top: 4px;
   max-height: 300px; overflow: auto;
@@ -758,11 +764,11 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 .msg .tool-call .targs-table tr:last-child { border-bottom: 0; }
 .msg .tool-call .targs-table .targs-k {
   vertical-align: top; padding: 4px 8px 4px 0;
-  color: #4ec9b0; white-space: nowrap; font-weight: 500;
+  color: var(--accent); white-space: nowrap; font-weight: 500;
 }
 .msg .tool-call .targs-table .targs-v {
   vertical-align: top; padding: 4px 0;
-  color: #cbd0da; white-space: pre;
+  color: var(--text); white-space: pre;
 }
 .msg .tool-call .targs-table .targs-v pre {
   margin: 0; white-space: pre;
@@ -1353,6 +1359,13 @@ footer button.send {
 #links-modal .ltag { flex-shrink: 0; font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 4px; letter-spacing: .04em; }
 #links-modal .ltag-url { background: rgba(90,150,255,.18); color: #7ab0ff; }
 #links-modal .ltag-path { background: rgba(120,200,120,.18); color: #7bcf7b; }
+#links-modal .link-thumb { margin: -2px 0 8px 34px; padding: 0; }
+#links-modal .link-thumb img {
+  max-width: 100%; max-height: 220px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--code-bg); cursor: zoom-in;
+  display: block;
+}
+#links-modal .link-thumb.thumb-err { color: var(--muted); font-size: 12px; margin-left: 34px; }
 #links-modal .modal-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 #links-modal .link-row .lk {
   flex: 1; min-width: 0; overflow: hidden; word-break: break-all; white-space: normal;
@@ -5200,6 +5213,12 @@ footer button.send {
   }
   // Long links/paths: show head100 … tail100 (middle elided), full text on hover.
   const elideLink = (s) => (s.length > 204) ? (s.slice(0, 100) + " … " + s.slice(-100)) : s;
+  const IMG_EXT_RE = /\.(?:jpe?g|png|gif|webp|bmp|svg|avif|heic|heif)$/i;
+  const isImagePath = (p) => IMG_EXT_RE.test(p);
+  // Serve a local file via the fs API — usable straight as an <img src> since
+  // the endpoint accepts a ?token= (an <img> can't set an auth header).
+  const fsFileUrl = (p) => location.origin + "/api/fs/file?path="
+    + encodeURIComponent(p) + "&token=" + encodeURIComponent(authToken);
   function showLinks(text) {
     const { urls, paths } = extractLinks(text);
     linksListEl.textContent = "";
@@ -5231,6 +5250,8 @@ footer button.send {
         node = document.createElement("span"); node.className = "lk path";
         node.textContent = elideLink(it.v); node.title = it.v;
       }
+      const img = it.t === "path" && isImagePath(it.v);
+      if (img) tag.textContent = "IMG";
       li.appendChild(num); li.appendChild(tag); li.appendChild(node);
       if (it.t === "path") {
         const open = document.createElement("button");
@@ -5240,6 +5261,16 @@ footer button.send {
       }
       li.appendChild(mkCopy(it.v));
       linksListEl.appendChild(li);
+      if (img) {
+        // Inline thumbnail via the fs/file API; click to open the full image.
+        const wrap = document.createElement("div"); wrap.className = "link-thumb";
+        const im = document.createElement("img");
+        im.loading = "lazy"; im.src = fsFileUrl(it.v); im.alt = it.v; im.title = "click to open full image";
+        im.addEventListener("click", () => window.open(fsFileUrl(it.v), "_blank"));
+        im.addEventListener("error", () => { wrap.textContent = "(couldn't load image preview)"; wrap.classList.add("thumb-err"); });
+        wrap.appendChild(im);
+        linksListEl.appendChild(wrap);
+      }
     });
     linksModal.classList.add("show");
   }
@@ -5284,11 +5315,71 @@ footer button.send {
       item.appendChild(document.createTextNode(" " + p.body));
       item.title = b.text || "";
     } else {
-      item.classList.add("tool");
+      item.classList.add("tool", "tool-click");
       item.textContent = b.name || "(tool)";
-      item.title = rawTextFor(b);
+      item.title = "click to expand detail";
+      if (b.id != null) item.dataset.tid = b.id;
+      if (b.idx != null) item.dataset.idx = b.idx;
+      item.addEventListener("click", onToolItemClick);
     }
     return item;
+  }
+  // Click a stacked tool name → fetch its (server-truncated) detail and expand
+  // a panel below the stack; click the same one again to collapse.
+  async function onToolItemClick(ev) {
+    const item = ev.currentTarget;
+    const block = item.closest(".msg.system");
+    if (!block || !attachedSid) return;
+    const tid = item.dataset.tid || "";
+    let panel = block.querySelector(":scope > .tool-detail");
+    // toggle-collapse if this same tool is already open
+    if (panel && panel.dataset.tid === tid && item.classList.contains("open")) {
+      panel.remove();
+      block.querySelectorAll(".sys-item.tool.open").forEach(x => x.classList.remove("open"));
+      return;
+    }
+    block.querySelectorAll(".sys-item.tool.open").forEach(x => x.classList.remove("open"));
+    item.classList.add("open");
+    if (!panel) { panel = document.createElement("div"); panel.className = "tool-detail"; block.appendChild(panel); }
+    panel.dataset.tid = tid;
+    panel.textContent = "…";
+    try {
+      const params = new URLSearchParams({ claude_session_id: attachedSid, tool_id: tid, mode: "medium" });
+      if (item.dataset.idx) params.set("idx", item.dataset.idx);
+      const resp = await authedFetch("/api/tool?" + params.toString());
+      if (!resp.ok) { panel.textContent = "(couldn't load tool detail)"; return; }
+      const d = await resp.json();
+      if (panel.dataset.tid !== tid) return;   // another click won the race
+      panel.textContent = "";
+      const callBox = buildToolCallBox({ name: d.name, input: d.input });
+      const callRaw = () => {
+        const a = (d.input && typeof d.input === "object")
+          ? JSON.stringify(d.input, null, 2) : (d.input != null ? String(d.input) : "");
+        return (d.name || "") + (a ? "\n" + a : "");
+      };
+      callBox.classList.add("wrap-on");        // wrap by default → head+tail fully visible
+      const cwrap = makeWrapBtn(callBox); cwrap.classList.add("active");
+      const cRow = document.createElement("div"); cRow.className = "rlabel-row";
+      cRow.appendChild(cwrap);
+      cRow.appendChild(makeCopyBtn(callRaw));
+      panel.appendChild(cRow);
+      panel.appendChild(callBox);
+      if (d.result) {                          // show the paired result too, like medium
+        const wrap = document.createElement("div");
+        wrap.className = "tool-result-inline" + (d.result.is_error ? " is-error" : "");
+        const labRow = document.createElement("div"); labRow.className = "rlabel-row";
+        const lab = document.createElement("span"); lab.className = "rlabel";
+        lab.textContent = d.result.is_error ? "result (error)" : "result";
+        labRow.appendChild(lab);
+        const resBox = buildToolResultBox({ content: d.result.content, is_error: d.result.is_error });
+        resBox.classList.add("wrap-on");
+        const rwrap = makeWrapBtn(resBox); rwrap.classList.add("active");
+        labRow.appendChild(rwrap);
+        labRow.appendChild(makeCopyBtn(() => d.result.content || ""));
+        wrap.appendChild(labRow); wrap.appendChild(resBox);
+        panel.appendChild(wrap);
+      }
+    } catch { panel.textContent = "(error loading detail)"; }
   }
   // Append an item to the running stack box, with a separator before all but the first.
   function appendStackItem(box, kind, b) {
