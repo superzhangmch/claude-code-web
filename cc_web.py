@@ -1224,6 +1224,10 @@ _CHROME_SUBSTR = ("auto mode", "new task?", "esc to interrupt", "tokens", "/clea
 # detection: we only scan the screen when claude has been quiet AND the
 # user hasn't typed anything recently (so a prompt is plausible).
 _last_input_ts: dict[str, float] = {}
+# Last (final-bytes, ts) per session — drop an identical resend inside a short
+# window (double-tap / client retry): only the first takes effect.
+_last_input_sig: dict[str, tuple[str, float]] = {}
+_INPUT_DEDUP_WINDOW = 1.0
 PENDING_CONFIRM_IDLE_SEC = 6.0
 
 
@@ -2855,6 +2859,8 @@ class InputPayload(BaseModel):
     claude_session_id: str
     text: str
     press_enter: bool = True
+    clear_first: bool = False   # send Ctrl+U (separate keystroke) to wipe any
+                                # residual in the input box before typing
 
 
 class NewSessionPayload(BaseModel):
@@ -4259,10 +4265,26 @@ async def post_input(payload: InputPayload):
     final = body
     if payload.press_enter:
         final = final + "\r"
+    # Dedup: an identical `final` to the same session within the window is a
+    # double-tap / retry — honour only the first, silently drop the rest.
+    now = _time.time()
+    sig = _last_input_sig.get(b.claude_session_id)
+    if sig and sig[0] == final and (now - sig[1]) < _INPUT_DEDUP_WINDOW:
+        return {"ok": True, "deduped": True}
+    _last_input_sig[b.claude_session_id] = (final, now)
+    # Optional forced clear: Ctrl+U as its OWN keystroke (with a beat) so the
+    # TUI processes it as "kill line" — never bundle it into the text stream
+    # (that leaks a literal \x15 into the message).
+    if payload.clear_first and body and not body.startswith("\x1b"):
+        try:
+            await bridge.send_text_to(b.iterm_session_id, "\x15")
+            await asyncio.sleep(0.12)
+        except Exception:
+            pass
     ok = await bridge.send_text_to(b.iterm_session_id, final)
     if not ok:
         raise HTTPException(status_code=404, detail="iterm session vanished")
-    _last_input_ts[b.claude_session_id] = _time.time()
+    _last_input_ts[b.claude_session_id] = now
     return {"ok": True}
 
 
@@ -4498,6 +4520,25 @@ def _screen_activity(sid: str, text: str, ver: str, want: int = 2) -> dict:
                 picked = [lines[i].strip()]
                 break
     return {"ver": new_ver, "moving": True, "lines": [p[:160] for p in picked]}
+
+
+@app.get("/api/input-state", dependencies=[Depends(require_token)])
+async def get_input_state(claude_session_id: str):
+    """Is the human mid-typing in claude's input box? Used by the ask-peer skill
+    to hold a send instead of clobbering a half-typed message. Cursor-based
+    (excludes the greyed autosuggest ghost); works on both bridges."""
+    b = bindings.get_by_session(claude_session_id)
+    if b is None:
+        raise HTTPException(status_code=409, detail="session not bound")
+    if not verify_binding(b):
+        bindings.remove_session(claude_session_id)
+        raise HTTPException(status_code=410, detail="tab/pid is gone")
+    try:
+        t = await bridge.input_typed_text(b.iterm_session_id)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"cannot read screen: {e}")
+    t = (t or "").strip()
+    return {"busy": bool(t), "text": t[:120]}
 
 
 @app.get("/api/activity", dependencies=[Depends(require_token)])

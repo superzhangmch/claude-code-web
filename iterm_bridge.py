@@ -203,6 +203,27 @@ class ItermBridge:
             })
         return out
 
+    async def input_typed_text(self, iterm_session_id: str) -> str:
+        """Text the human has TYPED into the input box, excluding the greyed
+        autosuggest/placeholder ghost. The ghost renders AFTER the cursor, so we
+        take the cursor line up to the cursor column, minus the ❯ prompt."""
+        if not self.app:
+            return ""
+        session = self.app.get_session_by_id(iterm_session_id)
+        if session is None:
+            return ""
+        try:
+            contents = await asyncio.wait_for(
+                session.async_get_screen_contents(), _RPC_TIMEOUT)
+            cur = contents.cursor_coord
+            line = contents.line(cur.y).string.replace("\x00", " ")
+            pre = line[:cur.x].lstrip()
+            if pre[:1] in ("❯", ">"):
+                pre = pre[1:]
+            return pre.strip()
+        except Exception:
+            return ""
+
     async def send_text_to(self, iterm_session_id: str, text: str) -> bool:
         """Send text to a specific iTerm2 session.
 

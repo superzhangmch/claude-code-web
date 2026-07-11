@@ -727,7 +727,7 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 #hb {
   display: flex; align-items: flex-start; gap: 7px;
   padding: 5px 12px; margin: 2px 0 4px 0;
-  font: 0.78em/1.45 ui-monospace, Menlo, monospace; color: var(--muted);
+  font: 0.68em/1.4 ui-monospace, Menlo, monospace; color: var(--muted);
   min-width: 0;
 }
 #hb .hb-dot {
@@ -737,6 +737,9 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 #hb .hb-txt { flex: 1; min-width: 0; }
 #hb .hb-txt .hb-ln { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #hb .hb-cd { flex-shrink: 0; opacity: .6; white-space: nowrap; }
+/* idle (frozen): keep the last diff shown, static dimmed dot, no pulse */
+#hb.idle .hb-dot { animation: none; opacity: .4; }
+#hb.idle { opacity: .8; }
 @keyframes hbpulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
 .msg .markdown p { margin: 0 0 .7em 0; }
 .msg .markdown p:last-child { margin-bottom: 0; }
@@ -853,7 +856,16 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 
 #autoload {
   display: none; justify-content: center; align-items: center; gap: 8px;
-  flex-wrap: wrap; padding: 10px 0 4px 0; cursor: pointer;
+  flex-wrap: wrap; padding: 10px 0 4px 0;
+}
+#autoload .al-btn {
+  background: var(--panel); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 4px 10px; font-size: 11px; line-height: 1; cursor: pointer;
+  white-space: nowrap;
+}
+#autoload .al-btn:hover, #autoload .al-btn:active {
+  color: var(--text); box-shadow: inset 0 0 0 1px var(--accent); outline: none;
 }
 /* Combined segmented pill [ tailScr | A | a | ↑ | ↓ | ⤓ ] FLOATING above the
    input, pinned to the footer so it stays on screen while the chat scrolls —
@@ -1796,10 +1808,8 @@ footer button.send {
       <div id="load-earlier"><button id="load-earlier-btn" class="btn">Load earlier rounds</button></div>
       <div id="transcript"></div>
       <div id="autoload">
-        <span class="indicator">
-          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-          <span id="autoload-label" style="margin-left:6px">auto-refreshing · tap to stop</span>
-        </span>
+        <button id="autoload-fresh" class="al-btn" title="Refresh now (fetch latest)">↻ fresh</button>
+        <button id="autoload-toggle" class="al-btn" title="Pause / resume auto-refresh">⏸ pause</button>
       </div>
     </div>
     <div id="tail-box" style="display:none">
@@ -5800,42 +5810,15 @@ footer button.send {
   document.getElementById("tail-refresh").addEventListener("click", (e) => { e.stopPropagation(); tailScreen(); });
   tailClose.addEventListener("click", (e) => { e.stopPropagation(); tailBox.style.display = "none"; });
 
-  autoloadEl.addEventListener("click", async (e) => {
+  // Two explicit controls (split from the old single tap-zone):
+  //   ↻ fresh  → one-shot "get latest" now, regardless of paused/idle state
+  //   ⏸/▶      → pause / resume the auto-refresh loop
+  document.getElementById("autoload-fresh").addEventListener("click", (e) => {
+    e.stopPropagation(); forceCheckNow();
+  });
+  document.getElementById("autoload-toggle").addEventListener("click", (e) => {
     e.stopPropagation();
-    if (!isPaused && !claudeIdle) {
-      setPaused(true, "manual");
-      return;
-    }
-    // Manual-pause tap: full resume, no one-shot. The user explicitly
-    // paused while polling was active and now wants it back.
-    if (isPaused && pauseReason === "manual") {
-      setPaused(false);
-      return;
-    }
-    // Timeout-pause OR claude-idle: one-shot fetch.
-    const wasTimeoutPause = isPaused && pauseReason === "timeout";
-    const before = lastIdx;
-    isPaused = false;     // temp unpause so pollOnce() actually fetches
-    keepAlive();
-    // Brief "checking…" state — feedback that the tap registered.
-    autoloadEl.classList.remove("paused");
-    autoloadEl.classList.add("checking");
-    autoloadLabel.textContent = "checking…";
-    try {
-      await pollOnce();
-    } finally {
-      autoloadEl.classList.remove("checking");
-    }
-    if (lastIdx !== before) {
-      // New content. If claude is generating, polling auto-resumes via
-      // pollOnce's finally block. Nothing to do.
-      return;
-    }
-    // Nothing new — restore the prior state. When idle (not timed out),
-    // pollOnce's finally keeps a slow poll running so a pending prompt still
-    // surfaces; we just refresh the label.
-    if (wasTimeoutPause) setPaused(true, "timeout");
-    else updateAutoload();
+    if (isPaused) setPaused(false); else setPaused(true, "manual");
   });
   // Force a one-shot "get the latest" fetch now (what the keyboard shortcut and
   // the autoload tap both want).
@@ -5843,11 +5826,10 @@ footer button.send {
     if (!attachedSid) return;
     isPaused = false;
     keepAlive();
-    autoloadEl.classList.remove("paused");
-    autoloadEl.classList.add("checking");
-    autoloadLabel.textContent = "checking…";
+    const fb = document.getElementById("autoload-fresh");
+    if (fb) { fb.disabled = true; fb.textContent = "↻ …"; }
     try { await pollOnce(); }
-    finally { autoloadEl.classList.remove("checking"); updateAutoload(); }
+    finally { if (fb) { fb.disabled = false; fb.textContent = "↻ fresh"; } updateAutoload(); }
   }
 
   // Transcript-page keyboard shortcuts (desktop). Plain keys, ONLY when you're
@@ -5922,10 +5904,12 @@ footer button.send {
 
   function updateAutoload() {
     autoloadEl.classList.toggle("show", !!attachedSid);
-    autoloadEl.classList.toggle("paused", isPaused || claudeIdle);
-    autoloadLabel.textContent = isPaused ? "paused · tap to continue"
-      : (claudeIdle ? "claude idle · watching for prompts"
-      : "auto-refreshing · tap to stop");
+    autoloadEl.classList.toggle("paused", isPaused);
+    // State is carried by the toggle button itself — no separate status label.
+    const tgl = document.getElementById("autoload-toggle");
+    if (tgl) tgl.textContent = isPaused
+      ? (pauseReason === "timeout" ? "▶ resume (timed out)" : "▶ resume")
+      : "⏸ pause";
   }
   function setPaused(p, reason) {
     isPaused = p;
@@ -5976,8 +5960,9 @@ footer button.send {
       if (sid !== attachedSid) return;   // switched away during json() → don't ingest into the new session
       claudeIdle = m.claude_idle === true;
       setStatus("ok"); setReady(m.claude_idle); updateAutoload();
-      // heartbeat runs only while claude is busy (no point when idle/hidden/paused)
-      if (!claudeIdle && !document.hidden && !isPaused) startHeartbeat(); else stopHeartbeat();
+      // heartbeat: poll while busy; freeze (show last diff, "idle") when idle;
+      // fully hide when hidden/paused/detached.
+      syncHeartbeat();
       const entries = m.transcript || [];
       if (lastIdx === null) {
         hasMoreHistory = !!m.has_more_history;
@@ -6013,7 +5998,7 @@ footer button.send {
   // changes, reset on change. Stops when hidden / idle / paused / detached.
   const HB_BASE = 3000, HB_MAX = 48000, HB_LINES = 2;   // x = last 2 lines of last diff block
   let hbVer = "", hbSid = "", hbDelay = HB_BASE, hbNextAt = 0, hbLines = [],
-      hbBusy = false, hbTicker = null, hbEl = null;
+      hbBusy = false, hbTicker = null, hbEl = null, hbFrozen = false;
   function ensureHb() {
     if (hbEl) return hbEl;
     hbEl = document.createElement("div"); hbEl.id = "hb";
@@ -6032,24 +6017,37 @@ footer button.send {
       for (const _ of rows) { const d = document.createElement("div"); d.className = "hb-ln"; el._txt.appendChild(d); }
     }
     rows.forEach((r, i) => { el._txt.children[i].textContent = r; });
-    const secs = Math.max(0, Math.ceil((hbNextAt - Date.now()) / 1000));
-    el._cd.textContent = " · " + secs + "s";
+    if (hbFrozen) { el._cd.textContent = " · idle"; }
+    else { const secs = Math.max(0, Math.ceil((hbNextAt - Date.now()) / 1000)); el._cd.textContent = " · " + secs + "s"; }
   }
   function hbShow() { const el = ensureHb(); if (transcriptEl.lastChild !== el) transcriptEl.appendChild(el); }
   function hbHide() { if (hbEl && hbEl.parentNode) hbEl.parentNode.removeChild(hbEl); }
   function startHeartbeat() {
     if (attachedSid !== hbSid) { hbSid = attachedSid; hbVer = ""; hbLines = []; }   // fresh baseline per session
+    hbFrozen = false; ensureHb().classList.remove("idle");
     if (hbTicker) return;
     hbDelay = HB_BASE; hbNextAt = Date.now();       // fetch on the first tick
     hbShow(); hbPaint();
     hbTicker = setInterval(hbTick, 1000);
   }
-  function stopHeartbeat() {
+  function freezeHeartbeat() {                       // idle → stop polling, keep showing the last diff
     if (hbTicker) { clearInterval(hbTicker); hbTicker = null; }
+    hbFrozen = true; ensureHb().classList.add("idle");
+    if (!hbLines.length && !hbBusy) { hbFetch(); return; }  // nothing captured yet → grab it once
+    hbShow(); hbPaint();
+  }
+  function stopHeartbeat() {                          // fully hide (hidden / paused / detached)
+    if (hbTicker) { clearInterval(hbTicker); hbTicker = null; }
+    hbFrozen = false; if (hbEl) hbEl.classList.remove("idle");
     hbHide();
   }
+  function syncHeartbeat() {
+    if (!attachedSid || document.hidden || isPaused) { stopHeartbeat(); return; }
+    if (claudeIdle) freezeHeartbeat(); else startHeartbeat();
+  }
   function hbTick() {
-    if (!attachedSid || document.hidden || isPaused || claudeIdle) { stopHeartbeat(); return; }
+    if (!attachedSid || document.hidden || isPaused) { stopHeartbeat(); return; }
+    if (claudeIdle) { freezeHeartbeat(); return; }
     if (attachedSid !== hbSid) { hbSid = attachedSid; hbVer = ""; hbLines = []; hbNextAt = Date.now(); }
     if (Date.now() >= hbNextAt && !hbBusy) hbFetch();
     hbPaint();
@@ -6071,7 +6069,7 @@ footer button.send {
     finally { hbBusy = false; hbNextAt = Date.now() + hbDelay; hbPaint(); }
   }
   // keep the heartbeat pinned below the last message after new content arrives
-  function hbReattach() { if (hbTicker) hbShow(); }
+  function hbReattach() { if (hbTicker || hbFrozen) hbShow(); }
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) { stopAuto(); stopHeartbeat(); return; }   // hidden → stop screen auto-reload + heartbeat

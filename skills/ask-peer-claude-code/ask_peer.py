@@ -247,10 +247,33 @@ def main():
         who += f" {a.frm[:8]}"
     if name:
         who += f" ({name})"
-    msg = f"[⇄ from peer claude{who}] {msg}"
+    # Header tag + an explicit END marker, so the peer knows exactly where our
+    # relayed text stops — anything AFTER the end marker is the human user, not us.
+    msg = f"[⇄ from peer claude{who}] {msg}\n[⇄ end of peer message]"
+
+    # Don't clobber a human who is mid-typing: if the peer's input box holds real
+    # typed text (ghost/placeholder excluded — see /api/input-state), wait it out
+    # (poll every 5s, up to 2 min). If it's STILL occupied, force-clear and send.
+    clear_first = False
+    waited = 0.0
+    while True:
+        try:
+            busy = bool(_req("GET",
+                             f"{base}/api/input-state?claude_session_id={a.to}",
+                             token, timeout=15).get("busy"))
+        except Exception:
+            busy = False          # can't tell → don't block forever
+        if not busy:
+            break
+        if waited >= 120:
+            clear_first = True     # waited 2 min → wipe residual, then send
+            break
+        time.sleep(5)
+        waited += 5
 
     _req("POST", f"{base}/api/input", token,
-         {"claude_session_id": a.to, "text": msg}, timeout=30)
+         {"claude_session_id": a.to, "text": msg, "clear_first": clear_first},
+         timeout=30)
 
     # Fire-and-confirm (e.g. delegating a task): return once the message has
     # landed in the peer's transcript — don't block for the reply. If the peer

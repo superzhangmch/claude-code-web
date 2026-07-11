@@ -20,9 +20,25 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
 import subprocess
 from typing import Optional
+
+_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _typed_from_colored(colored: str) -> str:
+    """From a `capture-pane -e` dump, return the real typed input on the cursor
+    line: text before the reverse-video cursor (SGR 7), SGR-stripped, minus the
+    ❯/> prompt. The dim ghost lives AFTER the cursor, so it's excluded."""
+    for line in reversed(colored.split("\n")):
+        if "\x1b[7m" in line:                       # reverse-video cursor → input line
+            pre = _SGR_RE.sub("", line.split("\x1b[7m", 1)[0]).lstrip()
+            if pre[:1] in ("❯", ">"):
+                pre = pre[1:]
+            return pre.strip()
+    return ""
 
 from iterm_bridge import (        # pure, iterm2-free helpers — reused as-is
     ClaudeSessionRef,
@@ -197,6 +213,16 @@ class TmuxBridge:
         while lines and not lines[-1]:
             lines.pop()
         return "\n".join(lines[-max_lines:])
+
+    async def input_typed_text(self, iterm_session_id: str) -> str:
+        """The text the human has actually TYPED into the input box, excluding
+        the greyed autosuggest/placeholder ghost. The cursor (reverse-video, SGR
+        7) sits at the end of real input and BEFORE the dim ghost — so the plain
+        text on the cursor line up to the cursor, minus the ❯ prompt, is it."""
+        r = await asyncio.to_thread(_run, ["capture-pane", "-e", "-p", "-t", iterm_session_id])
+        if r is None or r.returncode != 0:
+            return ""
+        return _typed_from_colored(r.stdout)
 
     async def send_text_to(self, iterm_session_id: str, text: str) -> bool:
         """Inject keystrokes into a pane. A trailing CR is treated as a submit:
