@@ -1958,11 +1958,19 @@ def _trim_brief(e: dict) -> Optional[dict]:
         if content.strip():
             new_content = content
     elif isinstance(content, list):
-        parts = [
-            {"type": "text", "text": p["text"]}
-            for p in content
-            if isinstance(p, dict) and p.get("type") == "text" and (p.get("text") or "").strip()
-        ]
+        # brief keeps text; also keeps tool_use as NAME ONLY (drop args) so the
+        # UI can show a compact "Tool calls: a · b · c" stack. tool_result is
+        # still dropped in brief.
+        parts = []
+        for p in content:
+            if not isinstance(p, dict):
+                continue
+            t = p.get("type")
+            if t == "text" and (p.get("text") or "").strip():
+                parts.append({"type": "text", "text": p["text"]})
+            elif t == "tool_use":
+                parts.append({"type": "tool_use", "id": p.get("id"),
+                              "name": p.get("name"), "input": {}})
         if parts:
             new_content = parts
     if new_content is None:
@@ -2017,6 +2025,33 @@ def _head_tail_trunc(s: str, total: int) -> str:
     return f"{s[:half]} ... [{skipped} chars skipped] ... {s[-half:]}"
 
 
+_SUMMARY_RE = re.compile(r"<summary>([\s\S]*?)</summary>", re.I)
+_LEADTAG_RE = re.compile(r"^\s*<([a-z][\w-]*)", re.I)
+
+
+def _sys_collapse_str(s: str) -> str:
+    """Collapse an xml-wrapped System msg to '<tag> <summary>BODY</summary>' so the
+    UI can show 'tag: BODY'. BODY = the message's own <summary> if it has one
+    (task-notification always does), else the de-tagged inner text. Parsed on the
+    FULL text (server-side) so the summary is never lost to head/tail truncation.
+    Non-xml System text (watcher ticks etc.) keeps the old head+tail blurb."""
+    if not isinstance(s, str):
+        return s
+    tagm = _LEADTAG_RE.match(s)
+    if not tagm:
+        return _head_tail_trunc(s, SYS_BRIEF_BUDGET)
+    tag = tagm.group(1)
+    sm = _SUMMARY_RE.search(s)
+    if sm:
+        body = sm.group(1).strip()
+    else:
+        body = re.sub(r"</?[a-z][\w-]*[^>]*>", " ", s, flags=re.I)  # drop tags
+        body = re.sub(r"\s+", " ", body).strip()
+    if len(body) > SYS_BRIEF_BUDGET:
+        body = body[:SYS_BRIEF_BUDGET] + " …"
+    return f"<{tag}> <summary>{body}</summary>"
+
+
 # ---------- auto-injected (scheduler / watcher / autonomous-loop) detection ----------
 # ScheduleWakeup / cron / autonomous-/loop ticks are NOT typed by the human — Claude
 # Code stamps the recorded turn isMeta=true + promptSource='system'. We surface them
@@ -2069,7 +2104,7 @@ def _collapse_sys_brief(new_content):
     noise) to a head+tail blurb — used in BOTH brief and medium. Leaves any
     tool_use/tool_result content untouched so medium still shows those in full."""
     if isinstance(new_content, str):
-        return _head_tail_trunc(new_content, SYS_BRIEF_BUDGET)
+        return _sys_collapse_str(new_content)
     if isinstance(new_content, list):
         if any(isinstance(p, dict) and p.get("type") not in ("text", None)
                for p in new_content):
@@ -2077,7 +2112,7 @@ def _collapse_sys_brief(new_content):
         joined = "\n".join(
             p.get("text", "") for p in new_content
             if isinstance(p, dict) and p.get("type") == "text")
-        return [{"type": "text", "text": _head_tail_trunc(joined, SYS_BRIEF_BUDGET)}]
+        return [{"type": "text", "text": _sys_collapse_str(joined)}]
     return new_content
 
 
@@ -2254,7 +2289,7 @@ def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
                 if _is_command_noise(content) or _looks_like_auto_prompt(content):
                     qe["_system"] = True
                     if mode == "brief":
-                        qe["message"]["content"] = _head_tail_trunc(content, SYS_BRIEF_BUDGET)
+                        qe["message"]["content"] = _collapse_sys_brief(content)
                 out.append(qe)
             continue
         if t not in ("user", "assistant"):

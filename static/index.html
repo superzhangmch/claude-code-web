@@ -97,6 +97,9 @@ html, body {
   background: var(--bg); color: var(--text);
   font: 15px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   height: 100%; overscroll-behavior: none;
+  /* iPad Safari auto-inflates text (esp. wide/landscape), which fought the
+     chat-scale `zoom` (worked on iPhone, not iPad). Pin it so zoom controls size. */
+  -webkit-text-size-adjust: 100%; text-size-adjust: 100%;
 }
 body { display: flex; flex-direction: column; height: 100dvh; }
 
@@ -137,6 +140,10 @@ header .mode-group { display: inline-flex; gap: 2px; }
 }
 .switch-menu .sw-item:hover { border-color: var(--accent); }
 .switch-menu .sw-item.current { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.switch-menu .menu-sec { font-size: 10px; color: var(--muted); margin: 6px 2px 3px; text-transform: uppercase; letter-spacing: .05em; }
+.switch-menu .menu-sec:first-child { margin-top: 0; }
+.switch-menu .menu-row { display: flex; gap: 4px; }
+.switch-menu .menu-row .sw-item { flex: 1; text-align: center; margin-bottom: 0; }
 .switch-menu .sw-empty { color: var(--muted); font-size: 12px; padding: 8px; }
 /* All header buttons / icons share the same height so they line up
    with the verbosity (▁▄█) picker. Each individual button keeps its
@@ -383,22 +390,22 @@ header .battery:hover { color: var(--text); }
 /* only #meta-stack shrinks; header is nowrap+overflow:hidden so no wrap and the
    right-side buttons are never pushed off */
 header > *:not(#meta-stack) { flex-shrink: 0; }
-@media (max-width: 640px) {
-  /* Phone: one natural-wrapping flow — [✕ close] [tab chips…] [session title].
-     meta-stack wraps; #tab-bar uses display:contents so its chips join the same
-     wrap flow; the title (.meta) fills the rest of the width and wraps normally. */
+@media (orientation: portrait), (max-width: 640px) {
+  /* Portrait (screen taller than wide) or narrow → phone: ONE natural-wrapping
+     flow in the top-left — [✕ close][tab1][tab2]… then the current tab's info
+     (title). Whole items wrap onto as many rows as needed; nothing clipped. */
   #meta-stack {
-    flex-direction: row; flex-wrap: wrap; align-items: center;
-    align-content: flex-start; justify-content: flex-start;
-    gap: 3px 5px; overflow: hidden; max-height: 30px;   /* ≤ 2 rows, then clip */
+    flex-flow: row wrap; align-items: center; align-content: flex-start;
+    justify-content: flex-start; gap: 3px 5px; overflow: visible;
   }
-  #meta-stack > #closetab-btn { flex: 0 0 auto; }
   #tab-bar { display: contents; }
+  #meta-stack > #closetab-btn { flex: 0 0 auto; }
   header .meta {
-    flex: 1 1 55%; min-width: 0; max-width: 100%;
+    flex: 1 1 auto; min-width: 0; max-width: 100%;
     white-space: normal; overflow: visible; text-overflow: clip;
-    font-size: 9px; line-height: 1.25;
+    font-size: 9px; line-height: 1.3;
   }
+  header { overflow: visible; }   /* let the wrapped rows show, don't clip */
   #tab-bar .qtab, #closetab-btn {
     padding: 1px 6px; font-size: 9px; max-width: 120px; margin: 0;
     line-height: 1; border-radius: 4px;
@@ -641,6 +648,8 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 #transcript-view { display: none; }
 #transcript-view.show { display: block; }
 
+/* chat font scale — set via --cs on <body>; prose inherits, code blocks use em */
+#transcript { font-size: calc(15px * var(--cs, 1)); }
 .msg {
   margin: 0 0 14px 0; padding: 10px 14px;
   background: var(--panel);
@@ -686,6 +695,18 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 .msg .copy-btn svg { display: block; }
 .msg .copy-btn.done { color: #6ee884; }
 .msg .markdown { word-break: break-word; }
+/* stacked compact rows (System msgs / brief tool-calls) — INLINE flow, wraps */
+.msg.system .sys-lines { font-size: 0.85em; line-height: 1.6; color: var(--muted); word-break: break-word; }
+.msg.system .sys-item { }
+.msg.system .sys-item.tool { font-family: ui-monospace, Menlo, monospace; }
+.msg.system .sys-item .sys-tag {
+  font-size: 0.82em; font-weight: 700; padding: 0 4px; border-radius: 4px;
+  background: rgba(180,180,180,.16); letter-spacing: .03em; white-space: nowrap;
+}
+.msg.system .sys-sep { color: var(--muted); opacity: .45; }
+/* minimal tool-call stack: tight padding, no header; NARROW + equal gaps top &
+   bottom (negative top cancels the previous block's 14px bottom margin). */
+.msg.system.stack-tool { padding: 3px 10px; margin: -10px 0 4px 0; }
 .msg .markdown p { margin: 0 0 .7em 0; }
 .msg .markdown p:last-child { margin-bottom: 0; }
 .msg .markdown h1, .msg .markdown h2, .msg .markdown h3 { margin: .8em 0 .4em 0; line-height: 1.3; }
@@ -697,7 +718,7 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
   background: var(--code-bg); border: 1px solid var(--border);
   border-radius: 4px; padding: 10px 12px; overflow-x: auto; margin: .5em 0;
 }
-.msg .markdown pre code { background: none; padding: 0; font-size: 12.5px; }
+.msg .markdown pre code { background: none; padding: 0; font-size: 0.84em; }
 .msg .markdown ul, .msg .markdown ol { margin: .3em 0 .7em 1.4em; padding: 0; }
 .msg .markdown a { color: var(--accent); }
 .msg .markdown .table-wrap {
@@ -707,7 +728,7 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 }
 .msg .markdown table {
   border-collapse: collapse; margin: 0;
-  font-size: 12.5px;
+  font-size: 0.84em;
   min-width: max-content;
 }
 .msg .markdown td, .msg .markdown th { white-space: nowrap; }
@@ -718,7 +739,7 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 .msg .markdown th { background: var(--code-bg); font-weight: 600; }
 .msg .markdown tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
 .msg .tool-call {
-  font: 12.5px/1.45 ui-monospace, Menlo, monospace; white-space: pre-wrap;
+  font: 0.84em/1.45 ui-monospace, Menlo, monospace; white-space: pre-wrap;
   word-break: break-word; background: var(--code-bg);
   border-radius: 4px; padding: 8px 10px;
 }
@@ -730,7 +751,7 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 }
 .msg .tool-call .targs-table {
   border-collapse: collapse;
-  width: 100%; font-size: 12px;
+  width: 100%; font-size: 0.8em;
   font-family: ui-monospace, Menlo, monospace;
 }
 .msg .tool-call .targs-table tr { border-bottom: 1px dashed var(--border); }
@@ -748,7 +769,7 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
   font-family: inherit; font-size: inherit;
 }
 .msg .tool-result-box {
-  font: 12.5px/1.4 ui-monospace, Menlo, monospace; white-space: pre;
+  font: 0.84em/1.4 ui-monospace, Menlo, monospace; white-space: pre;
   background: var(--code-bg);
   border-radius: 4px; padding: 8px 10px; max-height: 300px; overflow: auto;
 }
@@ -836,7 +857,7 @@ footer #float-controls .tc-sep { color: var(--border); font-size: 9px; user-sele
   box-shadow: 0 4px 16px rgba(0,0,0,0.5);
 }
 #tail-box #tail-pre {
-  margin: 0; font: 11px ui-monospace, Menlo, monospace; color: var(--text);
+  margin: 0; font: calc(11px * var(--cs, 1)) ui-monospace, Menlo, monospace; color: var(--text);
   white-space: pre; overflow: auto; max-height: calc(40vh - 16px);
 }
 #tail-box #tail-close, #tail-box #tail-refresh {
@@ -902,7 +923,7 @@ footer textarea {
   background: var(--bg); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
   padding: 10px 12px; resize: none;
-  font: 16px -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font: calc(16px * var(--cs, 1)) -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   min-height: 44px; max-height: 40vh;
 }
 footer button {
@@ -1287,12 +1308,60 @@ footer button.send {
 #files-modal #files-fav-dir.on { color: #f5c451; border-color: #f5c451; }
 #files-modal .modal-row { display: flex; align-items: center; gap: 8px; }
 #files-modal .modal-row h3 { margin: 0; flex: 1; font-size: 14px; }
-#files-modal .files-bar { display: flex; gap: 6px; flex-shrink: 0; }
+#files-modal .files-bar { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
+/* phone: stack — path textarea on its own row (top), all buttons on row 2 */
+@media (max-width: 640px) {
+  #files-modal .files-bar { flex-wrap: wrap; }
+  #files-modal .files-bar .files-input-wrap { order: -1; flex: 1 1 100%; }
+}
 #files-modal .files-path {
   flex: 1; background: var(--panel2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
   padding: 5px 8px; font: 12px ui-monospace, Menlo, monospace;
 }
+/* clear ✕ as a small icon INSIDE the input's right edge (not a separate button) */
+#files-modal .files-input-wrap { flex: 1; position: relative; display: flex; min-width: 0; }
+#files-modal .files-input-wrap .files-path { flex: 1; padding-right: 24px; }
+#files-modal .files-clear {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  border: 0; background: none; color: var(--muted); cursor: pointer;
+  font-size: 13px; line-height: 1; padding: 4px;
+}
+#files-modal .files-clear:hover { color: var(--text); }
+/* path as a multi-line textarea → shows the whole path (wraps) */
+#files-modal textarea.files-path {
+  resize: none; overflow: hidden; white-space: pre-wrap; word-break: break-all;
+  line-height: 1.35; min-height: 1.35em; align-self: stretch;
+}
+/* clickable breadcrumb — each sub-dir navigates into it; wraps to show full path */
+#files-modal .files-crumbs {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 1px 2px;
+  font: 12px ui-monospace, Menlo, monospace; padding: 2px 0; flex-shrink: 0;
+}
+#files-modal .files-crumbs .crumb {
+  cursor: pointer; color: var(--accent); padding: 1px 4px; border-radius: 3px;
+}
+#files-modal .files-crumbs .crumb:hover { background: var(--panel2); text-decoration: underline; }
+#files-modal .files-crumbs .crumb-sep { color: var(--muted); }
+/* links popup — extracted URLs / local paths from a message block */
+#links-modal .links-list { overflow: auto; max-height: 62vh; display: flex; flex-direction: column; gap: 5px; }
+#links-modal .links-sec { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin-top: 6px; }
+#links-modal .links-sec:first-child { margin-top: 0; }
+#links-modal .link-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--border); }
+#links-modal .link-row:last-child { border-bottom: 0; }
+#links-modal .lnum { flex-shrink: 0; min-width: 16px; text-align: right; color: var(--muted); font-size: 11px; padding-top: 2px; }
+#links-modal .ltag { flex-shrink: 0; font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 4px; letter-spacing: .04em; }
+#links-modal .ltag-url { background: rgba(90,150,255,.18); color: #7ab0ff; }
+#links-modal .ltag-path { background: rgba(120,200,120,.18); color: #7bcf7b; }
+#links-modal .modal-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#links-modal .link-row .lk {
+  flex: 1; min-width: 0; overflow: hidden; word-break: break-all; white-space: normal;
+  font: 12px ui-monospace, Menlo, monospace; color: var(--accent); text-decoration: none;
+}
+#links-modal .link-row a.lk:hover { text-decoration: underline; }
+#links-modal .link-row .lk.path { color: var(--text); }
+#links-modal .link-row .btn { flex-shrink: 0; }
+#links-modal .links-empty { color: var(--muted); padding: 12px 4px; font-size: 13px; }
 #files-modal .files-favs {
   display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0;
   max-height: 18vh; overflow-y: auto;
@@ -1357,7 +1426,7 @@ footer button.send {
 #files-modal .files-preview {
   flex: 1; min-height: 0; overflow: auto;
   border: 1px solid var(--border); border-radius: 6px;
-  background: #000;
+  background: var(--bg);          /* follow the theme (dark/light/pure) */
 }
 #files-modal .files-preview pre {
   margin: 0; padding: 10px; white-space: pre-wrap; word-break: break-word;
@@ -1455,9 +1524,17 @@ footer button.send {
   </header>
   <div id="switch-menu" class="switch-menu" style="display:none"></div>
   <div id="mode-menu" class="switch-menu" style="display:none">
+    <div class="menu-sec">显示详情</div>
     <button class="sw-item mode-opt" data-mode="brief">▁ brief（默认）</button>
     <button class="sw-item mode-opt" data-mode="medium">▄ medium</button>
     <button class="sw-item mode-opt" data-mode="all">█ all</button>
+    <div class="menu-sec">字体</div>
+    <div class="menu-row">
+      <button class="sw-item" id="mm-fontup">A 放大</button>
+      <button class="sw-item" id="mm-fontdown">a 缩小</button>
+    </div>
+    <div class="menu-sec">主题</div>
+    <button class="sw-item" id="mm-theme">◐ 主题</button>
   </div>
 
   <div id="cpu-modal" class="modal">
@@ -1529,16 +1606,24 @@ footer button.send {
         <button id="files-close" class="btn" title="close">✕</button>
       </div>
       <div class="files-bar">
+        <button id="files-back" class="btn" title="Back (dir history)">◀</button>
+        <button id="files-fwd" class="btn" title="Forward (dir history)">▶</button>
         <button id="files-up" class="btn" title="Parent directory">↑</button>
-        <input id="files-path" class="files-path" placeholder="/path/to/dir — Enter to go" />
+        <span class="files-input-wrap">
+          <textarea id="files-path" class="files-path" rows="1" placeholder="/path/to/dir — Enter to go"></textarea>
+          <button id="files-path-clear" class="files-clear" title="Clear the path box">✕</button>
+        </span>
         <button id="files-go" class="btn">Go</button>
         <button id="files-fav-dir" class="btn" title="Favorite this directory">☆</button>
-        <button id="files-path-clear" class="btn" title="Clear the path box">✕</button>
+        <button id="files-refresh" class="btn" title="Refresh — force reload (bypass cache)">↻</button>
       </div>
+      <div id="files-crumbs" class="files-crumbs"></div>
       <div class="files-bar">
-        <input id="files-filter" class="files-path" placeholder="filter this page — or Search whole dir" />
+        <span class="files-input-wrap">
+          <input id="files-filter" class="files-path" placeholder="filter this page — or Search whole dir" />
+          <button id="files-filter-clear" class="files-clear" title="Clear filter / search">✕</button>
+        </span>
         <button id="files-search" class="btn" title="Search the whole directory (all pages)">🔍 search</button>
-        <button id="files-filter-clear" class="btn" title="Clear filter / search">✕</button>
       </div>
       <div id="files-favs" class="files-favs" style="display:none"></div>
       <div id="files-list" class="files-list"></div>
@@ -1548,6 +1633,13 @@ footer button.send {
         <button id="files-next" class="btn">next ›</button>
       </div>
       <div id="files-preview" class="files-preview"></div>
+    </div>
+  </div>
+
+  <div id="links-modal" class="modal">
+    <div class="modal-card">
+      <div class="modal-row"><h3>Links</h3><button id="links-close" class="btn" title="close">✕</button></div>
+      <div id="links-list" class="links-list"></div>
     </div>
   </div>
 
@@ -1684,10 +1776,6 @@ footer button.send {
     <div id="upload-row" class="upload-row" style="display:none"></div>
     <div id="float-controls">
       <button id="tail-screen-btn" title="Peek at the last lines of the live terminal">tail</button>
-      <span class="tc-sep">|</span>
-      <button id="tail-fontup" title="bigger chat font">A</button>
-      <span class="tc-sep">|</span>
-      <button id="tail-fontdown" title="smaller chat font">a</button>
       <span class="tc-sep">|</span>
       <button id="jump-prev-user" title="Previous user request (u)">↑</button>
       <button id="jump-next-user" title="Next user request (U)">↓</button>
@@ -2048,15 +2136,18 @@ footer button.send {
     document.body.classList.toggle("pure", t === "pure");
     const btn = document.getElementById("picker-mode");
     if (btn) { btn.textContent = THEME_GLYPH[t]; btn.title = `theme: ${t} (tap to cycle dark/light/pure)`; }
+    const mm = document.getElementById("mm-theme");
+    if (mm) mm.textContent = `${THEME_GLYPH[t]} 主题：${t}（点击切换）`;
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute("content", THEME_METACOLOR[t]);
   }
-  document.getElementById("picker-mode").addEventListener("click", () => {
+  function cycleTheme() {
     let t = localStorage.getItem("cc_web_theme") || "dark";
     const next = THEME_ORDER[(THEME_ORDER.indexOf(t) + 1) % THEME_ORDER.length];
     localStorage.setItem("cc_web_theme", next);
     applyTheme();
-  });
+  }
+  document.getElementById("picker-mode").addEventListener("click", cycleTheme);
   applyTheme();
 
   // Card display switch: user requests only ("Q") vs requests + responses ("Q+A").
@@ -2236,6 +2327,7 @@ footer button.send {
   // a tool_use (text/thinking/standalone tool_result rendered, transcript
   // rebuilt, or user navigated away).
   let _lastBottomToolUse = null;
+  let _lastStack = null;   // {kind:'sys'|'tool', box} — consecutive System msgs / brief tool-calls stack here
   let activityDeadline = 0;
   let renderMode = localStorage.getItem("cc_mode") || "brief";
   let shouldAutoscroll = true;
@@ -2899,16 +2991,22 @@ footer button.send {
 
   // ---------- local file browser (picker page) ----------
   const filesModal = document.getElementById("files-modal");
+  const linksModal = document.getElementById("links-modal");
+  const linksListEl = document.getElementById("links-list");
   const filesListEl = document.getElementById("files-list");
   const filesPreviewEl = document.getElementById("files-preview");
   const filesPathEl = document.getElementById("files-path");
   // Set the path box and scroll it to the END, so a long path shows its
   // deepest segment (where you are) rather than just "/Users/…". Full path
   // stays in the value + title; scroll left to see the start.
+  function autoGrowPath() {
+    filesPathEl.style.height = "auto";
+    filesPathEl.style.height = Math.min(filesPathEl.scrollHeight, 90) + "px";
+  }
   function setPathBox(p) {
     filesPathEl.value = p || "";
     filesPathEl.title = p || "";
-    requestAnimationFrame(() => { filesPathEl.scrollLeft = filesPathEl.scrollWidth; });
+    autoGrowPath();   // multi-line textarea → grow to show the whole path
   }
   const filesUp = document.getElementById("files-up");
   const filesGo = document.getElementById("files-go");
@@ -2927,6 +3025,47 @@ footer button.send {
   let filesFilterTimer = null;
   let filesLastEntries = [];
   let filesActiveQ = "";   // server search term in effect ("" = plain listing)
+  const filesBack = document.getElementById("files-back");
+  const filesFwd = document.getElementById("files-fwd");
+  const filesRefresh = document.getElementById("files-refresh");
+  const filesCrumbsEl = document.getElementById("files-crumbs");
+  let filesHist = [];       // visited dir paths (back/forward)
+  let filesHistIdx = -1;
+  const FILES_HIST_MAX = 50;
+  const filesCache = new Map();               // "path|offset|q" → {ts, data}
+  const FILES_CACHE_TTL = 3 * 60 * 1000;      // 3 min
+  function recordFilesHist(path) {
+    if (filesHistIdx >= 0 && filesHist[filesHistIdx] === path) return;
+    filesHist = filesHist.slice(0, filesHistIdx + 1);   // drop forward branch
+    filesHist.push(path);
+    if (filesHist.length > FILES_HIST_MAX) filesHist.shift();
+    filesHistIdx = filesHist.length - 1;
+  }
+  function updateFilesNavBtns() {
+    filesBack.disabled = filesHistIdx <= 0;
+    filesFwd.disabled = filesHistIdx >= filesHist.length - 1;
+  }
+  function renderCrumbs(path) {
+    filesCrumbsEl.textContent = "";
+    const mk = (label, target) => {
+      const c = document.createElement("span");
+      c.className = "crumb"; c.textContent = label;
+      c.addEventListener("click", () => { filesFilterEl.value = ""; loadFilesDir(target, 0, ""); });
+      return c;
+    };
+    filesCrumbsEl.appendChild(mk("/", "/"));
+    const parts = (path || "").split("/").filter(Boolean);
+    let acc = "";
+    parts.forEach((seg, i) => {
+      acc += "/" + seg;
+      if (i > 0) {                       // root chip already gives the leading "/"
+        const sep = document.createElement("span");
+        sep.className = "crumb-sep"; sep.textContent = "/";
+        filesCrumbsEl.appendChild(sep);
+      }
+      filesCrumbsEl.appendChild(mk(seg, acc));
+    });
+  }
 
   function fmtSize(n) {
     if (n < 1024) return n + " B";
@@ -3032,33 +3171,47 @@ footer button.send {
   // (server-side, still paginated — never fetch a giant dir at once, to
   // save mobile bandwidth). q == "" → plain dir listing. Does NOT touch the
   // filter box; navigation handlers manage that.
-  async function loadFilesDir(path, offset, q) {
+  async function loadFilesDir(path, offset, q, opts) {
+    opts = opts || {};
     if (offset == null) offset = 0;
     if (q == null) q = "";
-    filesListEl.textContent = "Loading…";
-    try {
-      const resp = await authedFetch("/api/fs/list?path=" + encodeURIComponent(path || "")
-                                     + "&offset=" + offset
-                                     + "&q=" + encodeURIComponent(q));
-      if (!resp.ok) {
-        const t = await resp.json().catch(() => ({}));
-        filesListEl.innerHTML = '<div class="ph">Error: ' + resp.status + ' ' + (t.detail || "") + '</div>';
-        filesPagerEl.style.display = "none";
+    const key = (path || "") + "|" + offset + "|" + q;
+    let j = null;
+    const c = filesCache.get(key);
+    if (!opts.force && c && (Date.now() - c.ts) < FILES_CACHE_TTL) {
+      j = c.data;                                   // fresh cache hit → no network
+    } else {
+      filesListEl.textContent = "Loading…";
+      try {
+        const resp = await authedFetch("/api/fs/list?path=" + encodeURIComponent(path || "")
+                                       + "&offset=" + offset
+                                       + "&q=" + encodeURIComponent(q));
+        if (!resp.ok) {
+          const t = await resp.json().catch(() => ({}));
+          filesListEl.innerHTML = '<div class="ph">Error: ' + resp.status + ' ' + (t.detail || "") + '</div>';
+          filesPagerEl.style.display = "none";
+          return;
+        }
+        j = await resp.json();
+        filesCache.set(key, { ts: Date.now(), data: j });
+      } catch (err) {
+        filesListEl.innerHTML = '<div class="ph">Error: ' + err + '</div>';
         return;
       }
-      const j = await resp.json();
-      filesCurDir = j.path;
-      filesOffset = j.offset;
-      filesTotal = j.total;
-      filesLimit = j.limit;
-      filesActiveQ = q;
-      setPathBox(j.path);
-      filesLastEntries = j.entries;
-      refreshDirFavBtn();
-      renderFilesPage();
-    } catch (err) {
-      filesListEl.innerHTML = '<div class="ph">Error: ' + err + '</div>';
     }
+    filesCurDir = j.path;
+    filesOffset = j.offset;
+    filesTotal = j.total;
+    filesLimit = j.limit;
+    filesActiveQ = q;
+    setPathBox(j.path);
+    renderCrumbs(j.path);
+    filesLastEntries = j.entries;
+    refreshDirFavBtn();
+    renderFilesPage();
+    // record only genuine dir navigations (page/search stay on the same dir)
+    if (!opts.noHist && offset === 0 && !q) recordFilesHist(j.path);
+    updateFilesNavBtns();
   }
 
   // Render the currently-loaded page, applying the filter box as a LOCAL
@@ -3193,8 +3346,18 @@ footer button.send {
     if (ent) previewFile(dir.replace(/\/$/, "") + "/" + base, ent.kind);
   }
   filesGo.addEventListener("click", filesGoSubmit);
+  filesBack.addEventListener("click", () => {
+    if (filesHistIdx > 0) { filesHistIdx--; filesFilterEl.value = ""; loadFilesDir(filesHist[filesHistIdx], 0, "", { noHist: true }); }
+  });
+  filesFwd.addEventListener("click", () => {
+    if (filesHistIdx < filesHist.length - 1) { filesHistIdx++; filesFilterEl.value = ""; loadFilesDir(filesHist[filesHistIdx], 0, "", { noHist: true }); }
+  });
+  filesRefresh.addEventListener("click", () => {
+    loadFilesDir(filesCurDir, filesOffset, filesActiveQ, { force: true, noHist: true });   // bypass cache
+  });
+  filesPathEl.addEventListener("input", autoGrowPath);
   document.getElementById("files-path-clear").addEventListener("click", () => {
-    filesPathEl.value = ""; filesPathEl.focus();
+    filesPathEl.value = ""; autoGrowPath(); filesPathEl.focus();
   });
   document.getElementById("files-fav-dir").addEventListener("click", () => {
     if (!filesCurDir) return;
@@ -3232,6 +3395,8 @@ footer button.send {
   filesModal.addEventListener("click", (e) => {
     if (e.target === filesModal) { filesModal.classList.remove("show"); clearFilesPreview(); }
   });
+  document.getElementById("links-close").addEventListener("click", () => linksModal.classList.remove("show"));
+  linksModal.addEventListener("click", (e) => { if (e.target === linksModal) linksModal.classList.remove("show"); });
 
   // Send raw bytes (escape seqs allowed) to the bound iTerm tab, then
   // refresh the screen view so the user can see what happened.
@@ -4396,7 +4561,9 @@ footer button.send {
       return ak ? -1 : (bk ? 1 : 0);
     });
     const single = new Set(openTabs.filter(t => t.wi != null).map(t => t.wi)).size <= 1;
-    const mob = window.matchMedia("(max-width: 640px)").matches;   // compact labels on phones
+    // portrait (h>w) or narrow → phone: compact labels, matching the CSS breakpoint
+    const mob = window.matchMedia("(orientation: portrait)").matches
+             || window.matchMedia("(max-width: 640px)").matches;
     for (const t of disp) {
       const el = document.createElement("div");
       el.className = "qtab" + (t.sid === attachedSid ? " active" : "");
@@ -4875,11 +5042,15 @@ footer button.send {
     if (renderMode === "brief") {
       if (entry.isMeta || entry.toolUseResult) return;
       let text = "";
+      const tools = [];
       if (typeof content === "string") text = content;
       else if (Array.isArray(content)) {
         text = content.filter(p => p && p.type === "text" && p.text).map(p => p.text).join("\n\n");
+        for (const p of content) if (p && p.type === "tool_use") tools.push(p);
       }
       if (text.trim()) yield { kind: "text", role, text, idx, round, ts, sid, queued: !!entry._queued, system: !!entry._system };
+      // brief also shows tool-calls (name only) → stacked "Tool calls" block
+      for (const p of tools) yield { kind: "tool_use", id: p.id, name: p.name || "?", input: p.input, idx, round, ts, sid };
       return;
     }
     // all mode
@@ -4986,6 +5157,93 @@ footer button.send {
     return btn;
   }
 
+  // Extract URLs + local file paths from a block's raw text.
+  function extractLinks(text) {
+    const t = text || "";
+    const urls = [], paths = [], seen = new Set();
+    const URLM = /https?:\/\/[^\s<>"'）)\]}，。、]+/g;
+    let m;
+    while ((m = URLM.exec(t))) {
+      const u = m[0].replace(/[.,;:)\]}>]+$/, "");
+      if (u && !seen.has(u)) { seen.add(u); urls.push(u); }
+    }
+    // strip URLs first so their host/path parts aren't re-matched as local paths
+    const stripped = t.replace(URLM, " ");
+    const PATHM = /(?:~\/|\/)[\w.\-+@]+(?:\/[\w.\-+@]+)+\/?/g;
+    while ((m = PATHM.exec(stripped))) {
+      const p = m[0].replace(/[.,;:)\]}>]+$/, "");
+      if (p && !seen.has(p)) { seen.add(p); paths.push(p); }
+    }
+    return { urls, paths };
+  }
+
+  // 🔗 button — extract links from a block and show them in a popup.
+  const LINK_SVG = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 9.5l3-3"/><path d="M8.2 4.8l1.1-1.1a2.3 2.3 0 0 1 3.3 3.3l-1.6 1.6"/><path d="M7.8 11.2l-1.1 1.1a2.3 2.3 0 0 1-3.3-3.3l1.6-1.6"/></svg>';
+  function makeLinksBtn(getRaw) {
+    const btn = document.createElement("button");
+    btn.className = "copy-btn"; btn.title = "Extract links / file paths";
+    btn.innerHTML = LINK_SVG;
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      showLinks((typeof getRaw === "function") ? getRaw() : (getRaw || ""));
+    });
+    return btn;
+  }
+  function openPathInFiles(p) {
+    linksModal.classList.remove("show");
+    filesModal.classList.add("show");
+    clearFilesPreview();
+    renderFavs();
+    filesPathEl.value = p;
+    autoGrowPath();
+    filesGoSubmit();          // reuses the "file → preview / dir → open" logic
+  }
+  // Long links/paths: show head100 … tail100 (middle elided), full text on hover.
+  const elideLink = (s) => (s.length > 204) ? (s.slice(0, 100) + " … " + s.slice(-100)) : s;
+  function showLinks(text) {
+    const { urls, paths } = extractLinks(text);
+    linksListEl.textContent = "";
+    const mkCopy = (val) => {
+      const b = document.createElement("button");
+      b.className = "btn"; b.textContent = "copy";
+      b.addEventListener("click", () => copyText(val));
+      return b;
+    };
+    // one numbered list; a colored type tag (URL / PATH) distinguishes each item
+    const items = urls.map(v => ({ t: "url", v })).concat(paths.map(v => ({ t: "path", v })));
+    if (!items.length) {
+      linksListEl.innerHTML = '<div class="links-empty">No links or file paths found in this block.</div>';
+      linksModal.classList.add("show");
+      return;
+    }
+    items.forEach((it, i) => {
+      const li = document.createElement("div"); li.className = "link-row";
+      const num = document.createElement("span"); num.className = "lnum"; num.textContent = (i + 1);
+      const tag = document.createElement("span");
+      tag.className = "ltag " + (it.t === "url" ? "ltag-url" : "ltag-path");
+      tag.textContent = it.t === "url" ? "URL" : "PATH";
+      let node;
+      if (it.t === "url") {
+        node = document.createElement("a"); node.className = "lk";
+        node.href = it.v; node.target = "_blank"; node.rel = "noopener noreferrer";
+        node.textContent = elideLink(it.v); node.title = it.v;
+      } else {
+        node = document.createElement("span"); node.className = "lk path";
+        node.textContent = elideLink(it.v); node.title = it.v;
+      }
+      li.appendChild(num); li.appendChild(tag); li.appendChild(node);
+      if (it.t === "path") {
+        const open = document.createElement("button");
+        open.className = "btn"; open.textContent = "open"; open.title = "Open in the file viewer";
+        open.addEventListener("click", () => openPathInFiles(it.v));
+        li.appendChild(open);
+      }
+      li.appendChild(mkCopy(it.v));
+      linksListEl.appendChild(li);
+    });
+    linksModal.classList.add("show");
+  }
+
   // Toggle line-wrap on a target box. Adds/removes `.wrap-on` so CSS can
   // flip white-space pre ↔ pre-wrap. Self-styled to match the row icons.
   function makeWrapBtn(target) {
@@ -4998,6 +5256,47 @@ footer button.send {
       btn.classList.toggle("active", on);
     });
     return btn;
+  }
+
+  const _dispIdx = n => (typeof n === "number" && n >= 1000000000) ? n - 1000000000 : n;
+  // Parse a recognized system message → {tag, body}: the wrapper tag name +
+  // its <summary> (or the de-tagged text), truncated. So "task-notification …
+  // <summary>X</summary>" shows as just "task-notification: X".
+  // Display-only split of a System msg into {tag, body}. NO truncation here —
+  // the server already truncates all brief content (see _sys_collapse_str);
+  // the client only extracts the tag + summary for the badge.
+  function parseSysMsg(text) {
+    const t = (text || "").trim();
+    const tag = (t.match(/^<([a-z][\w-]*)/i) || [])[1] || "system";
+    const sm = t.match(/<summary>([\s\S]*?)<\/summary>/i);
+    let body = sm ? sm[1].trim() : "";
+    if (!body) body = t.replace(/^<[a-z][\w-]*[^>]*>/i, "").replace(/<\/[a-z][\w-]*>\s*$/i, "").trim() || t;
+    body = body.replace(/\s+/g, " ");
+    return { tag, body };
+  }
+  // One INLINE item for a System msg (tag + summary) or brief tool-call (name).
+  function buildStackItem(kind, b) {
+    const item = document.createElement("span"); item.className = "sys-item";
+    if (kind === "sys") {
+      const p = parseSysMsg(b.text);
+      const tag = document.createElement("span"); tag.className = "sys-tag"; tag.textContent = p.tag;
+      item.appendChild(tag);
+      item.appendChild(document.createTextNode(" " + p.body));
+      item.title = b.text || "";
+    } else {
+      item.classList.add("tool");
+      item.textContent = b.name || "(tool)";
+      item.title = rawTextFor(b);
+    }
+    return item;
+  }
+  // Append an item to the running stack box, with a separator before all but the first.
+  function appendStackItem(box, kind, b) {
+    if (box.childNodes.length) {
+      const sep = document.createElement("span"); sep.className = "sys-sep"; sep.textContent = " · ";
+      box.appendChild(sep);
+    }
+    box.appendChild(buildStackItem(kind, b));
   }
 
   function renderBlock(b) {
@@ -5023,6 +5322,28 @@ footer button.send {
     const queuedTag = b.queued ? " · queued" : "";
     idx.textContent = r + "#" + (b.idx != null ? _disp(b.idx) : "?") + sidTag + queuedTag + when;
     role.appendChild(label); role.appendChild(idx);
+
+    // Stack consecutive compact rows: System msgs (all modes) and, in BRIEF
+    // mode, tool-calls (just the tool name). Same-kind neighbours append into
+    // one block instead of each taking a full card.
+    const stackKind = (b.kind === "text" && b.system) ? "sys"
+      : (b.kind === "tool_use" && renderMode === "brief") ? "tool" : null;
+    if (stackKind) {
+      if (_lastStack && _lastStack.kind === stackKind) {
+        appendStackItem(_lastStack.box, stackKind, b);
+        return null;                                   // merged (inline) into the open block
+      }
+      div.className = "msg system stack-tool";           // both sys & tool: minimal, no header row
+      const lines = document.createElement("div"); lines.className = "sys-lines";
+      appendStackItem(lines, stackKind, b);
+      div.appendChild(lines);
+      _lastStack = { kind: stackKind, box: lines };
+      _lastBottomToolUse = null;
+      if (b.sid && attachedShort && String(b.sid).slice(0, 4) !== attachedShort) flagMismatch(b.sid);
+      return div;
+    }
+    _lastStack = null;   // any other block breaks a run of stacked rows
+
     // Per-kind buttons (wrap toggle, copy) get appended below — the wrap
     // button needs the content box to point at, so we build the box first
     // and add buttons afterwards.
@@ -5032,6 +5353,7 @@ footer button.send {
       label.textContent = b.system ? "System" : (b.role === "user" ? "You" : "Claude");
       const md = document.createElement("div"); md.className = "markdown";
       md.innerHTML = renderMarkdown(b.text);
+      role.appendChild(makeLinksBtn(() => rawTextFor(b)));
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
       div.appendChild(role); div.appendChild(md);
       _lastBottomToolUse = null;
@@ -5062,6 +5384,7 @@ footer button.send {
         const resBox = buildToolResultBox(b);
         // Dedicated wrap + copy buttons for the merged result. The card's
         // top wrap toggles only the args; this one toggles only the result.
+        labRow.appendChild(makeLinksBtn(() => b.content || ""));
         labRow.appendChild(makeWrapBtn(resBox));
         labRow.appendChild(makeCopyBtn(() => b.content || ""));
         wrap.appendChild(labRow);
@@ -5072,6 +5395,7 @@ footer button.send {
       }
       div.className = "msg tool"; label.textContent = "Tool result" + (b.is_error ? " (error)" : "");
       const resBox = buildToolResultBox(b);
+      role.appendChild(makeLinksBtn(() => rawTextFor(b)));
       role.appendChild(makeWrapBtn(resBox));
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
       div.appendChild(role); div.appendChild(resBox);
@@ -5080,6 +5404,7 @@ footer button.send {
       div.className = "msg thinking"; label.textContent = "Thinking";
       const md = document.createElement("div"); md.className = "markdown";
       md.innerHTML = renderMarkdown(b.text);
+      role.appendChild(makeLinksBtn(() => rawTextFor(b)));
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
       div.appendChild(role); div.appendChild(md);
       _lastBottomToolUse = null;
@@ -5096,20 +5421,21 @@ footer button.send {
     // For prepend (atTop=true): the historical batch is rendered at the
     // top of the transcript, so it must NOT update the "bottom block"
     // tracker — save the current state and restore after rendering.
-    let saved = null;
-    if (atTop) saved = _lastBottomToolUse;
+    let saved = null, savedStack = null;
+    if (atTop) { saved = _lastBottomToolUse; savedStack = _lastStack; }
     for (const e of entries) {
       for (const b of blocksFor(e)) {
         const el = renderBlock(b);
         if (el) container.appendChild(el);
       }
     }
-    if (atTop) _lastBottomToolUse = saved;
+    if (atTop) { _lastBottomToolUse = saved; _lastStack = savedStack; }
   }
 
   function rebuild(noScroll) {
     transcriptEl.innerHTML = "";
     _lastBottomToolUse = null;
+    _lastStack = null;
     renderEntriesInto(transcriptEl, entryCache);
     updateLoadEarlier();
     if (!noScroll) scrollToBottom();
@@ -5211,6 +5537,17 @@ footer button.send {
   document.addEventListener("click", (e) => {
     if (modeMenu.style.display !== "none" && !modeMenu.contains(e.target) && e.target !== modeBtn) hideModeMenu();
   });
+  // font +/- and theme also live in this dropdown (rarely used, off the header).
+  // Font/theme keep the menu OPEN so you can tap repeatedly.
+  document.getElementById("mm-fontup").addEventListener("click", (e) => {
+    e.stopPropagation(); chatScale += 0.1; applyChatScale(true);
+  });
+  document.getElementById("mm-fontdown").addEventListener("click", (e) => {
+    e.stopPropagation(); chatScale -= 0.1; applyChatScale(true);
+  });
+  document.getElementById("mm-theme").addEventListener("click", (e) => {
+    e.stopPropagation(); cycleTheme();
+  });
 
   // ---------- back / detach ----------
   backBtn.addEventListener("click", () => {
@@ -5246,13 +5583,10 @@ footer button.send {
   let chatScale = parseFloat(localStorage.getItem("cc_web_chat_scale") || "1") || 1;
   function applyChatScale(scroll) {
     chatScale = Math.round(Math.max(0.7, Math.min(2.0, chatScale)) * 10) / 10;
-    // zoom (not font-size): messages use fixed-px fonts, so font-size wouldn't
-    // cascade — zoom scales the whole transcript proportionally. Supported in
-    // Safari/Chrome (the targets).
-    transcriptEl.style.zoom = chatScale;
-    // Scale the reply box and the tailScr peek along with the messages.
-    if (inputEl) inputEl.style.zoom = chatScale;
-    if (tailPre) tailPre.style.zoom = chatScale;
+    // Scale via a --cs CSS variable, NOT `zoom`: iPadOS Safari ignores `zoom`
+    // (worked on iPhone, not iPad). Transcript/input/tail font-sizes are
+    // calc(px * var(--cs)); code blocks use em so they scale with the base.
+    document.body.style.setProperty("--cs", chatScale);
     localStorage.setItem("cc_web_chat_scale", String(chatScale));
     // After a resize, jump to the bottom (latest message). The pill row lives
     // at the very bottom of the scroll area, so it stays exposed.
@@ -5295,8 +5629,6 @@ footer button.send {
   tailBtn.addEventListener("click", (e) => { e.stopPropagation(); tailScreen(); });
   document.getElementById("tail-refresh").addEventListener("click", (e) => { e.stopPropagation(); tailScreen(); });
   tailClose.addEventListener("click", (e) => { e.stopPropagation(); tailBox.style.display = "none"; });
-  document.getElementById("tail-fontup").addEventListener("click", (e) => { e.stopPropagation(); chatScale += 0.1; applyChatScale(true); });
-  document.getElementById("tail-fontdown").addEventListener("click", (e) => { e.stopPropagation(); chatScale -= 0.1; applyChatScale(true); });
 
   autoloadEl.addEventListener("click", async (e) => {
     e.stopPropagation();
@@ -5690,12 +6022,12 @@ footer button.send {
       await uploadFiles(files);
     }
   });
+  document.getElementById("jump-prev-user").addEventListener("click", (e) => { e.stopPropagation(); jumpUserRequest(-1); });
+  document.getElementById("jump-next-user").addEventListener("click", (e) => { e.stopPropagation(); jumpUserRequest(1); });
   document.getElementById("jump-bottom").addEventListener("click", (e) => {
     e.stopPropagation();   // in the tail-controls pill → don't toggle auto-refresh
     shouldAutoscroll = true; mainEl.scrollTop = mainEl.scrollHeight;
   });
-  document.getElementById("jump-prev-user").addEventListener("click", (e) => { e.stopPropagation(); jumpUserRequest(-1); });
-  document.getElementById("jump-next-user").addEventListener("click", (e) => { e.stopPropagation(); jumpUserRequest(1); });
 
   // ---------- new session dialog ----------
   const newDlg = document.getElementById("newdlg");
