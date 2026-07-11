@@ -722,6 +722,22 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 .sys-item.tool .tool-desc { color: var(--muted); font-family: inherit; font-weight: 400; margin-left: 1px; }
 /* expanded detail matches normal (medium) tool display — not the muted sys grey */
 .msg.system .tool-detail { margin-top: 6px; color: var(--text); }
+/* liveness heartbeat — pinned after the last message; shows the last changed
+   screen line + countdown to next check while claude is busy. */
+#hb {
+  display: flex; align-items: flex-start; gap: 7px;
+  padding: 5px 12px; margin: 2px 0 4px 0;
+  font: 0.78em/1.45 ui-monospace, Menlo, monospace; color: var(--muted);
+  min-width: 0;
+}
+#hb .hb-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+  flex-shrink: 0; margin-top: 4px; animation: hbpulse 1.2s ease-in-out infinite;
+}
+#hb .hb-txt { flex: 1; min-width: 0; }
+#hb .hb-txt .hb-ln { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#hb .hb-cd { flex-shrink: 0; opacity: .6; white-space: nowrap; }
+@keyframes hbpulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
 .msg .markdown p { margin: 0 0 .7em 0; }
 .msg .markdown p:last-child { margin-bottom: 0; }
 .msg .markdown h1, .msg .markdown h2, .msg .markdown h3 { margin: .8em 0 .4em 0; line-height: 1.3; }
@@ -5629,6 +5645,7 @@ footer button.send {
       scrollToBottom();
     }
     updateLoadEarlier();
+    hbReattach();   // keep the heartbeat line pinned below the newest message
   }
 
   loadEarlierBtn.addEventListener("click", async () => {
@@ -5959,6 +5976,8 @@ footer button.send {
       if (sid !== attachedSid) return;   // switched away during json() → don't ingest into the new session
       claudeIdle = m.claude_idle === true;
       setStatus("ok"); setReady(m.claude_idle); updateAutoload();
+      // heartbeat runs only while claude is busy (no point when idle/hidden/paused)
+      if (!claudeIdle && !document.hidden && !isPaused) startHeartbeat(); else stopHeartbeat();
       const entries = m.transcript || [];
       if (lastIdx === null) {
         hasMoreHistory = !!m.has_more_history;
@@ -5987,8 +6006,75 @@ footer button.send {
     }
   }
 
+  // ---------- liveness heartbeat (pinned after the last message) ----------
+  // While claude is BUSY, poll a minimal screen-activity probe (independent
+  // from the screen window): shows the last diff block's tail line(s) so you
+  // know it's working between messages. 3s base, doubling to a cap when nothing
+  // changes, reset on change. Stops when hidden / idle / paused / detached.
+  const HB_BASE = 3000, HB_MAX = 48000, HB_LINES = 2;   // x = last 2 lines of last diff block
+  let hbVer = "", hbSid = "", hbDelay = HB_BASE, hbNextAt = 0, hbLines = [],
+      hbBusy = false, hbTicker = null, hbEl = null;
+  function ensureHb() {
+    if (hbEl) return hbEl;
+    hbEl = document.createElement("div"); hbEl.id = "hb";
+    const dot = document.createElement("span"); dot.className = "hb-dot";
+    const txt = document.createElement("div"); txt.className = "hb-txt";
+    const cd = document.createElement("span"); cd.className = "hb-cd";
+    hbEl.append(dot, txt, cd);
+    hbEl._txt = txt; hbEl._cd = cd;
+    return hbEl;
+  }
+  function hbPaint() {
+    const el = ensureHb();
+    const rows = hbLines.length ? hbLines : ["working…"];
+    if (el._txt.childElementCount !== rows.length) {
+      el._txt.textContent = "";
+      for (const _ of rows) { const d = document.createElement("div"); d.className = "hb-ln"; el._txt.appendChild(d); }
+    }
+    rows.forEach((r, i) => { el._txt.children[i].textContent = r; });
+    const secs = Math.max(0, Math.ceil((hbNextAt - Date.now()) / 1000));
+    el._cd.textContent = " · " + secs + "s";
+  }
+  function hbShow() { const el = ensureHb(); if (transcriptEl.lastChild !== el) transcriptEl.appendChild(el); }
+  function hbHide() { if (hbEl && hbEl.parentNode) hbEl.parentNode.removeChild(hbEl); }
+  function startHeartbeat() {
+    if (attachedSid !== hbSid) { hbSid = attachedSid; hbVer = ""; hbLines = []; }   // fresh baseline per session
+    if (hbTicker) return;
+    hbDelay = HB_BASE; hbNextAt = Date.now();       // fetch on the first tick
+    hbShow(); hbPaint();
+    hbTicker = setInterval(hbTick, 1000);
+  }
+  function stopHeartbeat() {
+    if (hbTicker) { clearInterval(hbTicker); hbTicker = null; }
+    hbHide();
+  }
+  function hbTick() {
+    if (!attachedSid || document.hidden || isPaused || claudeIdle) { stopHeartbeat(); return; }
+    if (attachedSid !== hbSid) { hbSid = attachedSid; hbVer = ""; hbLines = []; hbNextAt = Date.now(); }
+    if (Date.now() >= hbNextAt && !hbBusy) hbFetch();
+    hbPaint();
+  }
+  async function hbFetch() {
+    hbBusy = true;
+    const sid = attachedSid;
+    try {
+      const r = await authedFetch("/api/activity?claude_session_id=" + encodeURIComponent(sid)
+        + "&lines=" + HB_LINES + "&ver=" + encodeURIComponent(hbVer), { timeoutMs: 8000 });
+      if (sid !== attachedSid) return;
+      if (!r.ok) { hbDelay = Math.min(hbDelay * 2, HB_MAX); return; }
+      const d = await r.json();
+      if (sid !== attachedSid) return;
+      if (d.same) { hbDelay = Math.min(hbDelay * 2, HB_MAX); }              // no change → back off (double)
+      else { hbDelay = HB_BASE; hbVer = d.ver || ""; hbLines = (d.lines || []).filter(Boolean); }  // moving → reset
+      hbShow();
+    } catch { hbDelay = Math.min(hbDelay * 2, HB_MAX); }
+    finally { hbBusy = false; hbNextAt = Date.now() + hbDelay; hbPaint(); }
+  }
+  // keep the heartbeat pinned below the last message after new content arrives
+  function hbReattach() { if (hbTicker) hbShow(); }
+
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) { stopAuto(); return; }   // window hidden → cancel screen auto-reload
+    if (document.hidden) { stopAuto(); stopHeartbeat(); return; }   // hidden → stop screen auto-reload + heartbeat
     if (!isPaused && attachedSid) { keepAlive(); pollOnce(); }
     if (screenModal.classList.contains("show")) startAuto();   // shown again → restart (fresh 1h)
   });

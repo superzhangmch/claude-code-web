@@ -4445,6 +4445,83 @@ def _screen_delta(cache_key: str, text: str, ver: str) -> dict:
     return {"ver": new_ver, "full": text}
 
 
+_ACT_FOOTER = ("auto mode", "shift+tab", "for agents", "for shortcuts", "/effort")
+
+
+def _act_is_noise(s: str) -> bool:
+    """Screen lines that don't signal 'working': blanks, box/dash bars, the
+    static footer hints. The spinner line (…/elapsed/tokens) is NOT noise —
+    that's exactly the 'it's alive' heartbeat we want to surface."""
+    t = s.strip()
+    if not t:
+        return True
+    if all(c in "─—-│╭╮╰╯|•· " for c in t):
+        return True
+    tl = t.lower()
+    return any(tok in tl for tok in _ACT_FOOTER)
+
+
+def _screen_activity(sid: str, text: str, ver: str, want: int = 2) -> dict:
+    """Minimal 'is the screen moving?' probe, independent from the screen
+    window's delta baseline (own cache key '<sid>:act'). Unchanged → tiny
+    {same}. Else → {moving, lines:[…]} = the last `want` content lines of the
+    LAST CONTIGUOUS diff block (the run of changed lines nearest the bottom),
+    skipping blanks/footer. That's the freshest activity (spinner / latest tool
+    output) at ~one or two lines of bandwidth."""
+    lines = text.split("\n")
+    new_ver = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+    key = f"{sid}:act"
+    prev = _SCREEN_DELTA_CACHE.get(key)
+    if len(_SCREEN_DELTA_CACHE) > 256 and key not in _SCREEN_DELTA_CACHE:
+        _SCREEN_DELTA_CACHE.clear()
+    _SCREEN_DELTA_CACHE[key] = {"ver": new_ver, "lines": lines}
+    if ver and ver == new_ver:
+        return {"ver": new_ver, "same": True}
+    pl = prev["lines"] if prev else []
+    changed = {i for i in range(len(lines)) if i >= len(pl) or lines[i] != pl[i]}
+    picked: list[str] = []
+    if changed:
+        end = max(changed)                       # last contiguous diff block
+        start = end
+        while start - 1 in changed:
+            start -= 1
+        for i in range(end, start - 1, -1):      # its last `want` content lines
+            if _act_is_noise(lines[i]):
+                continue
+            picked.append(lines[i].strip())
+            if len(picked) >= max(1, want):
+                break
+        picked.reverse()
+    if not picked:                               # block all-noise / no prev
+        for i in range(len(lines) - 1, -1, -1):
+            if not _act_is_noise(lines[i]):
+                picked = [lines[i].strip()]
+                break
+    return {"ver": new_ver, "moving": True, "lines": [p[:160] for p in picked]}
+
+
+@app.get("/api/activity", dependencies=[Depends(require_token)])
+async def get_activity(claude_session_id: str, ver: str = "", lines: int = 2):
+    """Lightweight liveness heartbeat for the transcript view: reads the screen
+    and returns just whether it changed since `ver` + the last changed line.
+    Independent from /api/screen's delta baseline. Reads the screen even while
+    claude is busy (that's the point — to show it's working between messages);
+    the client keeps the cost bounded (3s, doubling backoff, stops when hidden)."""
+    b = bindings.get_by_session(claude_session_id)
+    if b is None:
+        raise HTTPException(status_code=409, detail="session not bound")
+    if not verify_binding(b):
+        bindings.remove_session(claude_session_id)
+        raise HTTPException(status_code=410, detail="tab/pid is gone")
+    try:
+        screen = await bridge.get_screen_for(b.iterm_session_id, max_lines=60,
+                                             refresh=False, strip_input=True)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"cannot read screen: {e}")
+    return _screen_activity(claude_session_id, _collapse_blanks(screen or ""), ver,
+                            want=max(1, min(int(lines), 4)))
+
+
 @app.get("/api/screen", dependencies=[Depends(require_token)])
 async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0,
                      delta: bool = False, ver: str = ""):
