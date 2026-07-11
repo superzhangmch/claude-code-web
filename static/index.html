@@ -711,6 +711,10 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 .sys-item.tool-click { cursor: pointer; }
 .sys-item.tool-click:hover { text-decoration: underline; text-underline-offset: 2px; }
 .sys-item.tool.open { color: var(--text); font-weight: 600; }
+/* ToolName[info]: name in strong text color + weight; info muted so it's
+   clearly the secondary detail at a glance. */
+.sys-item.tool .tool-nm { color: var(--text); font-weight: 600; }
+.sys-item.tool .tool-desc { color: var(--muted); font-family: inherit; font-weight: 400; margin-left: 1px; }
 /* expanded detail matches normal (medium) tool display — not the muted sys grey */
 .msg.system .tool-detail { margin-top: 6px; color: var(--text); }
 .msg .markdown p { margin: 0 0 .7em 0; }
@@ -1446,6 +1450,13 @@ footer button.send {
   font: 12px ui-monospace, Menlo, monospace; color: var(--text);
 }
 #files-modal .files-preview img { max-width: 100%; display: block; margin: 0 auto; }
+#files-modal .files-preview .preview-bar {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; background: var(--panel); border-bottom: 1px solid var(--border);
+}
+#files-modal .files-preview .preview-bar .btn.active { background: var(--accent); color: var(--bg); }
+#files-modal .files-preview .preview-info { color: var(--muted); font-size: 11px; margin-left: auto; }
 #files-modal .files-preview iframe { width: 100%; height: 100%; border: 0; background: #fff; }
 #files-modal .files-preview .ph { color: var(--muted); padding: 14px; font-size: 13px; }
 /* Two tabs: Screen (scroll both axes, in a box) / Info (just a table,
@@ -3291,20 +3302,42 @@ footer button.send {
     }
   }
 
+  // Text files: bounded head/tail preview (byte-capped, safe on huge lines).
+  // (fmtBytes is a hoisted fn declared below.)
+  async function previewText(path, where) {
+    clearFilesPreview("Loading…");
+    try {
+      const resp = await authedFetch("/api/fs/preview?path=" + encodeURIComponent(path) + "&where=" + where);
+      if (!resp.ok) { clearFilesPreview("Error: " + resp.status); return; }
+      const d = await resp.json();
+      filesPreviewEl.innerHTML = "";
+      const bar = document.createElement("div"); bar.className = "preview-bar";
+      const mk = (lbl, w) => {
+        const b = document.createElement("button");
+        b.className = "btn" + (w === d.where ? " active" : "");
+        b.textContent = lbl;
+        b.addEventListener("click", () => previewText(path, w));
+        return b;
+      };
+      bar.appendChild(mk("Head", "head"));
+      bar.appendChild(mk("Tail", "tail"));
+      const info = document.createElement("span"); info.className = "preview-info";
+      info.textContent = fmtBytes(d.shown_bytes) + " of " + fmtBytes(d.size)
+        + (d.truncated ? " · truncated" : "");
+      bar.appendChild(info);
+      filesPreviewEl.appendChild(bar);
+      const pre = document.createElement("pre"); pre.className = "preview-pre";
+      pre.textContent = d.text;
+      filesPreviewEl.appendChild(pre);
+    } catch (err) { clearFilesPreview("Error: " + err); }
+  }
   async function previewFile(path, kind) {
     clearFilesPreview("Loading…");
     if (kind === "other") { clearFilesPreview("Not a previewable type."); return; }
+    if (kind === "text") { return previewText(path, "head"); }   // default: head
     try {
       const resp = await authedFetch("/api/fs/file?path=" + encodeURIComponent(path));
       if (!resp.ok) { clearFilesPreview("Error: " + resp.status); return; }
-      if (kind === "text") {
-        const txt = await resp.text();
-        filesPreviewEl.innerHTML = "";
-        const pre = document.createElement("pre");
-        pre.textContent = txt;
-        filesPreviewEl.appendChild(pre);
-        return;
-      }
       const blob = await resp.blob();
       if (filesObjUrl) URL.revokeObjectURL(filesObjUrl);
       filesObjUrl = URL.createObjectURL(blob);
@@ -5063,7 +5096,7 @@ footer button.send {
       }
       if (text.trim()) yield { kind: "text", role, text, idx, round, ts, sid, queued: !!entry._queued, system: !!entry._system };
       // brief also shows tool-calls (name only) → stacked "Tool calls" block
-      for (const p of tools) yield { kind: "tool_use", id: p.id, name: p.name || "?", input: p.input, idx, round, ts, sid };
+      for (const p of tools) yield { kind: "tool_use", id: p.id, name: p.name || "?", input: p.input, desc: p.desc, idx, round, ts, sid };
       return;
     }
     // all mode
@@ -5316,8 +5349,15 @@ footer button.send {
       item.title = b.text || "";
     } else {
       item.classList.add("tool", "tool-click");
-      item.textContent = b.name || "(tool)";
-      item.title = "click to expand detail";
+      const nm = document.createElement("span"); nm.className = "tool-nm";
+      nm.textContent = b.name || "(tool)";
+      item.appendChild(nm);
+      if (b.desc) {                              // ToolName[info] — info visually distinct
+        const d = document.createElement("span"); d.className = "tool-desc";
+        d.textContent = "[" + b.desc + "]";
+        item.appendChild(d);
+      }
+      item.title = (b.desc ? b.desc + " — " : "") + "click to expand detail";
       if (b.id != null) item.dataset.tid = b.id;
       if (b.idx != null) item.dataset.idx = b.idx;
       item.addEventListener("click", onToolItemClick);

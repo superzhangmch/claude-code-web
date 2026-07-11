@@ -1950,6 +1950,40 @@ def build_picker_sessions(live_tabs: Optional[list[dict]] = None,
 
 # ---------- transcript / mode filtering (unchanged from before) ----------
 
+# Per-tool "headline" field, in priority order — the first present string
+# field becomes the brief-mode one-liner beside the tool name. Derived from a
+# scan of real transcripts (Bash→description, Read/Edit/Write→file_path,
+# WebFetch→url, Grep/Glob→pattern, Skill→skill, Task*→subject/description, …).
+_SUMMARY_ORDER = ("file_path", "notebook_path", "path", "url", "query",
+                  "pattern", "skill", "subject", "description", "command",
+                  "status", "prompt", "subagent_type")
+_SUMMARY_PATHY = {"file_path", "notebook_path", "path"}
+
+
+def _tool_summary(inp) -> Optional[str]:
+    """One short line summarizing a tool call. Paths get head … tail elision
+    (the filename at the tail stays visible); other text collapses whitespace
+    and is length-capped."""
+    if not isinstance(inp, dict):
+        return None
+    for k in _SUMMARY_ORDER:
+        v = inp.get(k)
+        if not isinstance(v, str):
+            continue
+        v = v.strip()
+        if not v:
+            continue
+        if k in _SUMMARY_PATHY:
+            # paths: keep just head + tail (filename lives at the tail).
+            return v if len(v) <= 40 else v[:14] + " … " + v[-26:]
+        if k == "url":
+            # url: head + tail too — head longer so the domain stays visible.
+            return v if len(v) <= 50 else v[:26] + " … " + v[-22:]
+        v = re.sub(r"\s+", " ", v)
+        return v if len(v) <= 160 else v[:160] + " …"
+    return None
+
+
 def _trim_brief(e: dict) -> Optional[dict]:
     msg = e.get("message") or {}
     content = msg.get("content")
@@ -1969,8 +2003,16 @@ def _trim_brief(e: dict) -> Optional[dict]:
             if t == "text" and (p.get("text") or "").strip():
                 parts.append({"type": "text", "text": p["text"]})
             elif t == "tool_use":
-                parts.append({"type": "tool_use", "id": p.get("id"),
-                              "name": p.get("name"), "input": {}})
+                tu = {"type": "tool_use", "id": p.get("id"),
+                      "name": p.get("name"), "input": {}}
+                # Keep the single most-informative input field so brief mode can
+                # show it inline next to the tool name (args otherwise dropped):
+                # Read/Edit/Write → file_path, Bash → description, WebFetch → url,
+                # Grep/Glob → pattern, etc. See _tool_summary.
+                s = _tool_summary(p.get("input"))
+                if s:
+                    tu["desc"] = s
+                parts.append(tu)
         if parts:
             new_content = parts
     if new_content is None:
@@ -4631,6 +4673,48 @@ def fs_file(path: str, token: str = "",
     except OSError:
         raise HTTPException(status_code=403, detail="cannot stat")
     return FileResponse(p, headers={"Cache-Control": "no-store"})
+
+
+_FS_PREVIEW_BYTES = 64 * 1024       # default head/tail window for text preview
+_FS_PREVIEW_MAX = 2 * 1024 * 1024   # hard cap so one huge line can't blow memory
+
+
+@app.get("/api/fs/preview", dependencies=[Depends(require_token)])
+def fs_preview(path: str, where: str = "head", max_bytes: int = _FS_PREVIEW_BYTES):
+    """Bounded text preview: read at most `max_bytes` from the HEAD or TAIL of
+    a file (byte-capped, so a file with one enormous line can't blow up the
+    client). Returns decoded text + size metadata. Binary/huge lines are safe
+    because we cap bytes, not lines, and decode with errors='replace'."""
+    p = Path(path).expanduser()
+    try:
+        p = p.resolve()
+    except OSError:
+        raise HTTPException(status_code=400, detail="bad path")
+    if not _fs_allowed(p):
+        raise HTTPException(status_code=403, detail="path outside allowed root")
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="not a file")
+    n = max(1024, min(int(max_bytes), _FS_PREVIEW_MAX))
+    try:
+        size = p.stat().st_size
+        with open(p, "rb") as f:
+            if where == "tail" and size > n:
+                f.seek(size - n)
+                raw = f.read(n)
+                nl = raw.find(b"\n")          # drop the partial leading line
+                if 0 <= nl < len(raw) - 1:
+                    raw = raw[nl + 1:]
+            else:
+                raw = f.read(n)
+    except OSError as ex:
+        raise HTTPException(status_code=403, detail=f"cannot read: {ex}")
+    return {
+        "where": "tail" if where == "tail" else "head",
+        "size": size,
+        "shown_bytes": len(raw),
+        "truncated": size > len(raw),
+        "text": raw.decode("utf-8", "replace"),
+    }
 
 
 class ResumePayload(BaseModel):
