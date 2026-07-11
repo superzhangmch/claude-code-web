@@ -696,7 +696,7 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 .msg .copy-btn.done { color: #6ee884; }
 .msg .markdown { word-break: break-word; }
 /* stacked compact rows (System msgs / brief tool-calls) — INLINE flow, wraps */
-.msg.system .sys-lines { font-size: 0.85em; line-height: 1.6; color: var(--muted); word-break: break-word; }
+.msg.system .sys-lines { font-size: 0.75em; line-height: 1.55; color: var(--muted); word-break: break-word; }
 .msg.system .sys-item { }
 .msg.system .sys-item.tool { font-family: ui-monospace, Menlo, monospace; }
 .msg.system .sys-item .sys-tag {
@@ -706,7 +706,12 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 .msg.system .sys-sep { color: var(--muted); opacity: .45; }
 /* minimal tool-call stack: tight padding, no header; NARROW + equal gaps top &
    bottom (negative top cancels the previous block's 14px bottom margin). */
-.msg.system.stack-tool { padding: 3px 10px; margin: -10px 0 4px 0; }
+/* tool/sys stack: blend into the page — no border, no panel fill — so it's
+   the least conspicuous thing in the transcript. */
+.msg.system.stack-tool {
+  padding: 3px 10px; margin: -10px 0 4px 0;
+  background: var(--bg); border: 0; border-radius: 0;
+}
 /* stacked tool names are clickable → inline-expand server-truncated detail */
 .sys-item.tool-click { cursor: pointer; }
 .sys-item.tool-click:hover { text-decoration: underline; text-underline-offset: 2px; }
