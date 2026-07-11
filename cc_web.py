@@ -2784,6 +2784,134 @@ def _summary_worker() -> None:
         _time.sleep(SUMMARY_SCAN_INTERVAL_SEC)
 
 
+# ---------- API-error auto-continue ----------
+# When a bound session's turn died on a (recoverable) API error and claude-code's
+# OWN retries are exhausted (the isApiErrorMessage entry is only written at
+# give-up — confirmed by scanning real transcripts), nudge "继续" to resume.
+API_AUTO_CONTINUE = True
+_API_ERR_MIN_AGE = 300          # wait ≥5min after the error before the first try
+_API_ERR_MAX_AGE = 3600         # ignore errors older than 1h (stale session)
+_API_ERR_MAX_ATTEMPTS = 3       # then give up
+_API_ERR_INPUT_WAIT = 30.0      # if a human is mid-typing, wait this then re-check
+_api_err_state: dict[str, dict] = {}   # sid -> {uuid, attempts, next_at}
+
+
+def _parse_iso_ts(s: str) -> float:
+    try:
+        import datetime as _d
+        return _d.datetime.fromisoformat((s or "").replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _tail_api_error(entries: list[dict]) -> Optional[dict]:
+    """Return the API-error entry IFF it is the newest MEANINGFUL entry (an
+    assistant turn, or a real user msg — bookkeeping like system/snapshots is
+    skipped). Else None."""
+    for e in reversed(entries):
+        if not isinstance(e, dict):
+            continue
+        t = e.get("type")
+        if t == "assistant":
+            return e if e.get("isApiErrorMessage") else None
+        if t == "user" and not (e.get("isMeta") or e.get("isSidechain")
+                                or e.get("toolUseResult")):
+            return None
+    return None
+
+
+def _api_error_text(e: dict) -> str:
+    c = (e.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return " ".join(p.get("text", "") for p in c
+                        if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
+def _is_recoverable_api_error(cls: Optional[str], text: str) -> bool:
+    """Only transient errors are worth nudging. auth (needs /login), too-long
+    (needs /clear) and TLS-cert failures won't recover from a "继续"."""
+    if cls == "server_error":
+        return True
+    if cls == "unknown":
+        return "certificate" not in (text or "").lower()
+    return False
+
+
+async def _maybe_auto_continue(b, now: float) -> None:
+    entries = jsonl_cache.entries(b.jsonl_path)
+    err = _tail_api_error(entries)
+    if err is None:
+        _api_err_state.pop(b.claude_session_id, None)   # recovered / moved on → reset
+        return
+    text = _api_error_text(err)
+    if not _is_recoverable_api_error(err.get("error"), text):
+        return
+    age = now - _parse_iso_ts(err.get("timestamp"))
+    if age < _API_ERR_MIN_AGE or age > _API_ERR_MAX_AGE:
+        return                                          # too fresh (let it settle) / too stale
+
+    uuid = err.get("uuid")
+    st = _api_err_state.get(b.claude_session_id)
+    if not st or st.get("uuid") != uuid:
+        st = {"uuid": uuid, "attempts": 0, "next_at": now}
+        _api_err_state[b.claude_session_id] = st
+    if st["attempts"] >= _API_ERR_MAX_ATTEMPTS or now < st["next_at"]:
+        return
+
+    # Don't clobber a human mid-typing. If there's real input, wait 30s: if it
+    # CHANGED, a human is active → skip this cycle (don't consume an attempt); if
+    # UNCHANGED, they walked away → clear it and send.
+    clear_first = False
+    try:
+        typed = (await bridge.input_typed_text(b.iterm_session_id) or "").strip()
+    except Exception:
+        typed = ""
+    if typed:
+        await asyncio.sleep(_API_ERR_INPUT_WAIT)
+        again = _tail_api_error(jsonl_cache.entries(b.jsonl_path))
+        if again is None or again.get("uuid") != uuid:
+            return                                      # resumed during the wait
+        try:
+            typed2 = (await bridge.input_typed_text(b.iterm_session_id) or "").strip()
+        except Exception:
+            typed2 = ""
+        if typed2 and typed2 != typed:
+            return                                      # human actively typing → leave them alone
+        clear_first = bool(typed2)                      # unchanged residual → clear before send
+
+    if clear_first:
+        try:
+            await bridge.send_text_to(b.iterm_session_id, "\x15")
+            await asyncio.sleep(0.12)
+        except Exception:
+            pass
+    ok = await bridge.send_text_to(b.iterm_session_id, "继续\r")
+    st["attempts"] += 1
+    st["next_at"] = now + _API_ERR_MIN_AGE * (2 ** (st["attempts"] - 1))  # 5 → 10 → 20 min
+    log.info("api-error auto-continue sid=%s attempt=%d/%d ok=%s",
+             b.claude_session_id[:8], st["attempts"], _API_ERR_MAX_ATTEMPTS, ok)
+
+
+async def _api_error_watcher(interval_sec: float = 180.0) -> None:
+    """Every ~3min, nudge any bound session stuck on a recoverable API error."""
+    while True:
+        try:
+            await asyncio.sleep(interval_sec)
+        except asyncio.CancelledError:
+            return
+        if not API_AUTO_CONTINUE:
+            continue
+        for b in bindings.all():
+            try:
+                await _maybe_auto_continue(b, _time.time())
+            except Exception as e:
+                log.debug("auto-continue check failed sid=%s: %s",
+                          b.claude_session_id[:8], e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Restore bindings saved before the last shutdown, keeping only those whose
@@ -2803,6 +2931,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_bg_initial_connect())
     reaper_task = asyncio.create_task(_binding_reaper(30.0))
     cpu_task = asyncio.create_task(_cpu_sampler_loop())
+    apierr_task = asyncio.create_task(_api_error_watcher(180.0))
     # Session-summary generator: independent daemon thread (does blocking file
     # reads + litellm calls, so it stays off the event loop).
     _load_summaries()
@@ -2812,7 +2941,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for t in (reaper_task, cpu_task):
+        for t in (reaper_task, cpu_task, apierr_task):
             t.cancel()
             try:
                 await t
