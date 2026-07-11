@@ -1590,7 +1590,7 @@ footer button.send {
   <div id="tabs-modal" class="modal">
     <div class="modal-card tabs-card">
       <div class="modal-row">
-        <h3>iTerm2 tabs</h3>
+        <h3 id="tabs-modal-title">iTerm2 tabs</h3>
         <button id="tabs-refresh" class="btn">↻</button>
         <button id="tabs-close" class="btn" title="close">✕</button>
       </div>
@@ -1830,7 +1830,7 @@ footer button.send {
   <div id="newdlg" class="modal">
     <div class="modal-card">
       <h2>New Claude session</h2>
-      <p>Pick a working directory. Opens a new iTerm2 tab on the server.</p>
+      <p id="newsess-hint">Pick a working directory. Opens a new iTerm2 tab on the server.</p>
       <div id="newdlg-cwds"></div>
       <input id="newdlg-name" type="text" placeholder="session name (optional) — runs /rename" autocomplete="off">
       <div class="modal-actions">
@@ -1869,6 +1869,23 @@ footer button.send {
 (() => {
   const TOKEN_KEY = "cc_web_token";
   let authToken = localStorage.getItem(TOKEN_KEY) || "";
+  // User-facing terminal name for this host (iTerm2 on macOS, tmux on Linux).
+  // Filled from /api/server-info at startup; drives all UI wording.
+  let TERM = "iTerm2";
+  async function loadServerInfo() {
+    try {
+      const r = await authedFetch("/api/server-info");
+      if (r.ok) { const d = await r.json(); if (d && d.terminal) { TERM = d.terminal; applyTermName(); } }
+    } catch {}
+  }
+  function applyTermName() {
+    const setTitle = (id, t) => { const el = document.getElementById(id); if (el) el.title = t; };
+    setTitle("screen-btn", TERM + " screen + session info");
+    setTitle("tabs-btn", "Show all " + TERM + " tabs");
+    const setText = (id, t) => { const el = document.getElementById(id); if (el) el.textContent = t; };
+    setText("tabs-modal-title", TERM + " tabs");
+    setText("newsess-hint", "Pick a working directory. Opens a new " + TERM + " tab on the server.");
+  }
   const loginEl = document.getElementById("login");
   const loginForm = document.getElementById("login-form");
   const loginTokenInput = document.getElementById("login-token");
@@ -3791,8 +3808,8 @@ footer button.send {
       appendInfoRow(infoBody, "named", j.named ? "yes" : "no");
       if (j.binding) {
         appendInfoRow(infoBody, "pid", j.binding.pid);
-        appendInfoRow(infoBody, "iterm tab", "win " + (j.binding.window_index + 1) + " · tab " + (j.binding.tab_index + 1));
-        appendInfoRow(infoBody, "iterm sid", j.binding.iterm_session_id);
+        appendInfoRow(infoBody, TERM + " tab", "win " + (j.binding.window_index + 1) + " · tab " + (j.binding.tab_index + 1));
+        appendInfoRow(infoBody, TERM + " sid", j.binding.iterm_session_id);
         if (j.binding.bound_at) {
           const d = new Date(j.binding.bound_at * 1000);
           appendInfoRow(infoBody, "bound at", d.toLocaleString());
@@ -4069,7 +4086,7 @@ footer button.send {
     if (!sessions.length) {
       const msg = searching ? "No sessions match this search."
         : (quickText.trim() ? "No sessions match the quick filter."
-          : "No sessions yet. Start <code>claude</code> in iTerm2 and use the <em>session-name</em> skill to name it.");
+          : `No sessions yet. Start <code>claude</code> in ${TERM} and use the <em>session-name</em> skill to name it.`);
       pickerListEl.innerHTML = "<div style='color:var(--muted);font-size:12px;padding:20px;text-align:center'>" + msg + "</div>";
       return;
     }
@@ -4385,7 +4402,7 @@ footer button.send {
         closeBtn.className = "detach";
         closeBtn.addEventListener("click", async (e) => {
           e.stopPropagation();
-          if (!confirm("Close this tab? Exits claude, then closes the iTerm tab if no background jobs are running.")) return;
+          if (!confirm(`Close this tab? Exits claude, then closes the ${TERM} tab if no background jobs are running.`)) return;
           closeBtn.disabled = true; closeBtn.textContent = "Closing…";
           const r = await authedFetch("/api/close-tab", {
             method: "POST",
@@ -4449,12 +4466,12 @@ footer button.send {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ claude_session_id: sid }),
-        timeoutMs: 20000,  // attach resolves via iTerm2 (list tabs, read screens)
+        timeoutMs: 20000,  // attach resolves via the terminal bridge (list tabs, read screens)
       });
     } catch (e) {
       hideLoading();
       alert(e && e.name === "AbortError"
-        ? "Attach 超时(iTerm2 可能无响应)—— 请重试" : "Attach failed: " + e);
+        ? `Attach 超时(${TERM} 可能无响应)—— 请重试` : "Attach failed: " + e);
       return;
     }
     if (!resp.ok) {
@@ -4484,8 +4501,8 @@ footer button.send {
       const cwdHint = data.cwd ? `\nsession cwd: ${data.cwd}` : "";
       const why = data.store_ok
         ? "This session isn't currently running (no live claude process for it)."
-        : "No iTerm2 tab matches this session's cwd — so it isn't currently running.";
-      if (confirm(`${why}${cwdHint}\n\nResume it on iTerm2 (opens a new tab + \`claude --resume\`)?`)) {
+        : `No ${TERM} tab matches this session's cwd — so it isn't currently running.`;
+      if (confirm(`${why}${cwdHint}\n\nResume it on ${TERM} (opens a new tab + \`claude --resume\`)?`)) {
         showLoading("Resuming… (opening tab + waiting for claude)");
         let r;
         try {
@@ -5062,7 +5079,7 @@ footer button.send {
 
   const candiResume = document.getElementById("candidlg-resume");
   candiResume.addEventListener("click", async () => {
-    if (!confirm("None of these tabs is the right one — open a NEW iTerm tab and `claude --resume` this session there?")) return;
+    if (!confirm(`None of these tabs is the right one — open a NEW ${TERM} tab and \`claude --resume\` this session there?`)) return;
     const sid = candiState.sid, label = candiState.label;
     candiDlg.classList.remove("show");
     showLoading("Resuming… (opening tab + waiting for claude)");
@@ -6227,6 +6244,7 @@ footer button.send {
     if (!await tryLogin(authToken)) {
       authToken = ""; localStorage.removeItem(TOKEN_KEY); showLogin(false); return;
     }
+    loadServerInfo();                 // adapt wording to this host's terminal (iTerm2/tmux)
     loadOpenTabs(); renderTabBar();   // restore the tab bar (content re-loads on click)
     if (openTabs.length) refreshMetaName(attachedSid);   // fill wXtX / names for the bar
     openFromHash();

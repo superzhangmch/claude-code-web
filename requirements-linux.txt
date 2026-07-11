@@ -1,0 +1,6 @@
+# Linux deps: same web stack as requirements.txt but WITHOUT the macOS-only
+# iterm2 + pyobjc packages (the tmux bridge replaces the iTerm2 API there).
+fastapi>=0.110
+uvicorn[standard]>=0.27
+websockets>=12
+python-multipart>=0.0.9

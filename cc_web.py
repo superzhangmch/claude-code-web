@@ -40,7 +40,18 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from iterm_bridge import ClaudeSessionRef, ItermBridge
+# Terminal bridge is platform-specific: iTerm2 on macOS, tmux on Linux. Both
+# expose the same surface (connect/list_claude_tabs/get_screen_for/send_text_to/
+# open_*). ClaudeSessionRef + the pure helpers live in iterm_bridge (which
+# imports fine on Linux now — iterm2 is imported tolerantly there).
+import platform as _platform
+from iterm_bridge import ClaudeSessionRef
+if _platform.system() == "Darwin":
+    from iterm_bridge import ItermBridge as _BridgeClass
+    TERM_NAME = "iTerm2"          # user-facing terminal name (see /api/server-info)
+else:
+    from tmux_bridge import TmuxBridge as _BridgeClass
+    TERM_NAME = "tmux"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("ccweb")
@@ -1712,7 +1723,7 @@ class JsonlCache:
 
 
 jsonl_cache = JsonlCache()
-bridge = ItermBridge()
+bridge = _BridgeClass()
 
 # Tmp tab counter (for New + button)
 _tmp_counter = 0
@@ -1730,6 +1741,8 @@ def _suggested_cwds() -> list[str]:
 
 
 async def _ensure_iterm2_running() -> None:
+    if _platform.system() != "Darwin":
+        return   # no iTerm on Linux; tmux windows are opened by the tmux bridge
     try:
         out = subprocess.run(
             ["pgrep", "-x", "iTerm2"],
@@ -4719,6 +4732,14 @@ def fs_preview(path: str, where: str = "head", max_bytes: int = _FS_PREVIEW_BYTE
 
 class ResumePayload(BaseModel):
     claude_session_id: str
+
+
+@app.get("/api/server-info", dependencies=[Depends(require_token)])
+async def get_server_info():
+    """Small facts the SPA needs to adapt its wording. `terminal` is the
+    user-facing name of the terminal backend on this host — 'iTerm2' on macOS,
+    'tmux' on Linux — so the UI can say the right thing (resume prompt etc.)."""
+    return {"terminal": TERM_NAME, "platform": _platform.system()}
 
 
 @app.post("/api/resume", dependencies=[Depends(require_token)])

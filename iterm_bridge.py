@@ -10,7 +10,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import iterm2
+# iterm2 is macOS-only. Import tolerantly so this module (and its pure,
+# platform-agnostic helpers — _resume_sid_from_cmd, _is_claude_cmd,
+# _pid_start_time, _strip_input_area, ClaudeSessionRef) can be imported on
+# Linux too, where cc_web uses the tmux bridge instead. On macOS nothing
+# changes: the import succeeds and ItermBridge works exactly as before.
+try:
+    import iterm2
+except Exception:  # pragma: no cover - Linux / iterm2 not installed
+    iterm2 = None
 
 # iTerm2 RPC hard timeout: a hung/half-open websocket await must never wedge the
 # asyncio event loop (which would freeze every concurrent request).
