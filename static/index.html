@@ -3339,12 +3339,15 @@ footer button.send {
           cp.className = "cp"; cp.textContent = "🔗"; cp.title = "Open in new browser tab";
           cp.addEventListener("click", (ev) => {
             ev.stopPropagation();
-            const url = location.origin + "/api/fs/file?path="
-                      + encodeURIComponent(full) + "&token=" + encodeURIComponent(authToken);
-            window.open(url, "_blank");
+            window.open(fsFileUrl(full), "_blank");
           });
           row.appendChild(cp);
         }
+        // copy the shareable file link (works for any file type)
+        const cl = document.createElement("button");
+        cl.className = "cp"; cl.textContent = "⧉"; cl.title = "Copy file link";
+        cl.addEventListener("click", (ev) => { ev.stopPropagation(); copyText(fsFileUrl(full)); });
+        row.appendChild(cl);
         row.appendChild(nm); row.appendChild(mt); row.appendChild(sz);
         row.addEventListener("click", () => previewFile(full, e.kind));
       }
