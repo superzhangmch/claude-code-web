@@ -273,7 +273,7 @@ main {
 body.light .hl { color: #c81e1e; }
 #picker-list .session-card .match-snip .more-count { color: var(--muted); font-weight: 400; }
 #picker-list .session-card .sess-summary {
-  margin: 5px 0 2px; font-size: 12px; line-height: 1.45;
+  margin: 5px 0 2px; font-size: calc(12px * var(--ls,1)); line-height: 1.45;
   color: var(--text); opacity: 0.9;
   border-left: 2px solid var(--assistant); padding: 3px 8px;
   background: var(--code-bg); border-radius: 0 4px 4px 0; word-break: break-word;
@@ -286,7 +286,7 @@ body.light .hl { color: #c81e1e; }
 #picker-list .session-card .sess-summary .sm-body { margin-top: 2px; }
 #picker-list .session-card .sess-summary .sm-edit {
   background: none; border: 0; color: var(--muted); cursor: pointer;
-  font-size: 12px; padding: 0 4px; margin-left: 4px; line-height: 1;
+  font-size: calc(12px * var(--ls,1)); padding: 0 4px; margin-left: 4px; line-height: 1;
 }
 #picker-list .session-card .sess-summary .sm-edit:hover { color: var(--accent); }
 /* Group headers: collapse toggle (Recent/Named) + Tabs sort pill. */
@@ -559,33 +559,33 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
   flex-shrink: 0;
   background: var(--panel2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
-  padding: 3px 14px; font-size: 12px; font-weight: 600; cursor: pointer;
+  padding: 3px 14px; font-size: calc(12px * var(--ls,1)); font-weight: 600; cursor: pointer;
 }
 .session-card .title-enter:hover { border-color: var(--accent); }
-.session-card .title { font-weight: 500; font-size: 14px; word-break: break-word; flex: 1; }
+.session-card .title { font-weight: 500; font-size: calc(14px * var(--ls,1)); word-break: break-word; flex: 1; }
 /* Tabs group: line 1 is metadata (tX [sid] size pid datetime), line 2 the name. */
 .session-card .title.tabs-meta {
-  font-family: ui-monospace, Menlo, monospace; font-size: 11.5px;
+  font-family: ui-monospace, Menlo, monospace; font-size: calc(11.5px * var(--ls,1));
   font-weight: 600; color: var(--muted); letter-spacing: -0.2px;
 }
 .session-card .tab-name-line {
-  font-size: 13.5px; font-weight: 600; color: var(--text);
+  font-size: calc(13.5px * var(--ls,1)); font-weight: 600; color: var(--text);
   margin: 1px 0 4px; word-break: break-word; line-height: 1.35;
 }
 .session-card.unnamed .title { font-style: italic; color: var(--muted); }
-.session-card .time { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.session-card .time { font-size: calc(11px * var(--ls,1)); color: var(--muted); white-space: nowrap; }
 .session-card .cwd {
-  font: 11px ui-monospace, Menlo, monospace;
+  font: calc(11px * var(--ls,1)) ui-monospace, Menlo, monospace;
   color: var(--muted); word-break: break-all; margin-bottom: 4px;
 }
 .session-card .preview {
-  font-size: 12px; color: var(--text);
+  font-size: calc(12px * var(--ls,1)); color: var(--text);
   margin-top: 6px; padding-top: 6px;
   border-top: 1px solid var(--border);
   word-break: break-word;
 }
 .session-card .preview .label {
-  color: var(--muted); font-size: 9px;
+  color: var(--muted); font-size: calc(9px * var(--ls,1));
   text-transform: uppercase; letter-spacing: 0.05em; margin-right: 6px;
 }
 .session-card .expanded-area {
@@ -600,18 +600,18 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 .session-card .msg-block.user { background: #000; color: #c8ccd5; border-left: 2px solid var(--accent); margin-left: 18px; }
 .session-card .msg-block.claude { background: #000; border-left: 2px solid var(--assistant); }
 .session-card .msg-block .ts {
-  font-size: 9px; color: var(--muted); margin-bottom: 2px;
+  font-size: calc(9px * var(--ls,1)); color: var(--muted); margin-bottom: 2px;
   text-transform: uppercase; letter-spacing: 0.05em;
 }
 .session-card .msg-block .body {
-  font-size: 12px; line-height: 1.45;
+  font-size: calc(12px * var(--ls,1)); line-height: 1.45;
   white-space: pre-wrap;
 }
 /* Request-only compact row: tight, no "You" label, inline mm-dd HH:MM prefix. */
 .session-card .msg-block.user.compact { margin: 3px 0 3px 18px; padding: 3px 8px; }
 .session-card .msg-block.user.compact .body { white-space: normal; }
 .session-card .msg-block .ts-inline {
-  color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums;
+  color: var(--muted); font-size: calc(10px * var(--ls,1)); font-variant-numeric: tabular-nums;
 }
 .session-card .attach-row {
   margin-top: 10px; display: flex; gap: 6px; justify-content: flex-end;
@@ -620,7 +620,7 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 .session-card .attach-row button {
   background: var(--bg); color: var(--text);
   border: 1px solid var(--border); border-radius: 4px;
-  padding: 6px 14px; font-weight: 600; font-size: 12px; cursor: pointer;
+  padding: 6px 14px; font-weight: 600; font-size: calc(12px * var(--ls,1)); cursor: pointer;
 }
 .session-card .attach-row button.detach { color: var(--muted); }
 .session-card .attach-row button.detach:hover { color: #ff8b6a; border-color: #ff6a6a; }
@@ -628,11 +628,11 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 .session-card .attach-row button.more:hover { border-color: var(--accent); }
 .session-card .attach-row button:disabled { opacity: 0.5; cursor: default; }
 .session-card .sid-line {
-  margin-top: 8px; font: 11px ui-monospace, Menlo, monospace;
+  margin-top: 8px; font: calc(11px * var(--ls,1)) ui-monospace, Menlo, monospace;
   color: var(--muted); word-break: break-all; user-select: all;
 }
 .session-card .chevron {
-  font-size: 12px; color: var(--muted);
+  font-size: calc(12px * var(--ls,1)); color: var(--muted);
   transition: transform 0.15s; display: inline-block;
   margin-left: 8px;
 }
@@ -2189,7 +2189,9 @@ footer button.send {
   let pickerScale = parseFloat(localStorage.getItem("cc_web_list_scale") || "1.1") || 1.1;
   function applyPickerScale() {
     pickerScale = Math.round(Math.max(0.7, Math.min(2.0, pickerScale)) * 10) / 10;
-    pickerListEl.style.zoom = pickerScale;
+    // Scale via a --ls CSS var (card font-sizes are calc(px*var(--ls,1))), NOT
+    // `zoom` — iPadOS Safari ignores zoom. calc()+var() work everywhere.
+    pickerListEl.style.setProperty("--ls", pickerScale);
     localStorage.setItem("cc_web_list_scale", String(pickerScale));
   }
   document.getElementById("picker-fontup").addEventListener("click", () => { pickerScale += 0.1; applyPickerScale(); });
@@ -5859,6 +5861,17 @@ footer button.send {
       const it = items[parseInt(e.key, 10) - 1];
       if (it) { e.preventDefault(); it.click(); }
       return;
+    }
+    // No popup open: a digit jumps to the tab-bar chip labeled tN (its terminal
+    // tab-index, tab_index+1). e.g. press 6 → the tab shown as "t6".
+    if (!switchOpen && !tailOpen && !screenOpen && /^[1-9]$/.test(e.key)) {
+      const n = parseInt(e.key, 10);
+      const t = openTabs.find(ot => ot.ti != null && ot.ti + 1 === n);
+      if (t) {
+        e.preventDefault();
+        if (t.sid !== attachedSid) enterTranscript(t.sid, t.name || "");
+        return;
+      }
     }
     switch (e.key) {
       case "/": e.preventDefault(); inputEl.focus(); break;
