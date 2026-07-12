@@ -6123,8 +6123,8 @@ footer button.send {
       }
     } finally {
       sendBtn.disabled = false;
-      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-      if (isMobile) inputEl.blur(); else inputEl.focus();
+      inputEl.blur();   // after submit, drop focus (dismisses mobile keyboard;
+                        // re-enables digit/letter shortcuts without a manual tap)
     }
   }
   sendBtn.addEventListener("click", send);
