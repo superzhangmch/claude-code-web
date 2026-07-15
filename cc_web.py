@@ -5076,7 +5076,7 @@ async def post_resume(payload: ResumePayload):
     # ↔ session mapping is unambiguous: claude on this iterm_session_id IS this
     # session. Poll briefly for the claude process to come up, then bind
     # directly — no attach/score/LLM round trip needed.
-    deadline = _time.time() + 12.0
+    deadline = _time.time() + 20.0   # allow for nvm/cold start + claude self-update
     bound: Optional[Binding] = None
     while _time.time() < deadline:
         await asyncio.sleep(0.6)
