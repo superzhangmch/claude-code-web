@@ -2257,6 +2257,32 @@ footer button.send {
     const size = document.getElementById("ps-size").value;
     const days = document.getElementById("ps-days").value;
     const useEmb = document.getElementById("ps-emb").checked;
+    // If the query looks like a session-id (UUID or a hex[-] prefix), look the
+    // session up directly first — matched → show just it (click to open/resume),
+    // skip the normal search. Not matched → fall through to a normal search.
+    const looksLikeSid = /^[0-9a-f]{8}[0-9a-f-]*$/i.test(q) && q.replace(/-/g, "").length >= 8;
+    if (q && looksLikeSid) {   // exact id lookup — ignore the emb/semantic toggle
+      psGo.disabled = true; psStatus.textContent = "looking up session…";
+      try {
+        const r = await authedFetch("/api/session-by-id?id=" + encodeURIComponent(q) + "&card=" + cardMode);
+        if (r.ok) {
+          const j = await r.json();
+          if (j.found && j.session) {
+            searchResults = [j.session]; searchTerm = "";
+            quickText = ""; if (quickEl) quickEl.value = "";
+            psStatus.textContent = "session " + j.session.claude_session_id.slice(0, 8) + " — click to open";
+            renderPicker(); pickerListEl.scrollIntoView({ block: "start" });
+            psGo.disabled = false; return;
+          }
+          if (j.ambiguous) {
+            psStatus.textContent = (j.ids ? j.ids.length : "several") + " sessions match that prefix — type more";
+            psGo.disabled = false; return;
+          }
+          // not found → keep going as a normal text search
+        }
+      } catch {}
+      psGo.disabled = false;
+    }
     if (useEmb && !q) { psStatus.textContent = "语义检索需要输入查询"; return; }
     if (!q && !cwd && !size && !days) { psStatus.textContent = "set a filter first"; return; }
     const params = new URLSearchParams();
@@ -2377,6 +2403,7 @@ footer button.send {
   let entryCache = [];
   let earliestIdxLoaded = null;
   let lastIdx = null;
+  let lastEpoch = null;   // server window "epoch" — mismatch → one full resync
   let hasMoreHistory = false;
   let claudeIdle = false;
   // ---------- quick-switch tabs (client-side, MRU, memory-capped) ----------
@@ -4719,7 +4746,7 @@ footer button.send {
     if (!sid) return;
     tabState[sid] = {
       entryCache: entryCache.slice(),
-      lastIdx, earliestIdxLoaded, hasMoreHistory,
+      lastIdx, earliestIdxLoaded, hasMoreHistory, epoch: lastEpoch,
       scrollTop: transcriptEl.scrollTop,
     };
   }
@@ -4742,6 +4769,7 @@ footer button.send {
       // INSTANT switch — restore from memory, render, no network; then refresh
       entryCache = cached.entryCache.slice();
       lastIdx = cached.lastIdx;
+      lastEpoch = cached.epoch || null;   // carry epoch so post-switch poll can resync if the window renumbered
       earliestIdxLoaded = cached.earliestIdxLoaded;
       hasMoreHistory = cached.hasMoreHistory;
       claudeIdle = false;
@@ -4750,7 +4778,7 @@ footer button.send {
       transcriptEl.scrollTop = (cached.scrollTop != null) ? cached.scrollTop : transcriptEl.scrollHeight;
     } else {
       // first open of this session → normal load
-      entryCache = []; lastIdx = null; earliestIdxLoaded = null; hasMoreHistory = false;
+      entryCache = []; lastIdx = null; lastEpoch = null; earliestIdxLoaded = null; hasMoreHistory = false;
       claudeIdle = false;
       transcriptEl.innerHTML = "";
       showTranscript();
@@ -5825,11 +5853,16 @@ footer button.send {
     e.stopPropagation();
     if (isPaused) setPaused(false); else setPaused(true, "manual");
   });
-  // Force a one-shot "get the latest" fetch now (what the keyboard shortcut and
-  // the autoload tap both want).
+  // Force a one-shot "get the latest" fetch now (delta — stays low-traffic).
+  // Reliability comes from the server's `resync` flag (see pollOnce): if the
+  // client's since_idx is stale/ahead of the server's window numbering (e.g.
+  // after a server restart), the server sends a fresh snapshot + resync so we
+  // replace — instead of a delta silently returning nothing. Bypasses the
+  // polling in-flight guard (explicit user action), keeps the hidden guard off
+  // the path by clearing pause first.
   async function forceCheckNow() {
     if (!attachedSid) return;
-    isPaused = false;
+    isPaused = false; polling = false;
     keepAlive();
     const fb = document.getElementById("autoload-fresh");
     if (fb) { fb.disabled = true; fb.textContent = "↻ …"; }
@@ -5956,6 +5989,7 @@ footer button.send {
       params.set("mode", renderMode);
       params.set("rounds", "5");
       if (lastIdx !== null) params.set("since_idx", String(lastIdx));
+      if (lastEpoch) params.set("epoch", lastEpoch);
       const resp = await authedFetch("/api/state?" + params.toString());
       if (sid !== attachedSid) return;   // switched away while awaiting → drop this response
       if (resp.status === 410) {
@@ -5980,7 +6014,9 @@ footer button.send {
       // fully hide when hidden/paused/detached.
       syncHeartbeat();
       const entries = m.transcript || [];
-      if (lastIdx === null) {
+      if (lastIdx === null || m.resync) {
+        // resync: server signalled our cursor is from an old window numbering
+        // (restart / rebuild) → replace once instead of a stale-empty delta.
         hasMoreHistory = !!m.has_more_history;
         ingest(entries, "replace");
       } else if (entries.length) {
@@ -5996,6 +6032,7 @@ footer button.send {
         ingest(entries, "append");
       }
       if (typeof m.since_idx === "number") lastIdx = m.since_idx;
+      if (m.epoch) lastEpoch = m.epoch;
       updatePromptRow(m.pending_confirm);
     } catch (e) {
       setStatus("err");

@@ -1594,9 +1594,24 @@ _JSONL_LOAD_ROUNDS = 8
 _JSONL_MAX_SESSIONS = 32
 
 
+# Unique per server process; part of the window "epoch" the client tracks so a
+# server restart (which re-numbers every window from _JSONL_BASE) invalidates
+# stale since_idx cursors → the client does one full resync instead of a delta
+# that silently returns nothing.
+_BOOT_TOKEN = secrets.token_hex(4)
+
+
 class JsonlCache:
     def __init__(self) -> None:
         self._cache: dict[Path, dict] = {}
+        self._gen = 0        # bumps on every from-scratch (re)build of a window
+
+    def generation(self, path: Optional[Path]) -> int:
+        """Window-numbering generation for a path — changes whenever its window
+        was (re)built from scratch (first load, truncate/replace, post-eviction
+        reload). Combined with _BOOT_TOKEN it forms the epoch the client tracks."""
+        c = self._cache.get(path) if path is not None else None
+        return c["gen"] if c else 0
 
     def _touch(self, path: Path) -> None:
         if path in self._cache:                 # move to MRU end
@@ -1647,8 +1662,10 @@ class JsonlCache:
             except OSError:
                 return []
             _number_entries(entries, _JSONL_BASE, _JSONL_BASE)
+            self._gen += 1        # window (re)built from scratch → new generation
             c = {"size": st.st_size, "mtime": st.st_mtime, "ino": st.st_ino,
-                 "anchor_off": anchor, "eof_off": st.st_size, "entries": entries}
+                 "anchor_off": anchor, "eof_off": st.st_size, "entries": entries,
+                 "gen": self._gen}
         else:
             try:
                 with path.open("rb") as f:
@@ -3620,6 +3637,39 @@ async def search_sessions(q: Optional[str] = None, cwd: Optional[str] = None,
     }
 
 
+@app.get("/api/session-by-id", dependencies=[Depends(require_token)])
+async def session_by_id(id: str, card: str = "both"):
+    """Locate a session by its id (full UUID or a unique prefix) so the picker
+    can jump straight to it — check-then-show. Returns the same card shape as
+    /api/search. {found:false} if none; {ambiguous:true, ids:[…]} if a prefix
+    matches more than one."""
+    q = (id or "").strip().lower()
+    if not q:
+        return {"found": False}
+    matches: list[Path] = []
+    if PROJECTS_ROOT.exists():
+        for proj in PROJECTS_ROOT.iterdir():
+            if not proj.is_dir():
+                continue
+            for jl in proj.glob("*.jsonl"):
+                if jl.stem.lower().startswith(q):
+                    matches.append(jl)
+                    if len(matches) > 5:
+                        break
+    if not matches:
+        return {"found": False}
+    if len(matches) > 1:
+        return {"found": False, "ambiguous": True, "ids": [m.stem for m in matches[:8]]}
+    jl = matches[0]
+    try:
+        mt = jl.stat().st_mtime
+    except OSError:
+        mt = 0.0
+    titles = {e["session_id"]: e for e in load_session_index()}
+    d = _session_dict(jl, mt, titles.get(jl.stem), "search", card_mode=card)
+    return {"found": True, "session": d}
+
+
 @app.get("/api/cpu-history", dependencies=[Depends(require_token)])
 async def get_cpu_history():
     """CPU-usage history of the top offenders. Trims to pids active within
@@ -4222,6 +4272,7 @@ async def get_state(
     rounds: Optional[int] = None,
     before_idx: Optional[int] = None,
     mode: str = "brief",
+    epoch: Optional[str] = None,
 ):
     """Read state for a specific bound session. Picker is via /api/sessions."""
     if not claude_session_id:
@@ -4243,9 +4294,18 @@ async def get_state(
             bindings._persist()
 
     all_entries = jsonl_cache.entries(b.jsonl_path)
+    cur_epoch = f"{_BOOT_TOKEN}.{jsonl_cache.generation(b.jsonl_path)}"
 
     gap_before_idx: Optional[int] = None
-    if since_idx is not None:
+    resync = False
+    if since_idx is not None and epoch is not None and epoch != cur_epoch:
+        # The client's cursor belongs to an OLD window numbering (server restart
+        # or a window rebuild re-anchored the ids). A delta would silently return
+        # nothing → send a fresh snapshot + resync so the client REPLACES once.
+        # This is the only case that isn't a cheap delta; it's rare.
+        sliced = _last_n_rounds(all_entries, rounds or 5)
+        resync = True
+    elif since_idx is not None:
         delta = [e for e in all_entries if e.get("_idx", 0) > since_idx]
         if rounds is not None:
             capped = _last_n_rounds(delta, rounds)
@@ -4305,6 +4365,8 @@ async def get_state(
         "gap_before_idx": gap_before_idx,
         "claude_idle": _is_claude_idle(all_entries),
         "pending_confirm": pending_confirm,
+        "epoch": cur_epoch,
+        "resync": resync,
     }
 
 
