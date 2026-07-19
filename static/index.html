@@ -6314,9 +6314,13 @@ footer button.send {
   });
   document.getElementById("jump-prev-user").addEventListener("click", (e) => { e.stopPropagation(); jumpUserRequest(-1); });
   document.getElementById("jump-next-user").addEventListener("click", (e) => { e.stopPropagation(); jumpUserRequest(1); });
-  document.getElementById("jump-bottom").addEventListener("click", (e) => {
+  document.getElementById("jump-bottom").addEventListener("click", async (e) => {
     e.stopPropagation();   // in the tail-controls pill → don't toggle auto-refresh
-    shouldAutoscroll = true; mainEl.scrollTop = mainEl.scrollHeight;
+    shouldAutoscroll = true;
+    // When idle, auto-refresh is slow/paused so the tail may be stale — pull the
+    // latest first, THEN scroll. When busy the tail is already fresh; just jump.
+    if (claudeIdle) { try { await forceCheckNow(); } catch {} }
+    mainEl.scrollTop = mainEl.scrollHeight;
   });
 
   // ---------- new session dialog ----------

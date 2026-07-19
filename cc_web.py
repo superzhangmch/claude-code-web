@@ -4265,6 +4265,33 @@ async def post_reverify(payload: AttachPayload):
     return {"ok": True}
 
 
+async def _try_autobind(sid: str):
+    """Bind a session that's ALIVE but not yet bound, using only ground-truth
+    signals — claude's own pid↔session store, then `--resume` argv. No screen /
+    LLM guessing. Returns the Binding, or None if the session isn't clearly
+    running. Lets /api/input, /api/state, /api/screen, … work without a prior
+    explicit /api/attach (pid↔sid is now reliable, so attach is optional)."""
+    jsonl = find_jsonl_for_session(sid)
+    if jsonl is None:
+        return None
+    try:
+        await bridge.ensure_connected()
+        refs = await bridge.list_claude_tabs()
+    except Exception:
+        return None
+    store_pids = set(_pids_for_session(sid))
+    ref = next((r for r in refs if r.pid in store_pids), None)
+    if ref is None:                       # fall back to --resume argv ground truth
+        ref = next((r for r in refs if getattr(r, "claude_session_id", "") == sid), None)
+    if ref is None:
+        return None
+    b = _build_binding(sid, ref, jsonl)
+    if b:
+        bindings.insert(b)
+        log.info("auto-bound sid=%s pid=%d (on-demand, ground-truth)", sid[:8], ref.pid)
+    return b
+
+
 @app.get("/api/state", dependencies=[Depends(require_token)])
 async def get_state(
     claude_session_id: Optional[str] = None,
@@ -4278,6 +4305,8 @@ async def get_state(
     if not claude_session_id:
         raise HTTPException(status_code=400, detail="claude_session_id required")
     b = bindings.get_by_session(claude_session_id)
+    if b is None:
+        b = await _try_autobind(claude_session_id)   # alive-but-unbound → auto-bind (ground truth)
     if b is None:
         raise HTTPException(status_code=409, detail="session not bound")
     if not verify_binding(b):
@@ -4385,6 +4414,8 @@ async def get_tool_detail(
         raise HTTPException(status_code=400, detail="claude_session_id and tool_id required")
     b = bindings.get_by_session(claude_session_id)
     if b is None:
+        b = await _try_autobind(claude_session_id)   # alive-but-unbound → auto-bind (ground truth)
+    if b is None:
         raise HTTPException(status_code=409, detail="session not bound")
     if b.jsonl_path is None or not b.jsonl_path.exists():
         real = find_jsonl_for_session(claude_session_id)
@@ -4439,6 +4470,8 @@ async def get_tool_detail(
 @app.post("/api/input", dependencies=[Depends(require_token)])
 async def post_input(payload: InputPayload):
     b = bindings.get_by_session(payload.claude_session_id)
+    if b is None:
+        b = await _try_autobind(payload.claude_session_id)   # alive-but-unbound → auto-bind
     if b is None:
         raise HTTPException(status_code=409, detail="session not bound")
     if not verify_binding(b):
@@ -4720,6 +4753,8 @@ async def get_input_state(claude_session_id: str):
     (excludes the greyed autosuggest ghost); works on both bridges."""
     b = bindings.get_by_session(claude_session_id)
     if b is None:
+        b = await _try_autobind(claude_session_id)   # alive-but-unbound → auto-bind (ground truth)
+    if b is None:
         raise HTTPException(status_code=409, detail="session not bound")
     if not verify_binding(b):
         bindings.remove_session(claude_session_id)
@@ -4740,6 +4775,8 @@ async def get_activity(claude_session_id: str, ver: str = "", lines: int = 2):
     claude is busy (that's the point — to show it's working between messages);
     the client keeps the cost bounded (3s, doubling backoff, stops when hidden)."""
     b = bindings.get_by_session(claude_session_id)
+    if b is None:
+        b = await _try_autobind(claude_session_id)   # alive-but-unbound → auto-bind (ground truth)
     if b is None:
         raise HTTPException(status_code=409, detail="session not bound")
     if not verify_binding(b):
@@ -4765,6 +4802,8 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
     the lightweight 'tail screen' peek passes refresh=false to avoid
     disturbing the tab on every click."""
     b = bindings.get_by_session(claude_session_id)
+    if b is None:
+        b = await _try_autobind(claude_session_id)   # alive-but-unbound → auto-bind (ground truth)
     if b is None:
         raise HTTPException(status_code=409, detail="session not bound")
     if not verify_binding(b):
