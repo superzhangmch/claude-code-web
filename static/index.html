@@ -753,6 +753,8 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
   border-radius: 4px; padding: 10px 12px; overflow-x: auto; margin: .5em 0;
 }
 .msg .markdown pre code { background: none; padding: 0; font-size: 0.84em; }
+/* KaTeX: keep display math from overflowing the bubble horizontally */
+.msg .markdown .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; margin: .5em 0; }
 .msg .markdown ul, .msg .markdown ol { margin: .3em 0 .7em 1.4em; padding: 0; }
 .msg .markdown a { color: var(--accent); }
 .msg .markdown .table-wrap {
@@ -2013,6 +2015,56 @@ footer button.send {
   // they're unaffected (no double-escaping). Also a nice XSS defense-in-depth.
   const _escHtml = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   marked.use({ renderer: { html(t) { return _escHtml(typeof t === "string" ? t : (t && (t.text || t.raw)) || ""); } } });
+
+  // ---------- LaTeX (KaTeX), lazy-loaded from CDN on first sighting ----------
+  // cc-web isn't token-streaming (each poll delivers whole blocks), so we only
+  // need the async "decorate a rendered element" path — no anti-flicker sync
+  // render. KaTeX is fetched from jsdelivr the first time a message contains
+  // math; failures degrade gracefully (the $…$ stays as text).
+  let _katexP = null;
+  function _loadCSS(href) {
+    return new Promise((res, rej) => {
+      const l = document.createElement("link");
+      l.rel = "stylesheet"; l.href = href; l.onload = res; l.onerror = rej;
+      document.head.appendChild(l);
+    });
+  }
+  function _loadScript(src) {
+    return new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = src; s.onload = res; s.onerror = rej;
+      document.head.appendChild(s);
+    });
+  }
+  function loadKatex() {
+    if (_katexP) return _katexP;
+    _katexP = (async () => {
+      _loadCSS("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css");
+      await _loadScript("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js");
+      await _loadScript("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js");
+      return window.renderMathInElement;
+    })();
+    return _katexP;
+  }
+  // Conservative: only fire on explicit display delimiters or paired $…$ that
+  // looks like math — avoids "$50 and $20" misfires. (\(…\)/\[…\] are stripped
+  // by marked, so in practice $…$ and $$…$$ are what render through.)
+  const _mathRe = /\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\s][^$\n]*[^$\s]\$/;
+  const _katexOpts = {
+    delimiters: [
+      { left: "$$", right: "$$", display: true },
+      { left: "\\[", right: "\\]", display: true },
+      { left: "\\(", right: "\\)", display: false },
+      { left: "$", right: "$", display: false },
+    ],
+    throwOnError: false,   // broken LaTeX from the model → red source, not a crash
+    ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+  };
+  async function maybeRenderMath(el) {
+    if (!el || !_mathRe.test(el.textContent || "")) return;
+    try { (await loadKatex())(el, _katexOpts); } catch (e) { /* offline / CDN blocked → leave as text */ }
+  }
+
   const URL_RE = /(https?:\/\/[^\s<>"'）)\]]+)/g;
   function renderMarkdown(text) {
     let html = "";
@@ -5565,6 +5617,7 @@ footer button.send {
       label.textContent = b.system ? "System" : (b.role === "user" ? "You" : "Claude");
       const md = document.createElement("div"); md.className = "markdown";
       md.innerHTML = renderMarkdown(b.text);
+      maybeRenderMath(md);
       role.appendChild(makeLinksBtn(() => rawTextFor(b)));
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
       div.appendChild(role); div.appendChild(md);
@@ -5616,6 +5669,7 @@ footer button.send {
       div.className = "msg thinking"; label.textContent = "Thinking";
       const md = document.createElement("div"); md.className = "markdown";
       md.innerHTML = renderMarkdown(b.text);
+      maybeRenderMath(md);
       role.appendChild(makeLinksBtn(() => rawTextFor(b)));
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
       div.appendChild(role); div.appendChild(md);
