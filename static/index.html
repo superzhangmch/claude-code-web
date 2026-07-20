@@ -101,7 +101,7 @@ html, body {
      chat-scale `zoom` (worked on iPhone, not iPad). Pin it so zoom controls size. */
   -webkit-text-size-adjust: 100%; text-size-adjust: 100%;
 }
-body { display: flex; flex-direction: column; height: 100dvh; }
+body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
 
 /* Rapid taps on a button must not trigger iOS double-tap-to-zoom. touch-action:
    manipulation keeps normal tap + scroll + pinch-zoom but drops the double-tap
@@ -213,7 +213,11 @@ header button.btn:hover, header a.btn:hover { border-color: var(--accent); }
 #warn.show { display: block; }
 
 main {
-  flex: 1; overflow-y: auto; padding: 10px 12px;
+  /* min-height:0 is REQUIRED: without it a flex child's min-height defaults to
+     its content height, so #main won't shrink to the viewport — it grows past
+     it, pushing the footer (input box) off-screen and letting the whole PAGE
+     scroll past the input line. With it, only #main scrolls; footer stays pinned. */
+  flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px;
 }
 
 #picker { display: none; }
@@ -2067,8 +2071,14 @@ footer button.send {
 
   const URL_RE = /(https?:\/\/[^\s<>"'）)\]]+)/g;
   function renderMarkdown(text) {
+    // Collapse newlines INSIDE display math $$…$$ before markdown: with
+    // breaks:true, marked turns those newlines into <br>, splitting the $$…$$
+    // across text nodes so KaTeX can't pair the delimiters (multi-line display
+    // math then showed up raw). LaTeX treats a newline as whitespace, so this is
+    // safe. Inline $…$ is single-line by construction, unaffected.
+    let src = (text || "").replace(/\$\$[\s\S]*?\$\$/g, m => m.replace(/\s*\n\s*/g, " "));
     let html = "";
-    try { html = marked.parse(text || ""); } catch { html = (text || ""); }
+    try { html = marked.parse(src); } catch { html = src; }
     const tmp = document.createElement("div");
     tmp.innerHTML = html;
     // Sanitize: marked passes raw HTML through, and transcript / peer-relayed
@@ -5988,7 +5998,10 @@ footer button.send {
         if (tailOpen) tailScreen();                       // refresh tailScr
         else if (screenOpen) screenRefresh.click();       // refresh screenshot
         else if (switchOpen) { hideSwitchMenu(); openSwitchMenu(); }
-        else forceCheckNow();                             // get latest transcript
+        else {                                            // refresh AND scroll to bottom
+          shouldAutoscroll = true;
+          forceCheckNow().then(() => { mainEl.scrollTop = mainEl.scrollHeight; }).catch(() => {});
+        }
         break;
       // Font size: A bigger / a smaller. In the screenshot window it zooms the
       // screenshot; otherwise it zooms the chat (which also scales input+tailScr).
