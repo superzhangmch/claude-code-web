@@ -101,7 +101,12 @@ html, body {
      chat-scale `zoom` (worked on iPhone, not iPad). Pin it so zoom controls size. */
   -webkit-text-size-adjust: 100%; text-size-adjust: 100%;
 }
-body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
+body {
+  display: flex; flex-direction: column; height: 100dvh; overflow: hidden;
+  /* App-wide: no double-tap-to-zoom (kills the accidental zoom from rapid taps
+     on button rows / gaps). Pinch-zoom + scrolling still work. */
+  touch-action: manipulation;
+}
 
 /* Rapid taps on a button must not trigger iOS double-tap-to-zoom. touch-action:
    manipulation keeps normal tap + scroll + pinch-zoom but drops the double-tap
@@ -110,6 +115,10 @@ button, .btn, .icon, label.tab-radio, label.scr-delta {
   touch-action: manipulation;
   -webkit-user-select: none; user-select: none;
 }
+/* Also kill double-tap-to-zoom on the popup CARDS themselves: rapid button taps
+   often land a beat off the button (on the card), which iOS reads as a double-
+   tap → zoom. manipulation still allows pinch-zoom + scroll. */
+.modal-card { touch-action: manipulation; }
 
 header {
   padding: 10px 14px;
@@ -1270,7 +1279,8 @@ footer button.send {
 #screen-modal #screen-input {
   flex: 1; min-width: 0; box-sizing: border-box; -webkit-appearance: none;
   background: var(--bg); color: var(--text);
-  border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 13px;
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px;
+  font-size: 16px;   /* ≥16px so iOS Safari doesn't auto-zoom the page on focus */
 }
 #screen-modal #screen-input:focus { outline: none; border-color: var(--accent); }
 #screen-modal .screen-actions {
@@ -1366,7 +1376,8 @@ footer button.send {
 #files-modal .files-path {
   flex: 1; background: var(--panel2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
-  padding: 5px 8px; font: 12px ui-monospace, Menlo, monospace;
+  padding: 5px 8px;
+  font: 16px ui-monospace, Menlo, monospace;   /* ≥16px → no iOS focus auto-zoom */
 }
 /* clear ✕ as a small icon INSIDE the input's right edge (not a separate button) */
 #files-modal .files-input-wrap { flex: 1; position: relative; display: flex; min-width: 0; }
@@ -1714,7 +1725,6 @@ footer button.send {
         <span style="flex:1"></span>
         <button id="screen-pgup" class="btn" title="上翻一屏 (u) — 冻结+全量抓取 scrollback">⇞</button>
         <button id="screen-pgdn" class="btn" title="下翻一屏 (d)">⇟</button>
-        <label class="scr-delta" title="增量更新:只传变化的行,省流量"><input type="checkbox" id="screen-delta" checked> Δ</label>
         <button id="screen-fontup" class="btn" title="bigger">A</button>
         <button id="screen-fontdown" class="btn" title="smaller">a</button>
         <button id="screen-full" class="btn" title="fullscreen (desktop)">⛶</button>
@@ -1727,10 +1737,10 @@ footer button.send {
           <span id="screen-stat" class="scr-stat"></span>
           <button id="key-esc" class="btn" title="Send ESC">ESC</button>
           <button id="key-up" class="btn" title="Arrow Up">↑</button>
-          <button id="key-up2" class="btn" title="Up ×2">↑2</button>
-          <button id="key-up3" class="btn" title="Up ×3">↑3</button>
           <button id="key-down" class="btn" title="Arrow Down">↓</button>
+          <button id="key-up2" class="btn" title="Up ×2">↑2</button>
           <button id="key-down2" class="btn" title="Down ×2">↓2</button>
+          <button id="key-up3" class="btn" title="Up ×3">↑3</button>
           <button id="key-down3" class="btn" title="Down ×3">↓3</button>
           <button id="key-clearline" class="btn" title="Clear current line (Ctrl-E then Ctrl-U)">⌫ line</button>
           <button id="key-enter" class="btn" title="Enter — confirm">⏎ Enter</button>
@@ -2715,7 +2725,7 @@ footer button.send {
     if (!sid) return;
     // Paged (⇞/⇟) mode forces a real FULL fetch — delta would just report {same}
     // / a tiny diff (the "34B" you saw), which isn't a full screen.
-    const useDelta = document.getElementById("screen-delta").checked && !screenPageDir;
+    const useDelta = !screenPageDir;   // delta always on (paging forces a full fetch)
     if (!quiet && !useDelta) screenBody.textContent = "Loading…";
     try {
       let url = "/api/screen?claude_session_id=" + encodeURIComponent(sid);
@@ -2827,14 +2837,8 @@ footer button.send {
   }
   screenBtn.addEventListener("click", openScreenInfo);
   choiceBannerBtn.addEventListener("click", openScreenInfo);
-  // Experimental delta toggle (persisted). Switching resets the versioned state.
-  const screenDelta = document.getElementById("screen-delta");
-  screenDelta.checked = localStorage.getItem("cc_web_screen_delta") !== "0";   // default ON
-  screenDelta.addEventListener("change", () => {
-    localStorage.setItem("cc_web_screen_delta", screenDelta.checked ? "1" : "0");
-    screenVer = ""; screenLines = [];
-    loadScreen();
-  });
+  // Delta screen updates are always on now (toggle removed) — only paging forces
+  // a full fetch (see useDelta in loadScreen).
   // A / a zoom the screenshot content (persisted, separate from the chat scale).
   let screenScale = parseFloat(localStorage.getItem("cc_web_screen_scale") || "1") || 1;
   function applyScreenScale() {
