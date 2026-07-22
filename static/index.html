@@ -975,6 +975,10 @@ footer .input-row {
   display: flex; align-items: stretch; gap: 8px; padding: 8px 10px;
 }
 footer .input-row > button { flex-shrink: 0; }
+/* ✨ + 📎 stacked in a column beside the input (frees horizontal width for the
+   textarea); the column stretches to the input height, each button = half. */
+footer .in-btn-col { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
+footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
 footer.hidden { display: none; }
 footer textarea {
   flex: 1; box-sizing: border-box;
@@ -1854,9 +1858,11 @@ footer button.send {
     </div>
     <div class="input-row">
       <input id="upload-input" type="file" accept="image/*" multiple style="display:none">
-      <button id="upload-btn" class="icon" title="Attach image">📎</button>
+      <div class="in-btn-col">
+        <button id="polish-btn" class="icon" title="整理文本(LLM 疏通口述/听写)">✨</button>
+        <button id="upload-btn" class="icon" title="Attach image">📎</button>
+      </div>
       <textarea id="input" placeholder="Reply to Claude…" rows="1"></textarea>
-      <button id="polish-btn" class="icon" title="整理文本(LLM 疏通口述/听写)">✨</button>
       <button id="send" class="send" title="Send" aria-label="Send">➤</button>
     </div>
   </footer>
