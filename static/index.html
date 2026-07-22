@@ -243,7 +243,7 @@ main {
   width: 100%; box-sizing: border-box; margin: 10px 0 4px;
   background: var(--panel2); color: var(--text);
   border: 1px solid var(--border); border-radius: 999px;
-  padding: 7px 14px; font-size: 13px; -webkit-appearance: none;
+  padding: 7px 14px; font-size: 16px; -webkit-appearance: none;   /* 16px → no iOS focus zoom */
 }
 #picker-quickfilter:focus { outline: none; border-color: var(--accent); }
 /* Full backend search — pinned below the list. */
@@ -259,7 +259,7 @@ main {
 #picker-search input, #picker-search select {
   box-sizing: border-box; background: var(--bg); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
-  padding: 7px 10px; font-size: 13px; -webkit-appearance: none;
+  padding: 7px 10px; font-size: 16px; -webkit-appearance: none;   /* 16px → no iOS focus zoom */
 }
 #picker-search input { width: 100%; }
 #picker-search input:focus, #picker-search select:focus {
