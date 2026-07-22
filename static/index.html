@@ -149,6 +149,9 @@ header .mode-group { display: inline-flex; gap: 2px; }
 }
 .switch-menu .sw-item:hover { border-color: var(--accent); }
 .switch-menu .sw-item.current { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.switch-menu .sw-item .sw-wt { color: var(--muted); opacity: .7; font-size: 11px; }
+.switch-menu .sw-item .sw-tab { color: var(--accent); font-weight: 700; }   /* highlight tab-name */
+.switch-menu .sw-item .sw-sess { color: var(--muted); }
 .switch-menu .menu-sec { font-size: 10px; color: var(--muted); margin: 6px 2px 3px; text-transform: uppercase; letter-spacing: .05em; }
 .switch-menu .menu-sec:first-child { margin-top: 0; }
 .switch-menu .menu-row { display: flex; gap: 4px; }
@@ -172,8 +175,10 @@ header .mode-group .mode-pick.active {
 header .meta {
   color: var(--muted); font-size: 12px; text-align: left;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  flex-shrink: 0; min-width: 0; max-width: 45%;
+  flex: 1 1 auto; min-width: 0;   /* grow after the chips, ellipsis on overflow */
 }
+header .meta .mt-tab { color: var(--accent); font-weight: 700; }
+header .meta .mt-sess { color: var(--text); }
 header .traffic {
   color: #6b7280; font: 9px ui-monospace, Menlo, monospace;
   display: inline-flex; flex-direction: column; line-height: 1.15;
@@ -398,7 +403,7 @@ header .battery:hover { color: var(--text); }
 }
 #tab-bar {
   display: flex; align-items: center; gap: 5px;
-  flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap;
+  flex: 0 0 auto; min-width: 0; overflow: hidden; white-space: nowrap;
 }
 /* only #meta-stack shrinks; header is nowrap+overflow:hidden so no wrap and the
    right-side buttons are never pushed off */
@@ -584,7 +589,10 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
 .session-card .tab-name-line {
   font-size: calc(13.5px * var(--ls,1)); font-weight: 600; color: var(--text);
   margin: 1px 0 4px; word-break: break-word; line-height: 1.35;
+  overflow: hidden;   /* contain the right-floated Enter button */
 }
+.session-card .tab-name-line .tn-tag { color: var(--accent); font-weight: 700; }
+.session-card .tab-name-line .tn-sess { color: var(--muted); font-weight: 400; }
 .session-card.unnamed .title { font-style: italic; color: var(--muted); }
 .session-card .time { font-size: calc(11px * var(--ls,1)); color: var(--muted); white-space: nowrap; }
 .session-card .cwd {
@@ -1114,6 +1122,26 @@ footer button.send {
   font-weight: 600; font-size: 13px; padding: 6px 16px;
 }
 .modal-actions button.primary:disabled { opacity: 0.4; cursor: not-allowed; }
+.rn-label { font-size: 12px; color: var(--muted); margin: 6px 0 2px; }
+.rn-input {
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; font-size: 16px;   /* ≥16px → no iOS focus auto-zoom */
+  width: 100%; box-sizing: border-box;
+}
+.rn-input:focus { outline: none; border-color: var(--accent); }
+/* Transient "you switched to…" toast, drops just under the header/tab-bar. */
+.tab-toast {
+  position: fixed; left: 50%; transform: translateX(-50%) translateY(-4px);
+  z-index: 90; max-width: 92vw; box-sizing: border-box;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 12px; font-size: 12px; line-height: 1.35;
+  word-break: break-word; box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+  opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s;
+}
+.tab-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.tab-toast .tt-tab { color: var(--accent); font-weight: 700; }
+.tab-toast .tt-sess { color: var(--text); }
 
 #newdlg-cwds, #candidates { display: flex; flex-direction: column; gap: 6px; }
 #newdlg-cwds button {
@@ -1326,6 +1354,12 @@ footer button.send {
 #tabs-modal .tabs-list button:hover { border-color: var(--accent); }
 #tabs-modal .tabs-list button.active { border-color: var(--accent); background: var(--accent); color: #fff; }
 #tabs-modal .tabs-list button .claude-dot { color: #6ee884; margin-right: 4px; }
+#tabs-modal .tabs-list .tl-wt { color: var(--muted); opacity: .7; font-size: 11px; }
+#tabs-modal .tabs-list .tl-tab { color: var(--accent); font-weight: 700; }   /* highlight tab-name */
+#tabs-modal .tabs-list .tl-sess { color: var(--muted); }
+#tabs-modal .tabs-list button.active .tl-wt,
+#tabs-modal .tabs-list button.active .tl-tab,
+#tabs-modal .tabs-list button.active .tl-sess { color: #fff; }
 #tabs-modal .screen-body {
   flex: 1; min-height: 0;
   background: #000; color: var(--text);
@@ -1351,9 +1385,16 @@ footer button.send {
   flex: 1; min-width: 0;
   background: var(--bg); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
-  padding: 7px 10px; font-size: 13px;
+  padding: 7px 10px; font-size: 16px;   /* ≥16px → no iOS focus auto-zoom */
 }
 #tabs-modal #tabs-input:focus { outline: none; border-color: var(--accent); }
+/* Phone: reclaim the horizontal margins — shrink the modal's outer padding and
+   the card's own padding so the tab list/screen use nearly the full width. */
+@media (orientation: portrait), (max-width: 640px) {
+  #tabs-modal.modal { padding: 2px; }
+  #tabs-modal .modal-card.tabs-card { width: 100vw; padding: 8px 2px; gap: 6px; }
+  #tabs-modal .screen-body { padding: 6px 3px; }
+}
 
 #files-modal .modal-card.files-card {
   width: 95vw; max-width: 1100px; height: 85vh;
@@ -2447,10 +2488,18 @@ footer button.send {
         : `w${(t.window_index || 0) + 1}t${(t.tab_index || 0) + 1}`;
       const b = document.createElement("button");
       b.className = "sw-item" + (t.sid === attachedSid ? " current" : "");
-      b.textContent = `${wt} · [${t.sid.slice(0, 4)}]${t.name ? " · " + t.name : ""}`;
+      // [tab-name] session-name — tab-name highlighted + clamped (leave room for
+      // the session-name); head-kept, … on overflow.
+      const tn = (t.tab_name || "").trim();
+      const sn = (t.session_name || "").trim();
+      const wtEl = document.createElement("span"); wtEl.className = "sw-wt"; wtEl.textContent = wt;
+      b.appendChild(wtEl);
+      if (tn) { const e = document.createElement("span"); e.className = "sw-tab"; e.textContent = " [" + tabLabel(tn) + "]"; b.appendChild(e); }
+      if (sn) { const e = document.createElement("span"); e.className = "sw-sess"; e.textContent = " " + clampU(sn, 40); b.appendChild(e); }
+      if (!tn && !sn) { const e = document.createElement("span"); e.textContent = " [" + t.sid.slice(0, 4) + "]"; b.appendChild(e); }
       b.addEventListener("click", () => {
         hideSwitchMenu();
-        if (t.sid !== attachedSid) enterTranscript(t.sid, t.name || "");
+        if (t.sid !== attachedSid) enterTranscript(t.sid, sn || tn || "");
       });
       switchMenu.appendChild(b);
     }
@@ -2889,6 +2938,11 @@ footer button.send {
       // All tabs — claude tabs get a green dot + Attach/Enter; plain shells are
       // selectable too (view + drive via the control panel), just no Attach.
       const tabs = j.tabs || [];
+      // funnel bound claude tabs into the central store (its tab-name is `name`)
+      updateTabMeta(tabs.filter(t => t.bound_to).map(t => ({
+        claude_session_id: t.bound_to, tab_name: t.name,
+        session_name: t.session_name, window_index: t.window_index, tab_index: t.tab_index,
+      })));
       tabsListEl.textContent = "";
       if (!tabs.length) { tabsListEl.textContent = "(no tabs)"; return; }
       // Totals for "wN/total·tM/total" labels: count of windows, and tabs per window.
@@ -2899,14 +2953,17 @@ footer button.send {
         const row = document.createElement("div"); row.className = "tab-row";
         const sel = document.createElement("button"); sel.className = "tab-sel";
         const wPart = totalW > 1 ? `w${t.window_index + 1}/${totalW}·` : "";
-        const label = `${wPart}t${t.tab_index + 1}/${tabsPerWin[t.window_index]}  ${t.name || "(unnamed)"}`;
-        if (t.is_claude) {
-          const dot = document.createElement("span");
-          dot.className = "claude-dot"; dot.textContent = "●";
-          sel.appendChild(dot);
-        }
-        sel.appendChild(document.createTextNode(label));
-        sel.title = label + (t.tty ? "  [" + t.tty + "]" : "");
+        const wt = `${wPart}t${t.tab_index + 1}/${tabsPerWin[t.window_index]}`;
+        // [tab-name] session-name — tab-name highlighted + cleaned/clamped; no
+        // green-dot emoji (saves space; claude tabs still get Attach/Enter below).
+        const tn = tabLabel(t.name || "");
+        const sn = (t.session_name || "").trim();
+        const wtEl = document.createElement("span"); wtEl.className = "tl-wt"; wtEl.textContent = wt + " ";
+        sel.appendChild(wtEl);
+        if (tn) { const e = document.createElement("span"); e.className = "tl-tab"; e.textContent = "[" + tn + "] "; sel.appendChild(e); }
+        if (sn) { const e = document.createElement("span"); e.className = "tl-sess"; e.textContent = sn; sel.appendChild(e); }
+        if (!tn && !sn) sel.appendChild(document.createTextNode(t.name || "(unnamed)"));
+        sel.title = (t.name || "") + (sn ? "  ·  " + sn : "") + (t.tty ? "  [" + t.tty + "]" : "");
         sel.addEventListener("click", () => {
           tabsSelectedId = t.iterm_session_id;
           for (const c of tabsListEl.querySelectorAll(".tab-sel")) c.classList.remove("active");
@@ -4093,6 +4150,7 @@ footer button.send {
     }
     renderRunaway(data.runaway || []);
     pickerBase = data.sessions || [];
+    updateTabMeta(pickerBase);   // funnel the list's names/indices into the central store
     renderPicker();
   }
 
@@ -4108,6 +4166,7 @@ footer button.send {
       if (!r.ok) return;
       tabs = (await r.json()).tabs || [];
     } catch { return; }
+    updateTabMeta(tabs);   // keep the tab bar fresh too, not just the picker cards
     const byId = {}; tabs.forEach(t => { byId[t.sid] = t; });
     for (const s of (pickerBase || [])) {
       if (s.group !== "tabs") continue;
@@ -4116,7 +4175,7 @@ footer button.send {
       s.tab_name = t.tab_name;   // keep data in sync for the next full render
       const card = pickerListEl.querySelector(`.session-card[data-sid="${CSS.escape(s.claude_session_id)}"]`);
       const span = card && card.querySelector(".tn-live");
-      if (span) hlInto(span, t.tab_name || "", hlTerms());
+      if (span) hlInto(span, stripTab(t.tab_name || ""), hlTerms());
     }
   }
   function startTabNamePoll() { stopTabNamePoll(); _tabNameTimer = setInterval(pollTabNames, 15000); }
@@ -4324,12 +4383,43 @@ footer button.send {
       card.appendChild(titleRow);
       let enterPlaced = false;   // enterBtn goes into the summary title line below (or a fallback row)
 
-      // Tabs group: the iTerm tab name on its own line (auto-refreshed in place).
+      // ✎ rename button → one dialog. For a live tab (isTab) it edits BOTH the
+      // terminal tab-name (iTerm tab-strip title / tmux pane title) and the
+      // session-name; for a non-tab card, just the session-name.
+      const mkRenameBtn = (isTab) => {
+        const b = document.createElement("button");
+        b.className = "sm-edit"; b.textContent = "✎";
+        b.title = isTab ? "重命名(标签名 + 会话名)" : "重命名(覆盖 LLM 标题;留空恢复)";
+        b.addEventListener("click", (e) => { e.stopPropagation(); openRenameDialog(s, isTab); });
+        return b;
+      };
+
+      // Tabs group: unified "[tab-name] session-name" line (tab-name highlighted,
+      // auto-refreshed in place). Mirrors the ⇆ switch list / >_ viewer format.
       if (s.group === "tabs") {
         const tnLine = document.createElement("div"); tnLine.className = "tab-name-line";
+        const tag = document.createElement("span"); tag.className = "tn-tag";
+        tag.appendChild(document.createTextNode("["));
         const tn = document.createElement("span"); tn.className = "tn-live";
-        hlInto(tn, s.tab_name || "", hlTerms());
-        tnLine.appendChild(tn);
+        hlInto(tn, stripTab(s.tab_name || ""), hlTerms());
+        tag.appendChild(tn);
+        tag.appendChild(document.createTextNode("]"));
+        tnLine.appendChild(tag);
+        const sessName = s.user_name || s.summary_title || "";
+        if (sessName) {
+          const sess = document.createElement("span"); sess.className = "tn-sess";
+          sess.appendChild(document.createTextNode(" "));
+          const sn = document.createElement("span");
+          hlInto(sn, sessName, hlTerms());
+          sess.appendChild(sn);
+          tnLine.appendChild(sess);
+        }
+        tnLine.appendChild(document.createTextNode(" "));
+        tnLine.appendChild(mkRenameBtn(true));   // tabs: edit tab-name + session-name
+        enterBtn.style.cssFloat = "right";   // Enter floats to the right of this line
+        enterBtn.style.marginLeft = "8px";
+        tnLine.insertBefore(enterBtn, tnLine.firstChild);   // float source before text so it wraps left
+        enterPlaced = true;
         card.appendChild(tnLine);
       }
 
@@ -4339,40 +4429,27 @@ footer button.send {
       card.appendChild(cwd);
 
       // "What it's doing" — name (user override or LLM title, bold) + summary.
+      // Tabs group already carries [tab-name] session-name + ✎ + Enter on the
+      // line above, so here it shows ONLY the summary body (no head).
       const displayTitle = s.user_name || s.summary_title || "";
-      if (s.summary || displayTitle) {
+      const wantHead = s.group !== "tabs" && (s.summary || displayTitle);
+      if (wantHead || (s.group === "tabs" && s.summary)) {
         const sm = document.createElement("div");
         sm.className = "sess-summary";
-        const head = document.createElement("div"); head.className = "sm-head";
-        const ico = document.createElement("span"); ico.className = "sm-ico"; ico.textContent = "📝 ";
-        head.appendChild(ico);
-        if (displayTitle) {
-          const tt = document.createElement("span");
-          tt.className = "sm-title" + (s.user_name ? " user-named" : "");
-          hlInto(tt, displayTitle, hlTerms());
-          head.appendChild(tt);
+        if (wantHead) {
+          const head = document.createElement("div"); head.className = "sm-head";
+          const ico = document.createElement("span"); ico.className = "sm-ico"; ico.textContent = "📝 ";
+          head.appendChild(ico);
+          if (displayTitle) {
+            const tt = document.createElement("span");
+            tt.className = "sm-title" + (s.user_name ? " user-named" : "");
+            hlInto(tt, displayTitle, hlTerms());
+            head.appendChild(tt);
+          }
+          head.appendChild(mkRenameBtn(false));   // non-tab: session-name only
+          head.appendChild(enterBtn); enterPlaced = true;   // Enter/Attach at the right of the summary title
+          sm.appendChild(head);
         }
-        // ✎ rename — overrides the LLM title (empty restores it).
-        const edit = document.createElement("button");
-        edit.className = "sm-edit"; edit.textContent = "✎";
-        edit.title = "重命名(覆盖 LLM 标题;留空恢复)";
-        edit.addEventListener("click", async (e) => {
-          e.stopPropagation();
-          const nv = prompt("会话名称(留空恢复 LLM 标题):", s.user_name || s.summary_title || "");
-          if (nv === null) return;
-          try {
-            const r = await authedFetch("/api/session-name", {
-              method: "POST", headers: { "content-type": "application/json" },
-              body: JSON.stringify({ claude_session_id: s.claude_session_id, name: nv.trim() }),
-            });
-            if (!r.ok) { alert("Rename failed: " + await r.text()); return; }
-            s.user_name = nv.trim();
-            renderPicker();
-          } catch (err) { alert("Rename error: " + err); }
-        });
-        head.appendChild(edit);
-        head.appendChild(enterBtn); enterPlaced = true;   // Enter/Attach at the right of the summary title
-        sm.appendChild(head);
         if (s.summary) {
           const body = document.createElement("div"); body.className = "sm-body";
           hlInto(body, s.summary, hlTerms());
@@ -4685,18 +4762,39 @@ footer button.send {
     if (sid) attachSession(sid, "");
   }
 
-  // Top bar (left-aligned): "<sid4> <tX> <tab-name>"; click toggles the id
-  // between the 4-char short form and the full session id.
+  // Trails the tab chips. Phone: just the current session's 4-char id (space is
+  // tight; the chip already shows the tab-name). Desktop: "sid [tab-name]
+  // session-name" (tab-name highlighted), overflow ellipsised. Click COPIES the
+  // full session id either way.
   function setMeta() {
-    const id = metaExpanded ? attachedSid : attachedShort;
-    metaEl.textContent = [id, attachedTab, attachedName].filter(Boolean).join(" ");
     metaEl.title = attachedSid;        // full id always on hover
+    const mob = window.matchMedia("(orientation: portrait)").matches
+             || window.matchMedia("(max-width: 640px)").matches;
+    if (!attachedSid) { metaEl.textContent = attachedShort || ""; return; }
+    if (mob) { metaEl.textContent = attachedShort; return; }
+    const m = tabMeta.get(attachedSid) || {};
+    const ot = openTabs.find(t => t.sid === attachedSid) || {};
+    const tn = stripTab(m.tabName || ot.tabName || "");
+    const sn = (m.sessName || ot.sessName || "").trim();
+    metaEl.innerHTML = "";
+    metaEl.appendChild(document.createTextNode(attachedShort));
+    if (tn) { const e = document.createElement("span"); e.className = "mt-tab"; e.textContent = " [" + tn + "]"; metaEl.appendChild(e); }
+    if (sn) { const e = document.createElement("span"); e.className = "mt-sess"; e.textContent = " " + sn; metaEl.appendChild(e); }
   }
   metaEl.style.cursor = "pointer";
-  metaEl.addEventListener("click", () => {
+  metaEl.addEventListener("click", async () => {
     if (!attachedSid) return;
-    metaExpanded = !metaExpanded;
-    setMeta();
+    try {
+      await navigator.clipboard.writeText(attachedSid);
+    } catch {
+      const ta = document.createElement("textarea");   // http / no-clipboard-API fallback
+      ta.value = attachedSid; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); } catch {}
+      ta.remove();
+    }
+    metaEl.textContent = "copied ✓";
+    setTimeout(() => setMeta(), 900);   // restore the rich label
   });
   // Pull the authoritative tab name from /api/tabs (same source as the switcher
   // popup) so the top bar matches it regardless of how we entered.
@@ -4709,11 +4807,12 @@ footer button.send {
       if (!r.ok) return;
       const tabs = (await r.json()).tabs || [];
       const byId = {}; tabs.forEach(t => { byId[t.sid] = t; });
-      for (const ot of openTabs) {                    // update index/name for the tab bar
-        const t = byId[ot.sid];
-        if (t) { ot.wi = t.window_index; ot.ti = t.tab_index; ot.name = t.name || t.tab_name || ot.name; }
-      }
-      saveOpenTabs(); renderTabBar();
+      updateTabMeta(tabs);                            // funnel into the central store (+bar)
+      // Drop tabs whose terminal tab no longer exists (not in the live list).
+      // Guard: only prune when we actually got a live list (non-empty) so a
+      // transient bridge hiccup (empty result) doesn't nuke the whole bar; keep
+      // the currently-viewed session regardless.
+      if (tabs.length) { openTabs = openTabs.filter(ot => byId[ot.sid] || ot.sid === attachedSid); saveOpenTabs(); renderTabBar(); }
       if (sid !== attachedSid) return;                // top-bar part: only for current
       const t = byId[sid];
       if (!t) return;
@@ -4725,71 +4824,280 @@ footer button.send {
     } catch {}
   }
 
+  // One dialog to rename a session: tab-name (live terminal tab, isTab only) +
+  // session-name. Each field only hits its endpoint if actually changed.
+  function openRenameDialog(s, isTab) {
+    const overlay = document.createElement("div");
+    overlay.className = "modal show";
+    const card = document.createElement("div");
+    card.className = "modal-card"; card.style.maxWidth = "440px";
+    const h = document.createElement("h2"); h.textContent = "重命名"; card.appendChild(h);
+
+    let tabInput = null;
+    const curTab = stripTab(s.tab_name || "");
+    if (isTab && s.iterm_session_id) {
+      const l = document.createElement("div"); l.className = "rn-label";
+      l.textContent = "标签名 tab-name(终端标签栏;留空恢复自动)";
+      tabInput = document.createElement("input"); tabInput.className = "rn-input";
+      tabInput.value = curTab;
+      card.appendChild(l); card.appendChild(tabInput);
+    }
+    const curSess = s.user_name || s.summary_title || "";
+    const l2 = document.createElement("div"); l2.className = "rn-label";
+    l2.textContent = "会话名 session-name(留空恢复 LLM 标题)";
+    const sessInput = document.createElement("input"); sessInput.className = "rn-input";
+    sessInput.value = curSess;
+    card.appendChild(l2); card.appendChild(sessInput);
+
+    const actions = document.createElement("div"); actions.className = "modal-actions";
+    const cancel = document.createElement("button"); cancel.textContent = "取消";
+    const save = document.createElement("button"); save.className = "primary"; save.textContent = "保存";
+    actions.appendChild(cancel); actions.appendChild(save); card.appendChild(actions);
+    overlay.appendChild(card); document.body.appendChild(overlay);
+    setTimeout(() => (tabInput || sessInput).focus(), 30);
+
+    const close = () => overlay.remove();
+    cancel.addEventListener("click", close);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      try {
+        if (tabInput) {
+          const nt = tabInput.value.trim();
+          if (nt !== curTab) {
+            const r = await authedFetch("/api/tab-name", {
+              method: "POST", headers: { "content-type": "application/json" },
+              body: JSON.stringify({ iterm_session_id: s.iterm_session_id, name: nt }),
+            });
+            if (!r.ok) { alert("Tab rename failed: " + await r.text()); save.disabled = false; return; }
+            s.tab_name = nt;
+            updateTabMeta([{ claude_session_id: s.claude_session_id, tab_name: nt }]);
+          }
+        }
+        const ns = sessInput.value.trim();
+        if (ns !== curSess) {
+          const r = await authedFetch("/api/session-name", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ claude_session_id: s.claude_session_id, name: ns }),
+          });
+          if (!r.ok) { alert("Rename failed: " + await r.text()); save.disabled = false; return; }
+          s.user_name = ns;
+          updateTabMeta([{ claude_session_id: s.claude_session_id, session_name: ns }]);
+        }
+        close(); renderPicker();
+      } catch (err) { alert("Rename error: " + err); save.disabled = false; }
+    });
+    card.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); save.click(); }
+      else if (e.key === "Escape") { close(); }
+    });
+  }
+
   const tabBarEl = document.getElementById("tab-bar");
+  // Phone keeps a tighter cache (4) than desktop (MAX_TABS) — the bar shows all
+  // kept tabs there, so cache size == what's visible; no hidden-but-cached tabs.
+  function maxTabs() {
+    return (window.matchMedia("(orientation: portrait)").matches
+         || window.matchMedia("(max-width: 640px)").matches) ? 4 : MAX_TABS;
+  }
   function loadOpenTabs() {
     try { openTabs = JSON.parse(localStorage.getItem(OPEN_TABS_KEY)) || []; }
     catch { openTabs = []; }
     if (!Array.isArray(openTabs)) openTabs = [];
-    openTabs = openTabs.filter(t => t && t.sid).slice(0, MAX_TABS);
+    openTabs = openTabs.filter(t => t && t.sid).slice(0, maxTabs());
   }
   function saveOpenTabs() {
     try {
       localStorage.setItem(OPEN_TABS_KEY,
-        JSON.stringify(openTabs.map(t => ({ sid: t.sid, name: t.name || "", wi: t.wi, ti: t.ti }))));
+        JSON.stringify(openTabs.map(t => ({ sid: t.sid, name: t.name || "", tabName: t.tabName || "", sessName: t.sessName || "", wi: t.wi, ti: t.ti }))));
     } catch {}
+  }
+
+  // ── Central display-meta store ──────────────────────────────────────────
+  // One authoritative copy of every session's tab-name / session-name / tab
+  // index, keyed by claude sid. EVERY place that fetches a list carrying these
+  // (the /api/tabs switcher, the picker's /api/sessions, the iTerm-tabs viewer)
+  // funnels through updateTabMeta(), and renames update it too — so a name
+  // change anywhere propagates to the tab bar + toast on the next fetch/tick,
+  // not only when you happen to switch. openTabs entries are kept in sync (and
+  // persisted) so the bar renders correctly even before the first fetch.
+  const tabMeta = new Map();   // sid -> { tabName, sessName, wi, ti }
+  function updateTabMeta(items) {
+    let touched = false;
+    for (const it of (items || [])) {
+      const sid = it.sid || it.claude_session_id;
+      if (!sid) continue;
+      const tabName = it.tab_name;   // callers normalize (e.g. iTerm-tabs `name` → tab_name)
+      let sessName = it.session_name;
+      if (sessName == null && (it.user_name != null || it.summary_title != null)) {
+        sessName = it.user_name || it.summary_title || "";
+      }
+      const prev = tabMeta.get(sid) || {};
+      const next = {
+        tabName:  (tabName  != null) ? tabName  : (prev.tabName  || ""),
+        sessName: (sessName != null) ? sessName : (prev.sessName || ""),
+        wi: (it.window_index != null) ? it.window_index : prev.wi,
+        ti: (it.tab_index    != null) ? it.tab_index    : prev.ti,
+      };
+      tabMeta.set(sid, next);
+      const ot = openTabs.find(t => t.sid === sid);   // mirror into the open-tab entry
+      if (ot) {
+        if (ot.tabName !== next.tabName)  { ot.tabName = next.tabName; touched = true; }
+        if (ot.sessName !== next.sessName){ ot.sessName = next.sessName; touched = true; }
+        if (ot.wi !== next.wi)            { ot.wi = next.wi; touched = true; }
+        if (ot.ti !== next.ti)            { ot.ti = next.ti; touched = true; }
+        ot.name = next.sessName || next.tabName || ot.name;
+      }
+    }
+    if (touched) { saveOpenTabs(); renderTabBar(); }
+    if (tabMeta.has(attachedSid)) setMeta();   // keep the desktop meta label current
+    return touched;
+  }
+  function seedFromMeta(sid) {   // prefill a freshly-opened tab from the store
+    const m = tabMeta.get(sid); if (!m) return;
+    const ot = openTabs.find(t => t.sid === sid); if (!ot) return;
+    ot.tabName = m.tabName || ot.tabName || "";
+    ot.sessName = m.sessName || ot.sessName || "";
+    if (m.wi != null) ot.wi = m.wi;
+    if (m.ti != null) ot.ti = m.ti;
   }
   // Tab chip name budget: 8 "units" — a CJK char costs 2, everything else 1,
   // so ~8 latin letters or ~4 Chinese chars. Appends … when clamped.
-  function clampTabName(s) {
+  function clampU(s, budget, ell) {
+    ell = ell == null ? "…" : ell;
     s = (s || "").trim();
-    let out = "", budget = 8;
+    let out = "";
     for (const ch of s) {
       const cost = /[㐀-鿿豈-﫿＀-￯]/.test(ch) ? 2 : 1;
-      if (budget < cost) { out += "…"; break; }
+      if (budget < cost) { out += ell; break; }
       budget -= cost; out += ch;
     }
     return out;
   }
+  function clampTabName(s) { return clampU(s, 8); }
+  // Strip claude-code's leading spinner/status glyph (any braille frame
+  // ⠀-⣿, plus the ✳-family) and the trailing "(claude)"/"(caffeinate)"
+  // launch tag — leaves the human-readable tab title.
+  function stripTab(s) {
+    return (s || "")
+      .replace(/^[\s⠀-⣿✳✻✽✢✣✱●○◍•·]+/, "")
+      .replace(/\s*\((?:claude|caffeinate)\)\s*$/i, "")
+      .trim();
+  }
+  // Tab-name for display: cleaned, then kept to ~16 units (it's easily covered
+  // anyway; the session-name carries the meaning).
+  function tabLabel(s, budget, ell) {
+    return clampU(stripTab(s), budget || 16, ell);
+  }
+  // Keyed, incremental render — assume the bar is UNCHANGED and only touch what
+  // actually differs (add / remove / reorder / relabel / toggle active). No
+  // innerHTML teardown, so a plain switch just moves the .active highlight and
+  // nothing reflows/flickers. Each chip is keyed by data-sid.
   function renderTabBar() {
-    tabBarEl.innerHTML = "";
+    // portrait (h>w) or narrow → phone: compact labels, matching the CSS breakpoint
+    const mob = window.matchMedia("(orientation: portrait)").matches
+             || window.matchMedia("(max-width: 640px)").matches;
+    // Phone caps the cache at 4 (see maxTabs / addOpenTab), so the bar shows
+    // exactly the kept tabs — the slice here is just a safety net for a stale
+    // desktop-loaded list before the next add trims it.
+    const src = mob ? openTabs.slice(0, 4) : openTabs.slice();
     // Stable display order = iTerm tab order (window_index, tab_index) so tabs
     // DON'T jump around when you switch; unknown-index tabs go last.
-    const disp = openTabs.slice().sort((a, b) => {
+    const disp = src.sort((a, b) => {
       const ak = a.wi != null, bk = b.wi != null;
       if (ak && bk) return (a.wi - b.wi) || (a.ti - b.ti);
       return ak ? -1 : (bk ? 1 : 0);
     });
     const single = new Set(openTabs.filter(t => t.wi != null).map(t => t.wi)).size <= 1;
-    // portrait (h>w) or narrow → phone: compact labels, matching the CSS breakpoint
-    const mob = window.matchMedia("(orientation: portrait)").matches
-             || window.matchMedia("(max-width: 640px)").matches;
-    for (const t of disp) {
-      const el = document.createElement("div");
-      el.className = "qtab" + (t.sid === attachedSid ? " active" : "");
-      el.title = t.sid;
+    // phone: name width scales with tab count (no ellipsis) — 3-4 → 10, ≤2 → 15.
+    const mbud = disp.length >= 3 ? 10 : 15;
+    const desired = disp.map(t => {
       const tx = (t.ti != null)
         ? (single ? `t${t.ti + 1}` : `w${(t.wi || 0) + 1}t${t.ti + 1}`) : "";
-      const full = (t.name && t.name.trim()) ? t.name : t.sid.slice(0, 4);
-      const nm = document.createElement("span");
-      nm.className = "qtab-name";
-      // phone: the ACTIVE tab shows just "tX" (its name already shows in the
-      // title line, so repeating it wastes space); other tabs = "tX <name>"
-      // with the name clamped to ~8 latin / 4 CJK chars. desktop = "tX <full>".
-      nm.textContent = mob
-        ? (t.sid === attachedSid ? (tx || "cur") : ((tx ? tx + " " : "") + clampTabName(full)))
-        : ((tx ? tx + " " : "") + full);
-      el.appendChild(nm);
-      // whole chip switches; no per-tab ✕ (too easy to misclick) — closing is
-      // done by the single shared close button, which only closes the current.
-      el.addEventListener("click", () => { if (t.sid !== attachedSid) enterTranscript(t.sid, t.name || ""); });
-      tabBarEl.appendChild(el);
+      // Quick-switch bar shows the TAB-NAME only (matches iTerm/tmux).
+      const full = (t.tabName && t.tabName.trim()) ? t.tabName
+        : (t.name && t.name.trim()) ? t.name : t.sid.slice(0, 4);
+      const label = (tx ? tx + " " : "") + (mob ? tabLabel(full, mbud, "") : tabLabel(full));
+      return { sid: t.sid, label, active: t.sid === attachedSid };
+    });
+
+    // Index the chips currently in the DOM by their sid.
+    const have = new Map();
+    for (const el of Array.from(tabBarEl.children)) have.set(el.dataset.sid, el);
+    // Drop chips whose tab is no longer desired.
+    for (const [sid, el] of have) {
+      if (!desired.some(d => d.sid === sid)) { el.remove(); have.delete(sid); }
+    }
+    // Add / update / reorder in one left-to-right pass.
+    let prev = null;
+    for (const d of desired) {
+      let el = have.get(d.sid);
+      if (!el) {
+        el = document.createElement("div");
+        el.className = "qtab"; el.dataset.sid = d.sid; el.title = d.sid;
+        const nm = document.createElement("span"); nm.className = "qtab-name";
+        el.appendChild(nm);
+        // whole chip switches; no per-tab ✕ (too easy to misclick).
+        el.addEventListener("click", () => {
+          const sid = el.dataset.sid;
+          if (sid === attachedSid) return;
+          const cur = openTabs.find(x => x.sid === sid);
+          enterTranscript(sid, (cur && cur.name) || "");
+        });
+        have.set(d.sid, el);
+      }
+      const nm = el.firstChild;
+      if (nm.textContent !== d.label) nm.textContent = d.label;   // relabel only if changed
+      if (el.classList.contains("active") !== d.active) el.classList.toggle("active", d.active);
+      // ensure correct position (just after prev) — only moves if out of place
+      const anchor = prev ? prev.nextSibling : tabBarEl.firstChild;
+      if (anchor !== el) tabBarEl.insertBefore(el, anchor);
+      prev = el;
     }
   }
+
+  // On switch, drop a transient "[tab-name] session-name" toast just below the
+  // header/tab-bar; it lingers ~1.8s then fades. Gives the full (untruncated)
+  // context the compact chips + sid-only meta don't show.
+  let _tabToastEl = null, _tabToastTimer = null;
+  function showTabToast(tabName, sessName) {
+    const tn = stripTab(tabName || "");
+    const sn = (sessName || "").trim();
+    if (!tn && !sn) return;
+    if (!_tabToastEl) {
+      _tabToastEl = document.createElement("div");
+      _tabToastEl.className = "tab-toast";
+      document.body.appendChild(_tabToastEl);
+    }
+    _tabToastEl.innerHTML = "";
+    if (tn) { const a = document.createElement("span"); a.className = "tt-tab"; a.textContent = tn; _tabToastEl.appendChild(a); }
+    if (sn) { const b = document.createElement("span"); b.className = "tt-sess"; b.textContent = (tn ? "  " : "") + sn; _tabToastEl.appendChild(b); }
+    const header = document.querySelector("header");
+    const hb = header ? header.getBoundingClientRect().bottom : 44;
+    _tabToastEl.style.top = (hb + 4) + "px";
+    // force reflow so re-showing during an active toast still animates
+    void _tabToastEl.offsetWidth;
+    _tabToastEl.classList.add("show");
+    if (_tabToastTimer) clearTimeout(_tabToastTimer);
+    _tabToastTimer = setTimeout(() => { if (_tabToastEl) _tabToastEl.classList.remove("show"); }, 1800);
+  }
+
   function addOpenTab(sid, name) {
     if (!sid) return;
+    // Move-to-front for MRU, but PRESERVE the existing entry's wi/ti/tabName —
+    // rebuilding it as a bare {sid,name} would drop its tab-order, so on a plain
+    // switch the chip would jump to the end (unknown-index last) and then snap
+    // back once refreshMetaName refills wi/ti. Keep the object; only set name.
+    const existing = openTabs.find(t => t.sid === sid);
     openTabs = openTabs.filter(t => t.sid !== sid);
-    openTabs.unshift({ sid, name: name || "" });
-    while (openTabs.length > MAX_TABS) {          // LRU close: drop oldest + its cache
+    if (existing) {
+      if (name) existing.name = name;
+      openTabs.unshift(existing);
+    } else {
+      openTabs.unshift({ sid, name: name || "" });
+      seedFromMeta(sid);                          // prefill names/index from the central store
+    }
+    while (openTabs.length > maxTabs()) {         // LRU close: drop oldest + its cache
       const ev = openTabs.pop();
       if (ev && ev.sid) delete tabState[ev.sid];
     }
@@ -4857,6 +5165,8 @@ footer button.send {
       showTranscript();
     }
     addOpenTab(sid, attachedName || attachedShort);
+    const ot = openTabs.find(x => x.sid === sid);      // toast the full names (from cache; refreshMetaName keeps them fresh)
+    showTabToast(ot && ot.tabName, (ot && ot.sessName) || label);
     activityDeadline = Date.now() + _activityWindow();
     pollOnce();                                        // cached → append delta; fresh → replace
   }

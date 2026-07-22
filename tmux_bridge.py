@@ -98,7 +98,7 @@ def _pid_cwd(pid: int) -> str:
 def _panes() -> list[dict]:
     """Every tmux pane across all sessions/windows. [] if no tmux server."""
     fmt = ("#{pane_id}\t#{pane_tty}\t#{window_index}\t"
-           "#{window_name}\t#{session_name}\t#{pane_active}")
+           "#{window_name}\t#{session_name}\t#{pane_active}\t#{pane_title}")
     r = _run(["list-panes", "-a", "-F", fmt])
     if r is None or r.returncode != 0:
         return []
@@ -107,11 +107,16 @@ def _panes() -> list[dict]:
         f = line.split("\t")
         if len(f) < 6:
             continue
+        # tab display name: prefer pane_title (claude sets it via the OSC title
+        # escape, e.g. "✳ Locate SAS…") over window_name (just the launch label
+        # like "resume_xxxx"/"claude"). Mirrors iTerm's session.name behaviour.
+        window_name = f[3]
+        pane_title = f[6] if len(f) > 6 else ""
         panes.append({
             "pane_id": f[0],
             "tty": f[1],
             "window_index": f[2],
-            "window_name": f[3],
+            "window_name": pane_title.strip() or window_name,
             "session_name": f[4],
             "active": f[5] == "1",
         })
@@ -223,6 +228,14 @@ class TmuxBridge:
         if pre[:1] in ("❯", ">"):        # drop the prompt glyph if present
             pre = pre[1:]
         return pre.strip()
+
+    async def set_tab_name(self, iterm_session_id: str, name: str) -> bool:
+        """Set the pane title (the tmux analog of the tab-name we read back in
+        _panes). Best-effort: claude re-emits its OSC title periodically, so this
+        may be overwritten — unlike iTerm's sticky tab-title override."""
+        r = await asyncio.to_thread(
+            _run, ["select-pane", "-t", iterm_session_id, "-T", name])
+        return r is not None and r.returncode == 0
 
     async def send_text_to(self, iterm_session_id: str, text: str) -> bool:
         """Inject keystrokes into a pane. A trailing CR is treated as a submit:

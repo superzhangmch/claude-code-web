@@ -1374,8 +1374,12 @@ def _detect_fallbacks(lines: list[str]) -> Optional[dict]:
     or "A 还是 B" alike — because you just type the answer in the normal input
     box; the banner there is only noise. (_detect_trailing_question is kept for
     reference but no longer in the chain.)"""
-    return (_detect_selector(lines)
-            or _detect_prose_choices(lines))
+    # NOTE: _detect_prose_choices (circled ①②③) removed from the chain — it
+    # false-fired on normal assistant prose that merely USES ①②③ as list markers
+    # (showing a "waiting for your choice" banner with no real menu). Circled
+    # numbers aren't a drivable terminal menu anyway (you just type a reply), so
+    # a real interactive ask is covered by the ❯-cursor menu / ↑↓ selector only.
+    return _detect_selector(lines)
 
 
 def _last_content_line(lines: list[str]) -> str:
@@ -2349,7 +2353,12 @@ def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
             op = e.get("operation")
             content = e.get("content")
             if op in ("enqueue", "popAll") and isinstance(content, str) and content.strip():
-                qe = {
+                # A queued prompt carries NO source metadata (only content), so we
+                # can't tell scheduler-enqueued from human-queued — and it doesn't
+                # matter: at this point the content isn't important, just that
+                # something is queued. Render ALL queued items uniformly as a
+                # compact System entry (never "You"), head+tail truncated.
+                out.append({
                     "uuid": e.get("uuid"),
                     "type": "user",
                     "_idx": e.get("_idx"),
@@ -2357,16 +2366,9 @@ def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
                     "timestamp": e.get("timestamp"),
                     "sid": e.get("sessionId"),
                     "_queued": True,
-                    "message": {"content": content},
-                }
-                # Command noise, or a scheduler/watcher tick still queued (no
-                # metadata yet → recognised by loop-wrapper phrasing): render as
-                # System, not "You", and collapse to head+tail in brief mode.
-                if _is_command_noise(content) or _looks_like_auto_prompt(content):
-                    qe["_system"] = True
-                    if mode == "brief":
-                        qe["message"]["content"] = _collapse_sys_brief(content)
-                out.append(qe)
+                    "_system": True,
+                    "message": {"content": _head_tail_trunc(content, 160)},
+                })
             continue
         if t not in ("user", "assistant"):
             continue
@@ -3415,8 +3417,9 @@ async def get_tabs():
                 "sid": sid,
                 "window_index": t.window_index,
                 "tab_index": t.tab_index,
-                "tab_name": t.name or "",                       # raw iTerm name (picker)
-                "name": _user_name_of(sid) or title or (t.name or ""),  # display (switcher)
+                "tab_name": t.name or "",                       # raw terminal tab name
+                "session_name": _user_name_of(sid) or title or "",  # user override / LLM title (no tab fallback)
+                "name": _user_name_of(sid) or title or (t.name or ""),  # legacy combined
             })
     except Exception:
         pass
@@ -4206,6 +4209,25 @@ async def post_session_name(payload: SessionNamePayload):
     return {"ok": True, "name": payload.name.strip()}
 
 
+class TabNamePayload(BaseModel):
+    iterm_session_id: str
+    name: str = ""
+
+
+@app.post("/api/tab-name", dependencies=[Depends(require_token)])
+async def post_tab_name(payload: TabNamePayload):
+    """Rename the terminal TAB itself (iTerm tab-strip title / tmux pane title)
+    for a live tab. This changes the real terminal, so it's reflected everywhere
+    the tab-name is read back (iTerm: sticky override; tmux: best-effort)."""
+    if not payload.iterm_session_id:
+        return {"ok": False, "detail": "no terminal session id"}
+    try:
+        ok = await bridge.set_tab_name(payload.iterm_session_id, payload.name.strip())
+    except Exception as e:
+        return {"ok": False, "detail": str(e)}
+    return {"ok": bool(ok), "name": payload.name.strip()}
+
+
 @app.post("/api/close-tab", dependencies=[Depends(require_token)])
 async def post_close_tab(payload: CloseTabPayload):
     """Close the iTerm2 tab for a session, the safe way:
@@ -4850,8 +4872,24 @@ async def get_iterm_tabs():
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
     bound_by_iterm = {b.iterm_session_id: b.claude_session_id
                       for b in bindings.all() if verify_binding(b)}
+    # Map each live claude tab's terminal id → its session id (ground truth), so
+    # we can annotate the session-name (user override / LLM title) per tab.
+    sid_by_iterm: dict[str, str] = {}
+    try:
+        for r in await bridge.list_claude_tabs():
+            meta = _claude_session_meta(r.pid)
+            sid = (meta or {}).get("sessionId") or (r.claude_session_id or "")
+            if sid:
+                sid_by_iterm[r.iterm_session_id] = sid
+    except Exception:
+        pass
     for t in tabs:
-        t["bound_to"] = bound_by_iterm.get(t.get("iterm_session_id"))
+        it = t.get("iterm_session_id")
+        t["bound_to"] = bound_by_iterm.get(it)
+        sid = bound_by_iterm.get(it) or sid_by_iterm.get(it)
+        if sid:
+            title, _ = _summary_of(sid)
+            t["session_name"] = _user_name_of(sid) or title or ""
     return {"tabs": tabs}
 
 

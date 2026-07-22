@@ -136,7 +136,13 @@ class ItermBridge:
         hits = [(wi, ti, s, tty, procs[_norm_tty(tty)])
                 for (wi, ti, s), tty in zip(flat, ttys)
                 if tty and _norm_tty(tty) in procs]
-        names = await asyncio.gather(*[_gv(s, "session.name") for _, _, s, _, _ in hits])
+        # tab.title = what iTerm shows on the TAB STRIP (a manual "Edit Tab
+        # Title" override like "SAS-eval", else it falls back to session.name /
+        # claude's OSC title). That's the label the user recognizes, so use it as
+        # the tab-name; coalesce to session.name if a tab ever lacks it.
+        titles = await asyncio.gather(*[_gv(s, "tab.title") for _, _, s, _, _ in hits])
+        snames = await asyncio.gather(*[_gv(s, "session.name") for _, _, s, _, _ in hits])
+        names = [t or n or "" for t, n in zip(titles, snames)]
         # lsof (cwd) off the loop AND concurrently, not one-at-a-time.
         cwds = await asyncio.gather(*[asyncio.to_thread(_pid_cwd, h[4][0]) for h in hits])
         refs: list[ClaudeSessionRef] = []
@@ -187,7 +193,11 @@ class ItermBridge:
                 for session in tab.sessions]
 
         async def _vars(session):
-            return (await _gv(session, "tty"), (await _gv(session, "session.name")) or "")
+            # tab.title = tab-strip label (see list_claude_tabs); fall back to
+            # session.name when a tab has no override.
+            return (await _gv(session, "tty"),
+                    (await _gv(session, "tab.title"))
+                    or (await _gv(session, "session.name")) or "")
 
         infos = await asyncio.gather(*[_vars(s) for _, _, s in flat])
         claude_ttys = await asyncio.to_thread(_claude_ttys)
@@ -223,6 +233,24 @@ class ItermBridge:
             return pre.strip()
         except Exception:
             return ""
+
+    async def set_tab_name(self, iterm_session_id: str, name: str) -> bool:
+        """Set the TAB-STRIP title (a manual override, like iTerm's "Edit Tab
+        Title") for the tab that owns this session. This is exactly the value
+        list_claude_tabs reads back as the tab-name (tab.title), and it sticks
+        over claude's OSC session.name. Empty name clears the override."""
+        await self.ensure_connected()
+        if not self.app:
+            return False
+        for window in self.app.windows:
+            for tab in window.tabs:
+                if any(s.session_id == iterm_session_id for s in tab.sessions):
+                    try:
+                        await asyncio.wait_for(tab.async_set_title(name), _RPC_TIMEOUT)
+                        return True
+                    except Exception:
+                        return False
+        return False
 
     async def send_text_to(self, iterm_session_id: str, text: str) -> bool:
         """Send text to a specific iTerm2 session.
