@@ -6423,14 +6423,42 @@ footer button.send {
   });
   document.getElementById("jump-prev-user").addEventListener("click", (e) => { e.stopPropagation(); jumpUserRequest(-1); });
   document.getElementById("jump-next-user").addEventListener("click", (e) => { e.stopPropagation(); jumpUserRequest(1); });
-  document.getElementById("jump-bottom").addEventListener("click", async (e) => {
-    e.stopPropagation();   // in the tail-controls pill → don't toggle auto-refresh
+  async function jumpBottom() {
     shouldAutoscroll = true;
     // When idle, auto-refresh is slow/paused so the tail may be stale — pull the
     // latest first, THEN scroll. When busy the tail is already fresh; just jump.
     if (claudeIdle) { try { await forceCheckNow(); } catch {} }
     mainEl.scrollTop = mainEl.scrollHeight;
+  }
+  document.getElementById("jump-bottom").addEventListener("click", (e) => {
+    e.stopPropagation();   // in the tail-controls pill → don't toggle auto-refresh
+    jumpBottom();
   });
+
+  // Pull gestures on the transcript scroller (touch): already at the BOTTOM and
+  // drag UP → jump to latest (same as ⤓); already at the TOP and drag DOWN →
+  // load earlier rounds (same as the button). One trigger per gesture.
+  // Only the BOTTOM pull-up → jump-to-latest. (A top pull-down → load-earlier
+  // was tried but dropped: iOS elastic overscroll exposes a blank gap that only
+  // fills after the async fetch — not smooth — and the "Load earlier rounds"
+  // button is already right there at the top anyway.)
+  (function () {
+    const TH = 64;   // px of pull past the bottom edge before it fires
+    let y0 = null, atBot0 = false, pull = 0;
+    const atBot = () => mainEl.scrollHeight - (mainEl.scrollTop + mainEl.clientHeight) <= 2;
+    mainEl.addEventListener("touchstart", (e) => {
+      if (e.touches.length !== 1 || !tvEl.classList.contains("show")) { y0 = null; return; }
+      y0 = e.touches[0].clientY; atBot0 = atBot(); pull = 0;
+    }, { passive: true });
+    mainEl.addEventListener("touchmove", (e) => {
+      if (y0 !== null) pull = y0 - e.touches[0].clientY;    // >0 = finger up
+    }, { passive: true });
+    mainEl.addEventListener("touchend", () => {
+      if (y0 === null) return;
+      const dy = pull; y0 = null;
+      if (atBot0 && atBot() && dy > TH) jumpBottom();       // already at bottom, pulled up → latest
+    }, { passive: true });
+  })();
 
   // ---------- new session dialog ----------
   const newDlg = document.getElementById("newdlg");
