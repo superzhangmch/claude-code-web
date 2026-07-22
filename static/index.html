@@ -1856,6 +1856,7 @@ footer button.send {
       <input id="upload-input" type="file" accept="image/*" multiple style="display:none">
       <button id="upload-btn" class="icon" title="Attach image">📎</button>
       <textarea id="input" placeholder="Reply to Claude…" rows="1"></textarea>
+      <button id="polish-btn" class="icon" title="整理文本(LLM 疏通口述/听写)">✨</button>
       <button id="send" class="send" title="Send" aria-label="Send">➤</button>
     </div>
   </footer>
@@ -6263,6 +6264,37 @@ footer button.send {
   inputEl.addEventListener("input", () => {
     inputEl.style.height = "auto";
     inputEl.style.height = Math.max(44, Math.min(inputEl.scrollHeight, window.innerHeight * 0.4)) + "px";
+  });
+
+  // ✨ polish: send the input text to the LLM to tidy dictated/voice-typed text,
+  // replace the box with the cleaned version (review before you send).
+  const polishBtn = document.getElementById("polish-btn");
+  polishBtn.addEventListener("click", async () => {
+    const t = inputEl.value.trim();
+    if (!t) return;
+    polishBtn.disabled = true; polishBtn.textContent = "⏳";
+    try {
+      const r = await authedFetch("/api/polish", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: t, claude_session_id: attachedSid || "" }), timeoutMs: 60000,
+      });
+      if (r.ok) {
+        const d = await r.json();
+        if (d && d.text) {
+          inputEl.value = d.text;
+          inputEl.dispatchEvent(new Event("input"));   // re-grow the textarea
+        }
+      } else if (r.status === 503) {
+        alert("LLM 未配置(cc_web.conf 缺 api_base/model)");
+      } else {
+        alert("整理失败: " + await r.text());
+      }
+    } catch (e) {
+      alert(e && e.name === "AbortError" ? "整理超时,请重试" : "整理失败: " + e);
+    } finally {
+      polishBtn.disabled = false; polishBtn.textContent = "✨";
+      inputEl.focus();
+    }
   });
 
   // ---------- image upload ----------
