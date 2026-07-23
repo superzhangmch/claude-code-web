@@ -1765,6 +1765,25 @@ def _suggested_cwds() -> list[str]:
     return _load_conf()["cwds"]
 
 
+def _cwd_allowed(cwd: str) -> bool:
+    """A new-session cwd is allowed if it IS one of the suggested dirs, or a
+    subdirectory UNDER one of them (so the user can type a sub-path). It need
+    NOT exist yet — the caller mkdir -p's it. Containment is checked on the
+    resolved path, so `..` escapes are rejected."""
+    try:
+        p = Path(cwd).expanduser().resolve()
+    except Exception:
+        return False
+    for base in _suggested_cwds():
+        try:
+            b = Path(base).expanduser().resolve()
+        except Exception:
+            continue
+        if p == b or b in p.parents:
+            return True
+    return False
+
+
 async def _ensure_iterm2_running() -> None:
     if _platform.system() != "Darwin":
         return   # no iTerm on Linux; tmux windows are opened by the tmux bridge
@@ -5363,8 +5382,12 @@ async def post_new_session(payload: NewSessionPayload):
     cwd = payload.cwd.strip()
     if not cwd:
         raise HTTPException(status_code=400, detail="cwd required")
-    if cwd not in _suggested_cwds():
-        raise HTTPException(status_code=400, detail="cwd not in suggested list")
+    if not _cwd_allowed(cwd):
+        raise HTTPException(status_code=400, detail="cwd not under any suggested dir")
+    try:                                   # create the (sub)dir if the user typed a new one
+        Path(cwd).expanduser().mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"cannot create dir: {e}")
     await _ensure_iterm2_running()
     try:
         await bridge.ensure_connected()

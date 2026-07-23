@@ -327,12 +327,18 @@ body.light .hl { color: #c81e1e; }
   border-radius: 0 4px 4px 0; padding: 5px 8px; line-height: 1.4;
   word-break: break-word;
 }
-#newdlg-name {
+#newdlg-name, #newdlg-subdir {
   width: 100%; box-sizing: border-box; margin-top: 10px;
   background: var(--bg); color: var(--text);
-  border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 13px;
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 16px;
 }
-#newdlg-name:focus { outline: none; border-color: var(--accent); }
+#newdlg-name:focus, #newdlg-subdir:focus { outline: none; border-color: var(--accent); }
+#newdlg-subdir:disabled { opacity: .5; }
+#newdlg-resolved {
+  margin-top: 6px; font: 11px ui-monospace, Menlo, monospace;
+  color: var(--muted); word-break: break-all; min-height: 1em;
+}
+#newdlg-resolved .rp-sub { color: var(--accent); }
 #picker-warn {
   margin: 8px 2px; padding: 8px 10px; border-radius: 6px;
   background: #2a1a14; border: 1px solid #ff8b6a; color: #ffb499;
@@ -1157,6 +1163,11 @@ footer button.send {
   cursor: pointer; text-align: left; word-break: break-all;
 }
 #newdlg-cwds button:hover, #newdlg-cwds button.selected { border-color: var(--accent); background: var(--panel2); }
+#newdlg-cwds button.selected { box-shadow: inset 0 0 0 2px var(--accent); font-weight: 700; }
+/* pure (b/w) mode: accent has no color, so make the picked dir unmistakable. */
+body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-color: #000; box-shadow: none; }
+.newdlg-label { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.newdlg-label + input { margin-top: 4px !important; }
 .candidate {
   background: var(--bg); border: 1px solid var(--border);
   border-radius: 6px; padding: 10px 0; cursor: pointer;
@@ -1928,7 +1939,12 @@ footer button.send {
       <h2>New Claude session</h2>
       <p id="newsess-hint">Pick a working directory. Opens a new iTerm2 tab on the server.</p>
       <div id="newdlg-cwds"></div>
-      <input id="newdlg-name" type="text" placeholder="session name (optional) — runs /rename" autocomplete="off">
+      <label class="newdlg-label" for="newdlg-subdir">Sub-directory (optional)</label>
+      <input id="newdlg-subdir" type="text" list="newdlg-subdir-list" placeholder="e.g. myproject  or  a/b/c" autocomplete="off">
+      <datalist id="newdlg-subdir-list"></datalist>
+      <div id="newdlg-resolved"></div>
+      <label class="newdlg-label" for="newdlg-name">Session name (optional) — runs /rename after start</label>
+      <input id="newdlg-name" type="text" placeholder="session name" autocomplete="off">
       <div class="modal-actions">
         <button id="newdlg-cancel">Cancel</button>
         <button id="newdlg-ok" class="primary" disabled>Confirm</button>
@@ -6790,16 +6806,46 @@ footer button.send {
     refreshPicker();
   });
 
+  const newDlgSub = document.getElementById("newdlg-subdir");
+  const newDlgSubList = document.getElementById("newdlg-subdir-list");
+  const newDlgResolved = document.getElementById("newdlg-resolved");
+  // The actual working dir = the picked base + an optional typed sub-path.
+  function joinCwd(base, sub) {
+    sub = (sub || "").trim().replace(/^\/+/, "").replace(/\/+$/, "");
+    if (!base) return "";
+    return sub ? base.replace(/\/+$/, "") + "/" + sub : base;
+  }
+  function updateResolved() {
+    if (!selectedCwd) { newDlgResolved.textContent = ""; return; }
+    const sub = (newDlgSub.value || "").trim().replace(/^\/+/, "").replace(/\/+$/, "");
+    newDlgResolved.innerHTML = "";
+    newDlgResolved.appendChild(document.createTextNode("→ " + selectedCwd.replace(/\/+$/, "") + "/"));
+    if (sub) { const e = document.createElement("span"); e.className = "rp-sub"; e.textContent = sub; newDlgResolved.appendChild(e); }
+  }
+  async function loadSubdirs(base) {
+    newDlgSubList.innerHTML = "";
+    try {
+      const r = await authedFetch("/api/fs/list?limit=300&path=" + encodeURIComponent(base));
+      if (!r.ok) return;
+      const entries = (await r.json()).entries || [];
+      for (const e of entries) {
+        if (e.is_dir || e.kind === "dir") {
+          const o = document.createElement("option"); o.value = e.name; newDlgSubList.appendChild(o);
+        }
+      }
+    } catch {}
+  }
   newBtn.addEventListener("click", async () => {
     selectedCwd = null; newDlgOk.disabled = true; newDlgOk.textContent = "Confirm";
     document.getElementById("newdlg-name").value = "";
+    newDlgSub.value = ""; newDlgSubList.innerHTML = ""; newDlgResolved.textContent = "";
     newDlgCwds.innerHTML = "<div style='color:var(--muted);font-size:12px'>loading…</div>";
     newDlg.classList.add("show");
     const r = await authedFetch("/api/cwds");
     if (!r.ok) { newDlgCwds.innerHTML = "<div style='color:#ff6a6a;font-size:12px'>failed to load</div>"; return; }
     const cwds = (await r.json()).cwds || [];
     if (!cwds.length) {
-      newDlgCwds.innerHTML = "<div style='color:var(--muted);font-size:12px'>~/.claude/cc_web_cwds is empty or missing</div>";
+      newDlgCwds.innerHTML = "<div style='color:var(--muted);font-size:12px'>no cwd= lines in ~/.claude/cc_web.conf</div>";
       return;
     }
     newDlgCwds.innerHTML = "";
@@ -6809,20 +6855,23 @@ footer button.send {
       b.addEventListener("click", () => {
         newDlgCwds.querySelectorAll("button.selected").forEach(x => x.classList.remove("selected"));
         b.classList.add("selected"); selectedCwd = c; newDlgOk.disabled = false;
+        updateResolved(); loadSubdirs(c);
       });
       newDlgCwds.appendChild(b);
     }
   });
+  newDlgSub.addEventListener("input", updateResolved);
   newDlgCancel.addEventListener("click", () => newDlg.classList.remove("show"));
   newDlgOk.addEventListener("click", async () => {
     if (!selectedCwd) return;
+    const cwd = joinCwd(selectedCwd, newDlgSub.value);   // base, or base/sub if typed
     const newName = (document.getElementById("newdlg-name").value || "").trim();
     newDlg.classList.remove("show");
     showLoading("Opening new claude tab…");
     const r = await authedFetch("/api/new-session", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ cwd: selectedCwd, name: newName }),
+      body: JSON.stringify({ cwd: cwd, name: newName }),
     });
     hideLoading();
     if (!r.ok) { alert("Failed: " + (await r.text())); return; }
