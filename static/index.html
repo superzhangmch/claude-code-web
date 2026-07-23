@@ -456,6 +456,12 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
   color: var(--muted); font-size: 12px; cursor: pointer;
 }
 .qtab.active { color: var(--text); border-color: var(--accent); }
+/* pure (b/w) mode: accent==black gives no contrast, so bold the active chip's
+   border with an inset ring (no size change) + bold text. */
+body.pure #tab-bar .qtab.active,
+body.pure #closetab-btn.active {
+  box-shadow: inset 0 0 0 1px #000;
+}
 .qtab .qtab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qtab .qtab-x {
   border: 0; background: none; color: var(--muted); cursor: pointer;
@@ -2484,10 +2490,11 @@ footer button.send {
     switchMenu.innerHTML = "";
     for (const t of tabs) {
       if (!t.sid) continue;                     // no sid → not enterable, skip
-      const wt = single ? `t${(t.tab_index || 0) + 1}`
-        : `w${(t.window_index || 0) + 1}t${(t.tab_index || 0) + 1}`;
+      const cur = t.sid === attachedSid;
+      const wt = (single ? `t${(t.tab_index || 0) + 1}`
+        : `w${(t.window_index || 0) + 1}t${(t.tab_index || 0) + 1}`) + (cur ? "*" : "");   // mark current: tX*
       const b = document.createElement("button");
-      b.className = "sw-item" + (t.sid === attachedSid ? " current" : "");
+      b.className = "sw-item" + (cur ? " current" : "");
       // [tab-name] session-name — tab-name highlighted + clamped (leave room for
       // the session-name); head-kept, … on overflow.
       const tn = (t.tab_name || "").trim();
@@ -5012,13 +5019,15 @@ footer button.send {
     // phone: name width scales with tab count (no ellipsis) — 3-4 → 10, ≤2 → 15.
     const mbud = disp.length >= 3 ? 10 : 15;
     const desired = disp.map(t => {
-      const tx = (t.ti != null)
+      const active = t.sid === attachedSid;
+      let tx = (t.ti != null)
         ? (single ? `t${t.ti + 1}` : `w${(t.wi || 0) + 1}t${t.ti + 1}`) : "";
+      if (active && tx) tx += "*";   // mark the current tab: tX*
       // Quick-switch bar shows the TAB-NAME only (matches iTerm/tmux).
       const full = (t.tabName && t.tabName.trim()) ? t.tabName
         : (t.name && t.name.trim()) ? t.name : t.sid.slice(0, 4);
       const label = (tx ? tx + " " : "") + (mob ? tabLabel(full, mbud, "") : tabLabel(full));
-      return { sid: t.sid, label, active: t.sid === attachedSid };
+      return { sid: t.sid, label, active };
     });
 
     // Index the chips currently in the DOM by their sid.
