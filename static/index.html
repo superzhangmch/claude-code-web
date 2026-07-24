@@ -698,6 +698,10 @@ body.pure #closetab-btn.active {
   margin-left: 32px;
 }
 .msg.user .markdown { color: #9aa0ab; }
+/* Queued: a real "You"-style message still pending in the queue. Same layout as
+   .msg.user, but a dashed left edge + accent "Queued" label mark it as not-yet-sent. */
+.msg.user.queued { border-left-style: dashed; }
+.role .queued-label { color: var(--accent); font-weight: 700; }
 .msg.assistant { background: #000; }
 .msg.tool { border-left-color: #4ec9b0; background: #1a211f; }
 /* System/tool-injected entries recorded as type=user (task notifications,
@@ -1466,7 +1470,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #files-modal .files-crumbs .crumb:hover { background: var(--panel2); text-decoration: underline; }
 #files-modal .files-crumbs .crumb-sep { color: var(--muted); }
 /* links popup — extracted URLs / local paths from a message block */
-#links-modal .links-list { overflow: auto; max-height: 62vh; display: flex; flex-direction: column; gap: 5px; }
+#links-modal .modal-card { max-width: 780px; width: 90vw; }   /* desktop: roomier */
+@media (orientation: portrait), (max-width: 640px) {
+  #links-modal.modal { padding: 4px; }
+  #links-modal .modal-card { width: 100vw; max-width: 100vw; padding: 10px 6px; }
+}
+#links-modal .links-list { overflow: auto; max-height: 70vh; display: flex; flex-direction: column; gap: 5px; }
 #links-modal .links-sec { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin-top: 6px; }
 #links-modal .links-sec:first-child { margin-top: 0; }
 #links-modal .link-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--border); }
@@ -1885,6 +1894,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div id="transcript-view">
       <div id="load-earlier"><button id="load-earlier-btn" class="btn">Load earlier rounds</button></div>
       <div id="transcript"></div>
+      <div id="queued-region"></div>
       <div id="autoload">
         <button id="autoload-fresh" class="al-btn" title="Refresh now (fetch latest)">↻ fresh</button>
         <button id="autoload-toggle" class="al-btn" title="Pause / resume auto-refresh">⏸ pause</button>
@@ -2476,6 +2486,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 
   const tvEl = document.getElementById("transcript-view");
   const transcriptEl = document.getElementById("transcript");
+  const queuedRegion = document.getElementById("queued-region");
   const autoloadEl = document.getElementById("autoload");
   const autoloadLabel = document.getElementById("autoload-label");
   const loadEarlierEl = document.getElementById("load-earlier");
@@ -5164,6 +5175,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     attachedShort = (sid || "").slice(0, 4);
     attachedName = label || "";
     attachedTab = "";
+    queuedRegion.innerHTML = "";   // clear the previous session's queued tail (poll refills)
     metaExpanded = false;
     setSessionHash(sid);
     setMeta();
@@ -5590,7 +5602,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     }
     // all mode
     if (typeof content === "string") {
-      if (content.trim()) yield { kind: "text", role, text: content, idx, round, ts, sid, system: !!entry._system };
+      if (content.trim()) yield { kind: "text", role, text: content, idx, round, ts, sid, system: !!entry._system, queued: !!entry._queued };
       return;
     }
     if (!Array.isArray(content)) return;
@@ -5939,14 +5951,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const _disp = n => (typeof n === "number" && n >= 1000000000) ? n - 1000000000 : n;
     const r = (b.round != null) ? ("r" + _disp(b.round) + " · ") : "";
     const sidTag = b.sid ? ` · ${String(b.sid).slice(0, 4)}` : "";
-    const queuedTag = b.queued ? " · queued" : "";
-    idx.textContent = r + "#" + (b.idx != null ? _disp(b.idx) : "?") + sidTag + queuedTag + when;
+    idx.textContent = r + "#" + (b.idx != null ? _disp(b.idx) : "?") + sidTag + when;
     role.appendChild(label); role.appendChild(idx);
 
     // Stack consecutive compact rows: System msgs (all modes) and, in BRIEF
     // mode, tool-calls (just the tool name). Same-kind neighbours append into
     // one block instead of each taking a full card.
-    const stackKind = (b.kind === "text" && b.system) ? "sys"
+    const stackKind = (b.kind === "text" && b.system && !b.queued) ? "sys"
       : (b.kind === "tool_use" && renderMode === "brief") ? "tool" : null;
     if (stackKind) {
       if (_lastStack && _lastStack.kind === stackKind) {
@@ -5969,8 +5980,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // and add buttons afterwards.
 
     if (b.kind === "text") {
-      div.className = "msg " + (b.system ? "system" : b.role);
-      label.textContent = b.system ? "System" : (b.role === "user" ? "You" : "Claude");
+      div.className = "msg " + (b.queued ? (b.role + " queued") : (b.system ? "system" : b.role));
+      label.textContent = b.queued ? "Queued" : (b.system ? "System" : (b.role === "user" ? "You" : "Claude"));
+      if (b.queued) label.classList.add("queued-label");
       const md = document.createElement("div"); md.className = "markdown";
       md.innerHTML = renderMarkdown(b.text);
       maybeRenderMath(md);
@@ -6052,6 +6064,24 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
     }
     if (atTop) { _lastBottomToolUse = saved; _lastStack = savedStack; }
+  }
+
+  // Currently-queued prompts live in their OWN region below the transcript (the
+  // server sends the full live set each poll, not a delta) — so a dequeue just
+  // shrinks it and the stale "Queued" block disappears, while the real turn
+  // shows via the normal transcript delta at its own position.
+  function renderQueuedRegion(list) {
+    queuedRegion.innerHTML = "";
+    if (!list || !list.length) return;
+    const savedTool = _lastBottomToolUse, savedStack = _lastStack;   // don't disturb transcript trackers
+    _lastBottomToolUse = null; _lastStack = null;
+    for (const e of list) {
+      for (const b of blocksFor(e)) {
+        const el = renderBlock(b);
+        if (el) queuedRegion.appendChild(el);
+      }
+    }
+    _lastBottomToolUse = savedTool; _lastStack = savedStack;
   }
 
   function rebuild(noScroll) {
@@ -6446,6 +6476,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
       if (typeof m.since_idx === "number") lastIdx = m.since_idx;
       if (m.epoch) lastEpoch = m.epoch;
+      renderQueuedRegion(m.queued || []);   // live pending-queue tail (reconciled every poll)
       updatePromptRow(m.pending_confirm);
     } catch (e) {
       setStatus("err");

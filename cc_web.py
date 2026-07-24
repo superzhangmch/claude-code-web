@@ -2364,31 +2364,63 @@ def _trim_all(e: dict) -> Optional[dict]:
     return out
 
 
+def _still_queued_indices(entries: list[dict]) -> set[int]:
+    """The queue is append-only in the JSONL: `enqueue` adds an item, `dequeue`
+    and `remove` each drop one, `popAll` clears all. So an old enqueue whose
+    item was later sent/cancelled must NOT keep showing as 'queued'. Replay the
+    ops to find which enqueues are STILL in the queue at end-of-file. It's a FIFO
+    (oldest consumed first), so the survivors are just the last k enqueues where
+    k = final queue length — which also sidesteps `remove` not naming its target.
+    Returns the set of entry indices for those live enqueues."""
+    live: list[int] = []          # indices of enqueues still in the queue, FIFO
+    for i, e in enumerate(entries):
+        if e.get("type") != "queue-operation":
+            continue
+        op = e.get("operation")
+        if op == "enqueue":
+            live.append(i)
+        elif op in ("dequeue", "remove"):
+            if live:
+                live.pop(0)       # oldest goes first
+        elif op == "popAll":
+            live.clear()
+    return set(live)
+
+
+def _queued_items(entries: list[dict]) -> list[dict]:
+    """Render-ready list of the prompts STILL in the queue at EOF (see
+    _still_queued_indices). Delivered by /api/state as a LIVE set (not part of
+    the append-only transcript delta), so a later dequeue/remove just shrinks it
+    and the stale 'Queued' block disappears while the real turn shows via delta.
+    Content is head+tail truncated — queued items mix a human's own pending input
+    with long system/scheduler ticks we can't tell apart, so we don't show it in
+    full; the title 'Queued' + truncation is enough."""
+    live = _still_queued_indices(entries)
+    out: list[dict] = []
+    for i in sorted(live):
+        e = entries[i]
+        content = e.get("content")
+        if not (isinstance(content, str) and content.strip()):
+            continue
+        out.append({
+            "uuid": e.get("uuid"),
+            "type": "user",
+            "_idx": e.get("_idx"),
+            "_round": e.get("_round"),
+            "timestamp": e.get("timestamp"),
+            "sid": e.get("sessionId"),
+            "_queued": True,
+            "message": {"content": _head_tail_trunc(content, 160)},
+        })
+    return out
+
+
 def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
     out: list[dict] = []
     for e in entries:
         t = e.get("type")
         if t == "queue-operation":
-            op = e.get("operation")
-            content = e.get("content")
-            if op in ("enqueue", "popAll") and isinstance(content, str) and content.strip():
-                # A queued prompt carries NO source metadata (only content), so we
-                # can't tell scheduler-enqueued from human-queued — and it doesn't
-                # matter: at this point the content isn't important, just that
-                # something is queued. Render ALL queued items uniformly as a
-                # compact System entry (never "You"), head+tail truncated.
-                out.append({
-                    "uuid": e.get("uuid"),
-                    "type": "user",
-                    "_idx": e.get("_idx"),
-                    "_round": e.get("_round"),
-                    "timestamp": e.get("timestamp"),
-                    "sid": e.get("sessionId"),
-                    "_queued": True,
-                    "_system": True,
-                    "message": {"content": _head_tail_trunc(content, 160)},
-                })
-            continue
+            continue      # queued prompts are delivered separately (see _queued_items)
         if t not in ("user", "assistant"):
             continue
         if e.get("isSidechain"):
@@ -4435,6 +4467,7 @@ async def get_state(
     return {
         "binding": _serialize_binding(b),
         "transcript": transcript,
+        "queued": _queued_items(all_entries),   # live set (over the full window), not delta
         "since_idx": new_since_idx,
         "has_more_history": has_more,
         "gap_before_idx": gap_before_idx,
