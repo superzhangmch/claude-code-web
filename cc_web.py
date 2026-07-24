@@ -2415,12 +2415,71 @@ def _queued_items(entries: list[dict]) -> list[dict]:
     return out
 
 
-def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
+def _still_queued_keys(entries: list[dict]) -> set:
+    """(timestamp, content) of the enqueues STILL in the queue at EOF — keying
+    by content+ts because enqueue entries carry no uuid."""
+    keys = set()
+    for i in _still_queued_indices(entries):
+        e = entries[i]
+        keys.add((e.get("timestamp"), (e.get("content") or "").strip()))
+    return keys
+
+
+def _human_user_texts(entries: list[dict]) -> set:
+    """Stripped text of every real (non-meta) user turn — used to dedup an
+    enqueue that later became its own user turn."""
+    out = set()
+    for e in entries:
+        if e.get("type") != "user" or e.get("isMeta"):
+            continue
+        msg = e.get("message") or {}
+        c = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(c, str):
+            txt = c
+        elif isinstance(c, list):
+            txt = "\n".join(b.get("text", "") for b in c
+                            if isinstance(b, dict) and b.get("type") == "text")
+        else:
+            txt = ""
+        txt = txt.strip()
+        if txt:
+            out.add(txt)
+    return out
+
+
+def _filter_entries(entries: list[dict], mode: str,
+                    still_q_keys: Optional[set] = None,
+                    user_texts: Optional[set] = None) -> list[dict]:
+    still_q_keys = still_q_keys or set()
+    user_texts = user_texts or set()
     out: list[dict] = []
     for e in entries:
         t = e.get("type")
         if t == "queue-operation":
-            continue      # queued prompts are delivered separately (see _queued_items)
+            # Pending enqueues are delivered via the separate `queued` set. But a
+            # CONSUMED enqueue that never became its own user turn (a prompt fed
+            # to Claude mid-turn) would otherwise vanish entirely — show it inline
+            # so nothing is lost. Skip it only if it's still pending (in the
+            # queued region) or it matches a real user turn (dedup).
+            content = e.get("content")
+            if e.get("operation") != "enqueue" or not (isinstance(content, str) and content.strip()):
+                continue
+            cs = content.strip()
+            if (e.get("timestamp"), cs) in still_q_keys:
+                continue
+            if cs in user_texts:
+                continue
+            out.append({
+                "uuid": e.get("uuid"),
+                "type": "user",
+                "_idx": e.get("_idx"),
+                "_round": e.get("_round"),
+                "timestamp": e.get("timestamp"),
+                "sid": e.get("sessionId"),
+                "_queued": True,
+                "message": {"content": _head_tail_trunc(content, 160)},
+            })
+            continue
         if t not in ("user", "assistant"):
             continue
         if e.get("isSidechain"):
@@ -4557,7 +4616,9 @@ async def get_state(
     else:
         sliced = all_entries[-SNAPSHOT_TAIL_ENTRIES:]
 
-    transcript = _filter_entries(sliced, mode)
+    transcript = _filter_entries(sliced, mode,
+                                 _still_queued_keys(all_entries),
+                                 _human_user_texts(all_entries))
     new_since_idx = since_idx
     if all_entries:
         new_since_idx = all_entries[-1].get("_idx", since_idx)
