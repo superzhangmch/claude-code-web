@@ -989,7 +989,10 @@ footer #float-controls .tc-sep { color: var(--border); font-size: 9px; user-sele
 
 footer {
   flex-shrink: 0; position: relative;   /* anchor for the floating nav pill */
-  padding-bottom: env(safe-area-inset-bottom);
+  /* NO safe-area padding-bottom: it left a gap so the footer didn't touch the
+     bottom (the list page has no footer, so #main goes flush — this matches it).
+     The status line is the bottom-most element and is read-only text, fine at
+     the edge; the input sits above it. */
   background: #000; border-top: 1px solid var(--border);
   display: flex; flex-direction: column;
 }
@@ -1004,6 +1007,23 @@ footer .input-row > button { flex-shrink: 0; }
 footer .in-btn-col { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
 footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
 footer.hidden { display: none; }
+/* mirror of Claude's bottom status bar — one line under the input, scrolls
+   horizontally if too long; "N shell(s)/monitor(s)" tokens are clickable. */
+footer #statusline {
+  font: 11px ui-monospace, Menlo, monospace; color: var(--muted);
+  padding: 3px 10px;   /* footer already carries env(safe-area-inset-bottom) */
+  white-space: nowrap; overflow-x: auto; overflow-y: hidden;
+  border-top: 1px solid var(--border); line-height: 1.4;
+}
+footer #statusline .sl-click {
+  color: var(--accent); cursor: pointer; text-decoration: underline dotted; font-weight: 700;
+}
+#procs-list { overflow: auto; max-height: 62vh; display: flex; flex-direction: column; gap: 4px;
+  font: 12px ui-monospace, Menlo, monospace; }
+#procs-list .proc-row { padding: 6px; border-bottom: 1px solid var(--border); }
+#procs-list .pr-cmd { word-break: break-all; white-space: pre-wrap; }
+#procs-list .pr-pid { color: var(--muted); margin-right: 6px; }
+#procs-list .pr-meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
 footer textarea {
   flex: 1; box-sizing: border-box;
   background: var(--bg); color: var(--text);
@@ -1933,6 +1953,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <textarea id="input" placeholder="Reply to Claude…" rows="1"></textarea>
       <button id="send" class="send" title="Send" aria-label="Send">➤</button>
     </div>
+    <div id="statusline" style="display:none"></div>
   </footer>
 
   <!-- attach loading overlay -->
@@ -2487,6 +2508,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const tvEl = document.getElementById("transcript-view");
   const transcriptEl = document.getElementById("transcript");
   const queuedRegion = document.getElementById("queued-region");
+  const statuslineEl = document.getElementById("statusline");
+  let lastStatusText = null;
   const autoloadEl = document.getElementById("autoload");
   const autoloadLabel = document.getElementById("autoload-label");
   const loadEarlierEl = document.getElementById("load-earlier");
@@ -5176,6 +5199,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     attachedName = label || "";
     attachedTab = "";
     queuedRegion.innerHTML = "";   // clear the previous session's queued tail (poll refills)
+    statuslineEl.innerHTML = ""; statuslineEl.style.display = "none"; lastStatusText = null;   // reset status bar
     metaExpanded = false;
     setSessionHash(sid);
     setMeta();
@@ -6084,6 +6108,74 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     _lastBottomToolUse = savedTool; _lastStack = savedStack;
   }
 
+  // Mirror Claude's bottom status bar under the input. Diff to avoid re-render;
+  // null (screen read failed) → keep current. "N shell(s)/monitor(s)" tokens
+  // become clickable → popup the actual background commands.
+  function renderStatusline(text) {
+    if (text == null || text === lastStatusText) return;   // unchanged / no update
+    lastStatusText = text;
+    statuslineEl.innerHTML = "";
+    if (!text) { statuslineEl.style.display = "none"; return; }
+    statuslineEl.style.display = "";
+    const re = /(\d+\s*(?:shells?|monitors?))/gi;
+    let last = 0, m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) statuslineEl.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const span = document.createElement("span");
+      span.className = "sl-click"; span.textContent = m[0];
+      span.addEventListener("click", openProcsPopup);
+      statuslineEl.appendChild(span);
+      last = re.lastIndex;
+    }
+    if (last < text.length) statuslineEl.appendChild(document.createTextNode(text.slice(last)));
+  }
+  // seconds → "X sec / X min / X.XX hours / X.XX days"
+  function fmtAgo(sec) {
+    if (sec == null) return "";
+    if (sec < 60) return sec + " sec";
+    if (sec < 3600) return Math.round(sec / 60) + " min";
+    if (sec < 86400) return (sec / 3600).toFixed(2) + " hours";
+    return (sec / 86400).toFixed(2) + " days";
+  }
+  async function openProcsPopup() {
+    if (!attachedSid) return;
+    const overlay = document.createElement("div"); overlay.className = "modal show";
+    const card = document.createElement("div"); card.className = "modal-card";
+    card.style.maxWidth = "760px"; card.style.width = "92vw";
+    const row = document.createElement("div"); row.className = "modal-row";
+    row.style.cssText = "display:flex;align-items:center;gap:8px;";   // close sits at the right of the title
+    const h = document.createElement("h3"); h.textContent = "Background shells / monitors"; h.style.flex = "1"; h.style.margin = "0"; h.style.fontSize = "14px";
+    const close = document.createElement("button"); close.className = "btn"; close.textContent = "✕"; close.style.flexShrink = "0";
+    row.appendChild(h); row.appendChild(close); card.appendChild(row);
+    const list = document.createElement("div"); list.id = "procs-list"; list.textContent = "loading…";
+    card.appendChild(list); overlay.appendChild(card); document.body.appendChild(overlay);
+    const done = () => overlay.remove();
+    close.addEventListener("click", done);
+    overlay.addEventListener("click", e => { if (e.target === overlay) done(); });
+    try {
+      const r = await authedFetch("/api/session-procs?claude_session_id=" + encodeURIComponent(attachedSid));
+      const procs = r.ok ? ((await r.json()).procs || []) : [];
+      list.innerHTML = "";
+      if (!procs.length) { list.textContent = "(no background shells)"; return; }
+      for (const p of procs) {
+        const pr = document.createElement("div"); pr.className = "proc-row";
+        const cmd = document.createElement("div"); cmd.className = "pr-cmd";
+        const pid = document.createElement("span"); pid.className = "pr-pid"; pid.textContent = "[" + p.pid + "]";
+        cmd.appendChild(pid); cmd.appendChild(document.createTextNode(p.cmd || ""));
+        pr.appendChild(cmd);
+        const bits = [];
+        if (p.cpu != null) bits.push("cpu " + p.cpu.toFixed(1) + "%");
+        if (p.age_sec != null) bits.push("started " + fmtAgo(p.age_sec) + " ago");
+        if (bits.length) {
+          const meta = document.createElement("div"); meta.className = "pr-meta";
+          meta.textContent = bits.join("  ·  ");
+          pr.appendChild(meta);
+        }
+        list.appendChild(pr);
+      }
+    } catch (e) { list.textContent = "error: " + e; }
+  }
+
   function rebuild(noScroll) {
     transcriptEl.innerHTML = "";
     _lastBottomToolUse = null;
@@ -6477,6 +6569,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (typeof m.since_idx === "number") lastIdx = m.since_idx;
       if (m.epoch) lastEpoch = m.epoch;
       renderQueuedRegion(m.queued || []);   // live pending-queue tail (reconciled every poll)
+      renderStatusline(m.status_line);      // mirror Claude's bottom status bar
       updatePromptRow(m.pending_confirm);
     } catch (e) {
       setStatus("err");

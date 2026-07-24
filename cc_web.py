@@ -3266,6 +3266,111 @@ def _ppid_map() -> dict[int, int]:
     return m
 
 
+def _proc_table() -> tuple[dict, dict]:
+    """One ps → (table, kids): table[pid]=(ppid, comm, args); kids[ppid]=[pids]."""
+    table: dict[int, tuple] = {}
+    kids: dict[int, list] = {}
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,comm=,args="],
+                             capture_output=True, text=True, timeout=4).stdout
+    except Exception:
+        return table, kids
+    for ln in out.splitlines():
+        p = ln.split(None, 3)
+        if len(p) < 3:
+            continue
+        try:
+            pid, ppid = int(p[0]), int(p[1])
+        except ValueError:
+            continue
+        comm = p[2]
+        args = p[3] if len(p) > 3 else comm
+        table[pid] = (ppid, comm, args)
+        kids.setdefault(ppid, []).append(pid)
+    return table, kids
+
+
+def _etime_to_sec(etime: str) -> Optional[int]:
+    """ps etime `[[DD-]HH:]MM:SS` → total seconds."""
+    try:
+        rest = etime.strip()
+        days = 0
+        if "-" in rest:
+            d, rest = rest.split("-", 1)
+            days = int(d)
+        parts = [int(x) for x in rest.split(":")]
+        while len(parts) < 3:
+            parts.insert(0, 0)
+        h, m, s = parts[-3], parts[-2], parts[-1]
+        return days * 86400 + h * 3600 + m * 60 + s
+    except Exception:
+        return None
+
+
+def _ps_detail(pids: list[int]) -> dict[int, dict]:
+    """Per-pid {cpu, etime, started} via ps. cpu/etime in one call (no spaces);
+    lstart (has spaces) in a second call where it's the only trailing field."""
+    if not pids:
+        return {}
+    ids = ",".join(str(p) for p in pids)
+    det: dict[int, dict] = {p: {} for p in pids}
+    try:
+        out = subprocess.run(["ps", "-p", ids, "-o", "pid=,%cpu=,etime="],
+                             capture_output=True, text=True, timeout=4).stdout
+        for ln in out.splitlines():
+            f = ln.split()
+            if len(f) >= 3:
+                try:
+                    det[int(f[0])].update(cpu=float(f[1]), etime=f[2])
+                except (ValueError, KeyError):
+                    pass
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["ps", "-p", ids, "-o", "pid=,lstart="],
+                             capture_output=True, text=True, timeout=4).stdout
+        for ln in out.splitlines():
+            parts = ln.strip().split(None, 1)
+            if len(parts) == 2:
+                try:
+                    det[int(parts[0])]["started"] = parts[1]
+                except (ValueError, KeyError):
+                    pass
+    except Exception:
+        pass
+    return det
+
+
+def _session_background_shells(root_pids: list[int]) -> list[dict]:
+    """Claude-Code background shells under the given claude pid(s): each is a
+    `zsh/bash -c source …shell-snapshots…` process whose child is the ACTUAL
+    running command (sleep/tail/monitor/…). Reports that inner command with its
+    full argv + cpu% + elapsed + start time (falls back to the shell itself when
+    it has no child yet)."""
+    table, kids = _proc_table()
+    seen: list[int] = []
+    stack = list(root_pids)
+    while stack:
+        x = stack.pop()
+        for k in kids.get(x, []):
+            if k not in seen:
+                seen.append(k); stack.append(k)
+    shells: list[dict] = []
+    for d in seen:
+        ppid, comm, args = table.get(d, (0, "", ""))
+        base = os.path.basename(comm)
+        if base in ("zsh", "bash", "sh") and "shell-snapshots" in args:
+            child_pids = [k for k in kids.get(d, []) if k in table]
+            target = child_pids[0] if child_pids else d
+            shells.append({"pid": target, "cmd": table.get(target, (0, "", args))[2]})
+    det = _ps_detail([s["pid"] for s in shells])
+    for s in shells:
+        d = det.get(s["pid"], {})
+        s["cpu"] = d.get("cpu")
+        s["age_sec"] = _etime_to_sec(d.get("etime", "")) if d.get("etime") else None
+    return shells
+
+
 def _attribute_to_claude(pid: int, claude_info: dict, ppm: dict) -> tuple[Optional[dict], bool]:
     """Return (session_info, is_self): is this pid a claude session itself, or a
     descendant of one? Walks the parent chain. (None, False) if unattributable."""
@@ -4370,6 +4475,17 @@ async def _try_autobind(sid: str):
     return b
 
 
+def _status_line(screen: Optional[str]) -> Optional[str]:
+    """Claude Code's bottom status bar = the LAST non-empty screen line (e.g.
+    '⏵⏵ auto mode on · 1 shell · esc to interrupt · …'). None if no screen —
+    the client keeps its current line then. (The client diffs to avoid
+    re-rendering an unchanged line, so we just return the current value.)"""
+    if not screen:
+        return None
+    lines = [ln for ln in screen.split("\n") if ln.strip()]
+    return lines[-1].strip() if lines else None
+
+
 @app.get("/api/state", dependencies=[Depends(require_token)])
 async def get_state(
     claude_session_id: Optional[str] = None,
@@ -4456,17 +4572,25 @@ async def get_state(
     # We do NOT return the screen text itself — the poll only needs
     # pending_confirm; shipping the full-width screen every 5-6s wasted phone
     # bandwidth and battery for nothing.
+    # Read the screen for (a) pending_confirm — only when the idle-gate is open,
+    # since the menu only shows then — and (b) the status-bar line, which we want
+    # EVERY poll (it shows "N shell(s) / N monitor(s)" while working too). When
+    # busy we read only a small tail (just need the last line), so it's cheap.
     pending_confirm = None
-    if _pending_confirm_gate_open(b):
-        try:
-            screen = await bridge.get_screen_for(b.iterm_session_id, strip_input=False)
-        except Exception:
-            screen = None
+    gate = _pending_confirm_gate_open(b)
+    try:
+        screen = await bridge.get_screen_for(
+            b.iterm_session_id, max_lines=(80 if gate else 6), strip_input=False)
+    except Exception:
+        screen = None
+    if gate:
         pending_confirm = _detect_pending_confirm_from_screen(screen or "")
+    status_line = _status_line(screen)
 
     return {
         "binding": _serialize_binding(b),
         "transcript": transcript,
+        "status_line": status_line,             # bottom status bar (changed-only)
         "queued": _queued_items(all_entries),   # live set (over the full window), not delta
         "since_idx": new_since_idx,
         "has_more_history": has_more,
@@ -4476,6 +4600,25 @@ async def get_state(
         "epoch": cur_epoch,
         "resync": resync,
     }
+
+
+@app.get("/api/session-procs", dependencies=[Depends(require_token)])
+async def get_session_procs(claude_session_id: Optional[str] = None):
+    """The background shell/monitor commands running under a session — what the
+    status bar's clickable 'N shell(s) / N monitor(s)' expands to. Walks the
+    claude pid's descendant `shell-snapshots` shells and returns their inner
+    commands. (The OS can't tell 'shell' from 'monitor' — that split is Claude's
+    own — so we return them all; the popup lists the commands.)"""
+    if not claude_session_id:
+        raise HTTPException(status_code=400, detail="claude_session_id required")
+    pids = set(_pids_for_session(claude_session_id))
+    b = bindings.get_by_session(claude_session_id)
+    if b is not None:
+        pids.add(b.pid)
+    if not pids:
+        return {"procs": []}
+    procs = await asyncio.to_thread(_session_background_shells, list(pids))
+    return {"procs": procs}
 
 
 @app.get("/api/tool", dependencies=[Depends(require_token)])
