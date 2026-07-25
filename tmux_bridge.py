@@ -104,7 +104,9 @@ def _panes() -> list[dict]:
         return []
     panes: list[dict] = []
     for line in r.stdout.splitlines():
-        f = line.split("\t")
+        # maxsplit=6 → 7 fields; pane_title is last so any tab INSIDE the
+        # OSC-set title stays intact (unbounded split would truncate it).
+        f = line.split("\t", 6)
         if len(f) < 6:
             continue
         # tab display name: prefer pane_title (claude sets it via the OSC title

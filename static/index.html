@@ -1006,6 +1006,8 @@ footer .input-row > button { flex-shrink: 0; }
    textarea); the column stretches to the input height, each button = half. */
 footer .in-btn-col { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
 footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
+footer #mic-btn.recording { background: #c0392b; color: #fff; border-color: #c0392b; }
+#mm-asr-sec .asr-opt .asr-model { color: var(--muted); font-size: 11px; }
 footer.hidden { display: none; }
 /* mirror of Claude's bottom status bar — one line under the input, scrolls
    horizontally if too long; "N shell(s)/monitor(s)" tokens are clickable. */
@@ -1693,6 +1695,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <button class="sw-item mode-opt" data-mode="brief">▁ brief（默认）</button>
     <button class="sw-item mode-opt" data-mode="medium">▄ medium</button>
     <button class="sw-item mode-opt" data-mode="all">█ all</button>
+    <div class="menu-sec" id="mm-asr-label" style="display:none">语音识别 ASR</div>
+    <div id="mm-asr-sec"></div>
     <div class="menu-sec">字体</div>
     <div class="menu-row">
       <button class="sw-item" id="mm-fontup">A 放大</button>
@@ -1947,7 +1951,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div class="input-row">
       <input id="upload-input" type="file" accept="image/*" multiple style="display:none">
       <div class="in-btn-col">
-        <button id="polish-btn" class="icon" title="整理文本(LLM 疏通口述/听写)">✨</button>
+        <button id="mic-btn" class="icon" title="语音输入(录音→识别→整理)">🎤</button>
         <button id="upload-btn" class="icon" title="Attach image">📎</button>
       </div>
       <textarea id="input" placeholder="Reply to Claude…" rows="1"></textarea>
@@ -2097,7 +2101,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   async function authedFetch(url, opts = {}) {
     opts.headers = { ...(opts.headers || {}), "Authorization": "Bearer " + authToken };
     opts.cache = "no-store";
-    const reqBytes = opts.body ? (typeof opts.body === "string" ? new Blob([opts.body]).size : 0) : 0;
+    // count request-body size for traffic stats: strings, Blobs (voice audio!),
+    // and ArrayBuffer/typed-array bodies (FormData can't be sized cheaply → 0).
+    let reqBytes = 0;
+    if (opts.body) {
+      const b = opts.body;
+      if (typeof b === "string") reqBytes = new Blob([b]).size;
+      else if (b instanceof Blob) reqBytes = b.size;
+      else if (b.byteLength != null) reqBytes = b.byteLength;
+    }
     let timer = null;
     if (!opts.signal) {
       const ctrl = new AbortController();
@@ -6734,7 +6746,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // ✨ polish: send the input text to the LLM to tidy dictated/voice-typed text,
   // replace the box with the cleaned version (review before you send).
   const polishBtn = document.getElementById("polish-btn");
-  polishBtn.addEventListener("click", async () => {
+  if (polishBtn) polishBtn.addEventListener("click", async () => {
     const t = inputEl.value.trim();
     if (!t) return;
     polishBtn.disabled = true; polishBtn.textContent = "⏳";
@@ -6760,6 +6772,91 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       polishBtn.disabled = false; polishBtn.textContent = "✨";
       inputEl.focus();
     }
+  });
+
+  // ---------- voice input: record → ASR → polish → fill ----------
+  const micBtn = document.getElementById("mic-btn");
+  let _mediaRec = null, _mediaChunks = [], _recording = false;
+  let asrConfigs = [], asrWhich = localStorage.getItem("cc_asr_which") || "";
+
+  function _markAsrCurrent() {
+    for (const b of document.querySelectorAll("#mm-asr-sec .asr-opt"))
+      b.classList.toggle("current", b.dataset.label === asrWhich);
+  }
+  (async () => {   // ASR backends → options inside the ▁ dropdown menu
+    try {
+      const r = await authedFetch("/api/asr-configs");
+      if (!r.ok) return;
+      asrConfigs = (await r.json()).configs || [];
+      if (!asrConfigs.length) { micBtn.style.display = "none"; return; }
+      if (!asrConfigs.some(c => c.label === asrWhich)) asrWhich = asrConfigs[0].label;
+      const sec = document.getElementById("mm-asr-sec");
+      const lab = document.getElementById("mm-asr-label");
+      sec.innerHTML = "";
+      for (const c of asrConfigs) {
+        const b = document.createElement("button");
+        b.className = "sw-item asr-opt"; b.dataset.label = c.label;
+        b.innerHTML = "🎤 " + c.label + " <span class='asr-model'>" + c.model + "</span>";
+        b.addEventListener("click", () => {
+          asrWhich = c.label; localStorage.setItem("cc_asr_which", asrWhich);
+          _markAsrCurrent(); hideModeMenu();
+        });
+        sec.appendChild(b);
+      }
+      if (asrConfigs.length > 1) lab.style.display = "";   // only worth showing the switch when >1
+      _markAsrCurrent();
+    } catch {}
+  })();
+
+  function _setMic(state) {   // "idle" | "rec" | "busy"
+    micBtn.classList.toggle("recording", state === "rec");
+    micBtn.textContent = state === "rec" ? "⏹" : state === "busy" ? "⏳" : "🎤";
+    micBtn.disabled = state === "busy";
+  }
+
+  async function _voiceStop() {
+    if (_mediaRec && _recording) { _recording = false; _mediaRec.stop(); }
+  }
+  micBtn.addEventListener("click", async () => {
+    if (_recording) { _voiceStop(); return; }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      alert("麦克风不可用: " + e.name + "。需通过 HTTPS 打开(getUserMedia 要 secure context)。");
+      return;
+    }
+    _mediaChunks = [];
+    _mediaRec = new MediaRecorder(stream);
+    _mediaRec.ondataavailable = e => _mediaChunks.push(e.data);
+    _mediaRec.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      _setMic("busy");
+      const blob = new Blob(_mediaChunks, { type: _mediaRec.mimeType });
+      if (!blob.size) { _setMic("idle"); return; }
+      try {
+        const which = asrWhich ? ("?which=" + encodeURIComponent(asrWhich)) : "";
+        const ar = await authedFetch("/api/asr" + which, { method: "POST", headers: { "content-type": blob.type || "audio/webm" }, body: blob, timeoutMs: 60000 });
+        if (!ar.ok) { alert("识别失败: " + await ar.text()); _setMic("idle"); return; }
+        let text = ((await ar.json()).text || "").trim();
+        if (!text) { _setMic("idle"); return; }
+        // polish (ASR mode: no pinyin, hint possible ASR errors)
+        try {
+          const pr = await authedFetch("/api/polish", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text, claude_session_id: attachedSid || "", mode: "asr" }), timeoutMs: 60000,
+          });
+          if (pr.ok) { const d = await pr.json(); if (d && d.text) text = d.text; }
+        } catch {}
+        inputEl.value = inputEl.value ? (inputEl.value.replace(/\s*$/, "") + " " + text) : text;
+        inputEl.dispatchEvent(new Event("input"));
+      } catch (e) {
+        alert(e && e.name === "AbortError" ? "识别超时,请重试" : "识别失败: " + e);
+      } finally {
+        _setMic("idle"); inputEl.focus();
+      }
+    };
+    _mediaRec.start(); _recording = true; _setMic("rec");
   });
 
   // ---------- image upload ----------
