@@ -1051,7 +1051,7 @@ footer #mic-btn.busy { animation: mic-spin 1.1s linear infinite; }
 footer .in-btn-col { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
 footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
 footer #mic-btn.recording { background: #c0392b; color: #fff; border-color: #c0392b; }
-/* long-press send → small menu (清空 / 复制 / 查看 ASR 原文) */
+/* long-press send → small menu (Clear / Copy / View ASR) */
 .send-menu {
   /* absolute child of the input-row (position:relative) so it tracks the send
      button even when the iOS keyboard is up — position:fixed + getBoundingClientRect
@@ -1078,6 +1078,16 @@ footer #mic-btn.recording { background: #c0392b; color: #fff; border-color: #c03
 .asr-raw-box h4 { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
 .asr-raw-box .asr-raw-text { font-size: 15px; line-height: 1.5; word-break: break-word; white-space: pre-wrap; color: var(--text); }
 .asr-raw-box .asr-raw-timing { margin-top: 10px; font: 12px ui-monospace, Menlo, monospace; color: var(--accent); }
+.asr-raw-box .asr-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.asr-raw-box .asr-actions button {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 7px; font-size: 13px; padding: 7px 12px; cursor: pointer;
+}
+.asr-raw-box .asr-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.asr-raw-box .asr-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.asr-raw-box .asr-actions button:disabled { opacity: .5; cursor: default; }
+.asr-raw-box .asr-repolish { margin-top: 14px; }
+.asr-raw-box .asr-repolish h4 { color: var(--accent); }
 #mm-asr-sec .asr-opt .asr-model { color: var(--muted); font-size: 11px; }
 footer.hidden { display: none; }
 /* mirror of Claude's bottom status bar — one line under the input, scrolls
@@ -2035,12 +2045,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       </div>
       <textarea id="input" placeholder="Reply to Claude…" rows="1"></textarea>
       <button id="send" class="send" title="点击发送 · 长按更多" aria-label="Send">➤</button>
-      <div id="rec-bar" class="rec-bar" style="display:none" title="点击结束录音">
+      <div id="rec-bar" class="rec-bar" style="display:none" title="Tap to stop">
         <span class="rec-dot"></span>
         <span id="rec-time" class="rec-time">0:00</span>
         <div class="rec-wave"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
-        <button id="rec-cancel" class="rec-cancel">✕ 取消</button>
-        <button id="rec-stop" class="rec-stop">⏹ 结束</button>
+        <button id="rec-cancel" class="rec-cancel">✕ Cancel</button>
+        <button id="rec-stop" class="rec-stop">⏹ Stop</button>
       </div>
     </div>
     <div id="statusline" style="display:none"></div>
@@ -6821,7 +6831,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
                         // re-enables digit/letter shortcuts without a manual tap)
     }
   }
-  // Send button: short press = submit; LONG press = menu (清空 / 复制 / 查看 ASR 原文).
+  // Send button: short press = submit; LONG press = menu (Clear / Copy / View ASR).
   let _sendLpTimer = null, _sendLpFired = false;
   function _sendLpStart() { _sendLpFired = false; clearTimeout(_sendLpTimer); _sendLpTimer = setTimeout(() => { _sendLpFired = true; openSendMenu(); }, 500); }
   function _sendLpCancel() { clearTimeout(_sendLpTimer); }
@@ -6840,32 +6850,76 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
     document.body.appendChild(ta); ta.select(); try { document.execCommand("copy"); } catch {} ta.remove();
   }
+  function _useInInput(text) {   // replace the whole input with the chosen text
+    inputEl.value = text; inputEl.style.height = "auto";
+    inputEl.dispatchEvent(new Event("input"));
+    inputEl.focus();
+  }
   function showAsrRaw() {
     const ov = document.createElement("div"); ov.className = "asr-raw-ov";
     const box = document.createElement("div"); box.className = "asr-raw-box";
+    ov.addEventListener("click", () => ov.remove());
+    box.addEventListener("click", (e) => e.stopPropagation());   // clicks inside stay open
     if (!lastAsrRaw) {
-      const h = document.createElement("h4"); h.textContent = "(还没有语音识别记录)"; box.appendChild(h);
-    } else {
-      const h1 = document.createElement("h4"); h1.textContent = "ASR 原文(润色前)"; box.appendChild(h1);
-      const t1 = document.createElement("div"); t1.className = "asr-raw-text"; t1.textContent = lastAsrRaw; box.appendChild(t1);
-      const h2 = document.createElement("h4"); h2.textContent = "润色后"; h2.style.marginTop = "14px"; box.appendChild(h2);
-      const t2 = document.createElement("div"); t2.className = "asr-raw-text"; t2.textContent = lastPolished || "(还在润色 / 无变化)"; box.appendChild(t2);
+      const h = document.createElement("h4"); h.textContent = "(no ASR yet)"; box.appendChild(h);
+      ov.appendChild(box); document.body.appendChild(ov); return;
     }
+    const h1 = document.createElement("h4"); h1.textContent = "ASR (raw)"; box.appendChild(h1);
+    const t1 = document.createElement("div"); t1.className = "asr-raw-text"; t1.textContent = lastAsrRaw; box.appendChild(t1);
+    const h2 = document.createElement("h4"); h2.textContent = "Polished"; h2.style.marginTop = "14px"; box.appendChild(h2);
+    const t2 = document.createElement("div"); t2.className = "asr-raw-text"; t2.textContent = lastPolished || "(polishing / unchanged)"; box.appendChild(t2);
     const bits = [];
     if (lastAsrSec != null) bits.push("ASR " + lastAsrSec + "s");
     if (lastPolishSec != null) bits.push("polish " + lastPolishSec + "s");
-    if (bits.length) { const ti = document.createElement("div"); ti.className = "asr-raw-timing"; ti.textContent = "耗时:" + bits.join(" · "); box.appendChild(ti); }
+    if (bits.length) { const ti = document.createElement("div"); ti.className = "asr-raw-timing"; ti.textContent = "time: " + bits.join(" · "); box.appendChild(ti); }
+
+    // where the re-polish result renders (kept between the text and the actions)
+    const rep = document.createElement("div"); rep.className = "asr-repolish"; rep.style.display = "none"; box.appendChild(rep);
+
+    const acts = document.createElement("div"); acts.className = "asr-actions";
+    const useRaw = document.createElement("button"); useRaw.textContent = "Use raw";
+    useRaw.addEventListener("click", () => { _useInInput(lastAsrRaw); ov.remove(); });
+    const reBtn = document.createElement("button"); reBtn.textContent = "Re-polish (safe)";
+    reBtn.addEventListener("click", async () => {
+      reBtn.disabled = true; reBtn.textContent = "Polishing…";
+      rep.style.display = ""; rep.innerHTML = "";
+      const rh = document.createElement("h4"); rh.textContent = "Re-polished (conservative)"; rep.appendChild(rh);
+      const rt = document.createElement("div"); rt.className = "asr-raw-text"; rt.textContent = "…"; rep.appendChild(rt);
+      try {
+        const t0 = Date.now();
+        const pr = await authedFetch("/api/polish", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: lastAsrRaw, claude_session_id: attachedSid || "", mode: "asr", conservative: true }),
+          timeoutMs: 60000,
+        });
+        const sec = ((Date.now() - t0) / 1000).toFixed(1);
+        if (!pr.ok) { rt.textContent = "(failed: " + (await pr.text()) + ")"; reBtn.disabled = false; reBtn.textContent = "Retry"; return; }
+        const d = await pr.json();
+        const out = (d && d.text) ? d.text : lastAsrRaw;
+        rt.textContent = out;
+        const rti = document.createElement("div"); rti.className = "asr-raw-timing"; rti.textContent = "time: polish " + sec + "s"; rep.appendChild(rti);
+        const useRe = document.createElement("button"); useRe.className = "primary"; useRe.textContent = "Use this";
+        useRe.style.marginTop = "10px";
+        useRe.addEventListener("click", () => { _useInInput(out); ov.remove(); });
+        rep.appendChild(useRe);
+      } catch (e) {
+        rt.textContent = "(failed: " + e + ")";
+      }
+      reBtn.disabled = false; reBtn.textContent = "Re-polish";
+    });
+    acts.appendChild(useRaw); acts.appendChild(reBtn);
+    box.appendChild(acts);
+
     ov.appendChild(box);
-    ov.addEventListener("click", () => ov.remove());
     document.body.appendChild(ov);
   }
   function openSendMenu() {
     const old = document.getElementById("send-menu"); if (old) old.remove();
     const m = document.createElement("div"); m.id = "send-menu"; m.className = "send-menu";
     const items = [
-      ["清空", () => { inputEl.value = ""; inputEl.style.height = "auto"; inputEl.dispatchEvent(new Event("input")); inputEl.focus(); }],
-      ["复制", () => _copyText(inputEl.value)],
-      ["查看 ASR 原文", showAsrRaw],
+      ["Clear", () => { inputEl.value = ""; inputEl.style.height = "auto"; inputEl.dispatchEvent(new Event("input")); inputEl.focus(); }],
+      ["Copy", () => _copyText(inputEl.value)],
+      ["View ASR", showAsrRaw],
     ];
     for (const [label, fn] of items) {
       const b = document.createElement("button"); b.className = "send-menu-item"; b.textContent = label;

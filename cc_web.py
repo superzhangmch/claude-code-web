@@ -3138,6 +3138,7 @@ class PolishPayload(BaseModel):
     text: str
     claude_session_id: str = ""   # optional: pull recent context to rewrite against
     mode: str = ""                # "asr" → text is ASR output: skip pinyin, hint ASR errors
+    conservative: bool = False    # re-polish more conservatively: fix errors only, keep wording
 
 
 class NewSessionPayload(BaseModel):
@@ -5468,6 +5469,25 @@ async def post_polish(payload: PolishPayload):
             "file name misheard. Use the context to fix clearly-wrong / clearly-misrecognized words back to what the "
             "user meant; when unsure, keep it. Don't over-edit.\n"
             "3. Keep already-correct English and proper nouns as-is; don't force ordinary Chinese into English.\n")
+    if payload.conservative:
+        # re-polish pass: the default polish was too aggressive / drifted. Stay as
+        # close to the user's own words as possible — repair only, no restyling.
+        rule1 = (
+            "1. STAY VERY CLOSE to the user's own words. This is a CONSERVATIVE pass: only fix clear "
+            "speech-recognition errors, obvious typos, and broken punctuation. Do NOT reorder, do NOT re-phrase for "
+            "style, do NOT trim or merge — keep the user's original wording, sentence order and phrasing. NEVER add "
+            "an action / requirement / step / detail the user didn't say.\n"
+            "1b. If in doubt whether a change is needed, DON'T change it. The output should read as the user's own "
+            "sentence with errors repaired, not as a rewrite.\n")
+    else:
+        rule1 = (
+            "1. TIDY freely, but ADD NOTHING. You may reorder, trim rambling, merge repetition, and drop filler/"
+            "hedge words to make it read cleanly — don't be timid or cling to the original wording. The ONE hard line: "
+            "never add an action / requirement / step / detail the user didn't say. E.g. if they only say 'change the "
+            "code', do NOT turn it into 'change the code and then commit & push' — just say the same thing better, "
+            "don't finish their thought or guess their next step.\n"
+            "1b. If the draft is ALREADY fluent, clear and natural, leave it essentially unchanged — don't rewrite for "
+            "the sake of rewriting.\n")
     sys_prompt = (
         "The user's input is DICTATED speech, so it is often rambling, disjoint, repetitive, and full of filler "
         "words and speech-recognition errors. Your job is to understand what they mean overall and re-state it as "
@@ -5475,13 +5495,7 @@ async def post_polish(payload: PolishPayload):
         "OUTPUT LANGUAGE: reply in the SAME language as the draft (Chinese draft -> Chinese output; keep any "
         "embedded English). Output ONLY the rewritten message itself — no explanation, no quotes.\n"
         "Rules:\n"
-        "1. TIDY freely, but ADD NOTHING. You may reorder, trim rambling, merge repetition, and drop filler/"
-        "hedge words to make it read cleanly — don't be timid or cling to the original wording. The ONE hard line: "
-        "never add an action / requirement / step / detail the user didn't say. E.g. if they only say 'change the "
-        "code', do NOT turn it into 'change the code and then commit & push' — just say the same thing better, "
-        "don't finish their thought or guess their next step.\n"
-        "1b. If the draft is ALREADY fluent, clear and natural, leave it essentially unchanged — don't rewrite for "
-        "the sake of rewriting.\n"
+        + rule1
         + rule23 +
         "4. Use the given conversation context to grasp intent; drop filler, merge repetition, normalize "
         "punctuation, but keep ALL the real information and requests.\n"
