@@ -56,6 +56,23 @@ python3.11 -m venv .venv
 Enable iTerm2's Python API: Settings → General → Magic → *Enable Python
 API*, then restart iTerm2.
 
+### Dependencies — what each one is for
+
+| Package | Why it's needed |
+|---|---|
+| `fastapi` | The web framework the whole server (routes, auth, JSON API) is built on. |
+| `uvicorn[standard]` | The ASGI server that actually runs the app. The `[standard]` extra pulls in the WebSocket/HTTP speedups **and the TLS support that `--ssl-certfile/--ssl-keyfile` need** — i.e. it's what lets you serve HTTPS (see below). |
+| `iterm2` | iTerm2's Python API — discovers the tabs where `claude` is running, reads each tab's on-screen text, and sends your typed input back into the live tab. **macOS only.** |
+| `websockets` | Transport the iTerm2 Python API talks over (and used by uvicorn). |
+| `pyobjc-framework-Quartz` | Quartz `CGEvent` HID injection + display capture behind the `/remote/` phone-remote — the clicks, typing, scrolling and screenshots. **macOS only.** |
+| `pypinyin` | Voice-input polishing: turns the dictation draft into pinyin so the LLM can recover near-sound mis-recognitions (e.g. 「拉铁克」→ LaTeX) from context. |
+
+**On Linux**, install `requirements-linux.txt` instead: it drops the
+macOS-only `iterm2` + `pyobjc` packages (the **tmux bridge** replaces the
+iTerm2 API there) and adds `python-multipart`. You must also have `tmux`
+installed and run your `claude` sessions **inside tmux** — the server
+auto-selects the tmux bridge on non-macOS. Skip the iTerm2 Python-API step.
+
 ## Configure
 
 Copy the template and fill in your values:
@@ -67,10 +84,13 @@ chmod 600 ~/.claude/cc_web.conf
 $EDITOR ~/.claude/cc_web.conf
 ```
 
-Three sections — `token` (auth, sent as `Authorization: Bearer …`),
-LLM keys (`api_base` / `api_key` / `model`, OpenAI-compatible endpoint
-like LiteLLM/Ollama), and one `cwd=` line per allowed working
-directory for the *New session* button.
+Four sections — `token` (auth, sent as `Authorization: Bearer …`);
+LLM keys (`api_base` / `api_key` / `model`, any OpenAI-compatible
+endpoint like LiteLLM/Ollama) used both for the attach tie-breaker
+**and** to polish voice-input dictation; one `cwd=` line per allowed
+working directory for the *New session* button; and optional `asr=`
+lines (one per speech-to-text backend) that enable the 🎤 voice-input
+button.
 
 ## Run
 
@@ -92,6 +112,46 @@ instead. For local-only testing, `--host 127.0.0.1`.
 Open `http://<that-ip>:8765/`, enter the token, and your active
 sessions show up in the picker. Click `Attach` (or `Enter` if already
 bound) to open one.
+
+## Serve over HTTPS (required for 🎤 voice input)
+
+Plain HTTP is fine for reading and typing. But **browsers only allow
+microphone capture (`getUserMedia`) in a "secure context"** — `https://`
+or `localhost`. Over `http://100.x.x.x:8765` the voice-input button
+cannot record at all (a few other niceties — PWA install, clipboard —
+also prefer a secure context). So if you want voice input, serve HTTPS.
+
+A self-signed cert means a browser warning on every visit. Tailscale
+avoids that entirely: it issues a **real, browser-trusted (Let's Encrypt)
+certificate** for your machine's `*.ts.net` name, so there's zero warning
+and nothing to click through.
+
+One-time: in the Tailscale admin console enable **MagicDNS** and **HTTPS
+Certificates** for your tailnet. Then on the Mac:
+
+```sh
+# 1. your machine's tailnet DNS name (…​.ts.net)
+tailscale status                       # shows <host>.<tailnet>.ts.net
+# 2. fetch a trusted cert for that name (writes <name>.crt / <name>.key)
+tailscale cert <host>.<tailnet>.ts.net
+# 3. run uvicorn with TLS, bound to the Tailscale IP
+.venv/bin/uvicorn cc_web:app \
+  --host "$(tailscale ip -4)" --port 8443 \
+  --ssl-certfile <host>.<tailnet>.ts.net.crt \
+  --ssl-keyfile  <host>.<tailnet>.ts.net.key
+```
+
+Open **`https://<host>.<tailnet>.ts.net:8443/`** — use the DNS *name*,
+not the `100.x` IP, otherwise the cert won't match and the warning comes
+back.
+
+Notes:
+- **Don't front it with `tailscale serve`.** Its HTTP/2 proxy answers
+  `curl` fine but browsers reject it (`ERR_CONNECTION_CLOSED`). Terminate
+  TLS in uvicorn directly, as above.
+- `tailscale cert` certificates expire (~90 days). Re-run `tailscale cert
+  <name>` to renew — easiest is to put that line in your start script so
+  every (re)start refreshes the cert before launching uvicorn.
 
 ## Name your sessions (recommended)
 

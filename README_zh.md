@@ -46,6 +46,23 @@ python3.11 -m venv .venv
 启用 iTerm2 的 Python API: Settings → General → Magic → *Enable
 Python API*，然后重启 iTerm2。
 
+### 依赖说明 — 每个都干嘛的
+
+| 包 | 为什么需要 |
+|---|---|
+| `fastapi` | 整个 server(路由 / 鉴权 / JSON API)所基于的 web 框架。 |
+| `uvicorn[standard]` | 真正跑 app 的 ASGI server。`[standard]` 额外装了 WebSocket/HTTP 加速件**以及 `--ssl-certfile/--ssl-keyfile` 所需的 TLS 支持** —— 也就是能起 HTTPS 靠的就是它(见下)。 |
+| `iterm2` | iTerm2 的 Python API —— 发现哪些 tab 在跑 `claude`、读每个 tab 的屏幕文字、把你输入的内容发回到 live tab。**仅 macOS。** |
+| `websockets` | iTerm2 Python API 走的传输层(uvicorn 也用)。 |
+| `pyobjc-framework-Quartz` | `/remote/` 手机远控背后的 Quartz `CGEvent` HID 注入 + 屏幕截取 —— 点击 / 打字 / 滚动 / 截图。**仅 macOS。** |
+| `pypinyin` | 语音输入的润色:把口述草稿转成拼音,好让 LLM 结合上下文纠回同音/近音误识(如「拉铁克」→ LaTeX)。 |
+
+**Linux 上**改装 `requirements-linux.txt`:它去掉了 macOS 专属的
+`iterm2` + `pyobjc`(那边用 **tmux bridge** 代替 iTerm2 API),并加上
+`python-multipart`。此外还需装好 `tmux`,并把 `claude` session **跑在
+tmux 里** —— server 在非 macOS 上会自动切到 tmux bridge。iTerm2 Python
+API 那步跳过。
+
 ## 配置
 
 复制模板，填上你的真值:
@@ -57,11 +74,16 @@ chmod 600 ~/.claude/cc_web.conf
 $EDITOR ~/.claude/cc_web.conf
 ```
 
-三段配置:
+四段配置:
 - `token` — 鉴权 token，浏览器请求时放在 `Authorization: Bearer …`。
 - LLM 三件套 — `api_base` / `api_key` / `model`，要求是 OpenAI 兼容的
-  chat-completions 端点 (LiteLLM / Ollama / vLLM 等都可以)。
+  chat-completions 端点 (LiteLLM / Ollama / vLLM 等都可以)。既用于
+  attach 时选对 tab 的 tie-breaker，**也用于把语音输入的口述草稿润色**
+  成一条干净消息。留空则两者都关(attach 退回纯启发式;语音仍能录音+
+  识别，只是跳过润色)。
 - `cwd=` 行(可多行) — *New session* 按钮允许在哪几个目录下启 `claude`。
+- `asr=` 行(可多行，选填) — 每行一个语音识别后端，配了才会出现 🎤
+  语音输入按钮。格式 `asr=<label>|<api_base>|<key>|<model>`。
 
 ## 运行
 
@@ -81,6 +103,43 @@ tailscale ip -4
 
 浏览器访问 `http://<那个 IP>:8765/`，输入 token，picker 里就能看到
 当前活跃的 sessions。点 `Attach` (已绑过则显示 `Enter`) 进入。
+
+## 起 HTTPS(🎤 语音输入必需)
+
+只读消息、打字，纯 HTTP 就够。但**浏览器只在"安全上下文"
+(`https://` 或 `localhost`)下才允许麦克风采集(`getUserMedia`)** ——
+通过 `http://100.x.x.x:8765` 访问时语音输入按钮根本没法录音(另外 PWA
+安装、剪贴板等也更依赖安全上下文)。所以想用语音输入,就得起 HTTPS。
+
+自签证书每次访问都要点"信任"警告。Tailscale 干脆免了这一步:它能给
+你机器的 `*.ts.net` 名字签发一张**真正受浏览器信任的(Let's Encrypt)
+证书**,零警告、无需点确认。
+
+一次性准备:在 Tailscale 管理后台为你的 tailnet 打开 **MagicDNS** 和
+**HTTPS Certificates**。然后在 Mac 上:
+
+```sh
+# 1. 看你机器的 tailnet DNS 名字(…​.ts.net)
+tailscale status                       # 显示 <host>.<tailnet>.ts.net
+# 2. 为这个名字取一张受信任证书(生成 <name>.crt / <name>.key)
+tailscale cert <host>.<tailnet>.ts.net
+# 3. 用 TLS 起 uvicorn，绑到 Tailscale IP
+.venv/bin/uvicorn cc_web:app \
+  --host "$(tailscale ip -4)" --port 8443 \
+  --ssl-certfile <host>.<tailnet>.ts.net.crt \
+  --ssl-keyfile  <host>.<tailnet>.ts.net.key
+```
+
+访问 **`https://<host>.<tailnet>.ts.net:8443/`** —— 要用 DNS **名字**,
+别用 `100.x` 的 IP,否则证书对不上、警告又回来了。
+
+注意:
+- **不要用 `tailscale serve` 去代理它。** 它的 HTTP/2 代理 `curl` 能
+  通,但浏览器会拒(`ERR_CONNECTION_CLOSED`)。像上面那样直接在 uvicorn
+  里终结 TLS。
+- `tailscale cert` 的证书会过期(约 90 天)。重跑 `tailscale cert
+  <name>` 续期即可 —— 最省事是把这行放进启动脚本,每次(重)启动前先
+  刷新证书再拉起 uvicorn。
 
 ## 给 session 起名(强烈推荐)
 
