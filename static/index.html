@@ -8,7 +8,7 @@
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Claude" />
-  <meta name="theme-color" content="#000000" />
+  <meta name="theme-color" content="#fdf6e3" />
   <link rel="manifest" href="/static/manifest.webmanifest" />
   <link rel="apple-touch-icon" href="/static/icon-180.png" />
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
@@ -764,6 +764,11 @@ body.pure #closetab-btn.active {
 .sys-item.tool .tool-desc { color: var(--muted); font-family: inherit; font-weight: 400; margin-left: 1px; }
 /* expanded detail matches normal (medium) tool display — not the muted sys grey */
 .msg.system .tool-detail { margin-top: 6px; color: var(--text); }
+.tool-collapse-btn {
+  border: 0; background: transparent; color: var(--muted);
+  font-size: 12px; line-height: 1; padding: 0 4px; cursor: pointer; margin-right: 4px;
+}
+.tool-collapse-btn:hover { color: #ff6a6a; }
 /* liveness heartbeat — pinned after the last message; shows the last changed
    screen line + countdown to next check while claude is busy. */
 #hb {
@@ -1004,7 +1009,7 @@ footer {
 footer .input-row {
   /* 📎 + textarea + Send. align-items:stretch → the two buttons are exactly the
      same height as the input box. */
-  display: flex; align-items: stretch; gap: 8px; padding: 8px 10px;
+  display: flex; align-items: stretch; gap: 4px; padding: 8px 5px;
 }
 footer .input-row > button { flex-shrink: 0; }
 /* 🎤 + 📎 stacked in a column beside the input (frees width for the textarea);
@@ -1702,7 +1707,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #login .err.show { display: block; }
 </style>
 </head>
-<body>
+<body class="light">
   <header>
     <span id="status-dot" class="dot off" style="display:none"></span>
     <div id="meta-stack">
@@ -2419,14 +2424,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   document.getElementById("picker-fontdown").addEventListener("click", () => { pickerScale -= 0.1; applyPickerScale(); });
   applyPickerScale();
 
-  // Light / dark theme toggle (persisted). Dark is the default.
+  // Light / dark theme toggle (persisted). Light is the default.
   // Three themes, cycled by the button: dark → light → pure (e-ink white).
   const THEME_ORDER = ["dark", "light", "pure"];
   const THEME_GLYPH = { dark: "◐", light: "☀", pure: "▢" };
   const THEME_METACOLOR = { dark: "#000000", light: "#fdf6e3", pure: "#ffffff" };
   function applyTheme() {
-    let t = localStorage.getItem("cc_web_theme") || "dark";
-    if (!THEME_ORDER.includes(t)) t = "dark";
+    let t = localStorage.getItem("cc_web_theme") || "light";
+    if (!THEME_ORDER.includes(t)) t = "light";
     document.body.classList.toggle("light", t === "light");
     document.body.classList.toggle("pure", t === "pure");
     const btn = document.getElementById("picker-mode");
@@ -2437,7 +2442,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (meta) meta.setAttribute("content", THEME_METACOLOR[t]);
   }
   function cycleTheme() {
-    let t = localStorage.getItem("cc_web_theme") || "dark";
+    let t = localStorage.getItem("cc_web_theme") || "light";
     const next = THEME_ORDER[(THEME_ORDER.indexOf(t) + 1) % THEME_ORDER.length];
     localStorage.setItem("cc_web_theme", next);
     applyTheme();
@@ -5981,6 +5986,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       callBox.classList.add("wrap-on");        // wrap by default → head+tail fully visible
       const cwrap = makeWrapBtn(callBox); cwrap.classList.add("active");
       const cRow = document.createElement("div"); cRow.className = "rlabel-row";
+      const collapseBtn = document.createElement("button");   // ✕ → collapse this detail
+      collapseBtn.className = "tool-collapse-btn"; collapseBtn.textContent = "✕"; collapseBtn.title = "收起详情";
+      collapseBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        panel.remove();
+        block.querySelectorAll(".sys-item.tool.open").forEach(x => x.classList.remove("open"));
+      });
+      cRow.appendChild(collapseBtn);
       cRow.appendChild(cwrap);
       cRow.appendChild(makeCopyBtn(callRaw));
       panel.appendChild(cRow);
