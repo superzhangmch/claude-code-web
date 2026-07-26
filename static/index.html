@@ -1009,9 +1009,43 @@ footer {
 footer .input-row {
   /* 📎 + textarea + Send. align-items:stretch → the two buttons are exactly the
      same height as the input box. */
+  position: relative;
   display: flex; align-items: stretch; gap: 4px; padding: 8px 5px;
 }
 footer .input-row > button { flex-shrink: 0; }
+/* recording overlay — covers the input row while the mic is capturing; the whole
+   bar is a stop button, with a live elapsed timer + animated level bars. */
+footer .rec-bar {
+  position: absolute; inset: 8px 5px; z-index: 5;
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 12px; border-radius: 10px; cursor: pointer;
+  background: #c0392b; color: #fff; border: 1px solid #c0392b;
+  box-shadow: 0 1px 6px rgba(0,0,0,.18);
+}
+footer .rec-bar .rec-dot {
+  width: 10px; height: 10px; border-radius: 50%; background: #fff; flex-shrink: 0;
+  animation: rec-blink 1s steps(2, start) infinite;
+}
+@keyframes rec-blink { 50% { opacity: .25; } }
+footer .rec-bar .rec-time { font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 600; }
+footer .rec-bar .rec-wave { display: flex; align-items: center; gap: 3px; flex: 1; height: 20px; }
+footer .rec-bar .rec-wave > span {
+  width: 3px; height: 30%; background: rgba(255,255,255,.75); border-radius: 2px;
+  animation: rec-wave 1.1s ease-in-out infinite;
+}
+footer .rec-bar .rec-wave > span:nth-child(2n) { animation-delay: .18s; }
+footer .rec-bar .rec-wave > span:nth-child(3n) { animation-delay: .36s; }
+footer .rec-bar .rec-wave > span:nth-child(4n) { animation-delay: .54s; }
+@keyframes rec-wave { 0%,100% { height: 25%; } 50% { height: 90%; } }
+footer .rec-bar .rec-stop, footer .rec-bar .rec-cancel {
+  flex-shrink: 0; background: rgba(255,255,255,.16); color: #fff;
+  border: 1px solid rgba(255,255,255,.5); border-radius: 7px;
+  font-size: 13px; padding: 5px 12px; cursor: pointer;
+}
+footer .rec-bar .rec-stop:hover, footer .rec-bar .rec-cancel:hover { background: rgba(255,255,255,.3); }
+/* spin the ⏳ while transcribing */
+footer #mic-btn.busy { animation: mic-spin 1.1s linear infinite; }
+@keyframes mic-spin { to { transform: rotate(360deg); } }
 /* 🎤 + 📎 stacked in a column beside the input (frees width for the textarea);
    the column stretches to the input height, each button = half. */
 footer .in-btn-col { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
@@ -1997,6 +2031,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       </div>
       <textarea id="input" placeholder="Reply to Claude…" rows="1"></textarea>
       <button id="send" class="send" title="点击发送 · 长按更多" aria-label="Send">➤</button>
+      <div id="rec-bar" class="rec-bar" style="display:none" title="点击结束录音">
+        <span class="rec-dot"></span>
+        <span id="rec-time" class="rec-time">0:00</span>
+        <div class="rec-wave"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+        <button id="rec-cancel" class="rec-cancel">✕ 取消</button>
+        <button id="rec-stop" class="rec-stop">⏹ 结束</button>
+      </div>
     </div>
     <div id="statusline" style="display:none"></div>
   </footer>
@@ -6927,14 +6968,45 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     } catch {}
   })();
 
+  const recBar = document.getElementById("rec-bar");
+  const recTimeEl = document.getElementById("rec-time");
+  let _recTimer = null, _recStartMs = 0;
+  function _fmtDur(ms) {
+    const s = Math.floor(ms / 1000);
+    return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+  }
+  function _showRecBar() {
+    _recStartMs = Date.now();
+    recTimeEl.textContent = "0:00";
+    recBar.style.display = "flex";
+    clearInterval(_recTimer);
+    _recTimer = setInterval(() => { recTimeEl.textContent = _fmtDur(Date.now() - _recStartMs); }, 250);
+  }
+  function _hideRecBar() {
+    clearInterval(_recTimer); _recTimer = null;
+    recBar.style.display = "none";
+  }
+  let _recCancelled = false;
+  recBar.addEventListener("click", (e) => {   // click bar background (not a button) → stop
+    if (e.target.closest("button")) return;
+    if (_recording) _voiceStop();
+  });
+  document.getElementById("rec-stop").addEventListener("click", (e) => { e.stopPropagation(); _voiceStop(); });
+  document.getElementById("rec-cancel").addEventListener("click", (e) => { e.stopPropagation(); _voiceCancel(); });
+
   function _setMic(state) {   // "idle" | "rec" | "busy"
     micBtn.classList.toggle("recording", state === "rec");
+    micBtn.classList.toggle("busy", state === "busy");
     micBtn.textContent = state === "rec" ? "⏹" : state === "busy" ? "⏳" : "🎤";
     micBtn.disabled = state === "busy";
+    if (state === "rec") _showRecBar(); else _hideRecBar();
   }
 
   async function _voiceStop() {
     if (_mediaRec && _recording) { _recording = false; _mediaRec.stop(); }
+  }
+  async function _voiceCancel() {   // discard the recording — do NOT transcribe
+    if (_mediaRec && _recording) { _recCancelled = true; _recording = false; _mediaRec.stop(); }
   }
   micBtn.addEventListener("click", async () => {
     if (_recording) { _voiceStop(); return; }
@@ -6950,6 +7022,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     _mediaRec.ondataavailable = e => _mediaChunks.push(e.data);
     _mediaRec.onstop = async () => {
       stream.getTracks().forEach(t => t.stop());
+      if (_recCancelled) { _recCancelled = false; _setMic("idle"); return; }   // discarded
       _setMic("busy");
       const blob = new Blob(_mediaChunks, { type: _mediaRec.mimeType });
       if (!blob.size) { _setMic("idle"); return; }
@@ -6996,6 +7069,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         _setMic("idle"); inputEl.focus();
       }
     };
+    _recCancelled = false;
     _mediaRec.start(); _recording = true; _setMic("rec");
   });
 
