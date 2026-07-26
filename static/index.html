@@ -741,6 +741,11 @@ body.pure #closetab-btn.active {
   background: rgba(180,180,180,.16); letter-spacing: .03em; white-space: nowrap;
 }
 .msg.system .sys-sep { color: var(--muted); opacity: .45; }
+.msg.system .sys-item .sys-queued {
+  font-size: 0.72em; font-weight: 700; padding: 0 4px; border-radius: 4px;
+  background: rgba(224,138,90,.20); color: var(--accent); letter-spacing: .04em;
+  text-transform: uppercase; margin-right: 2px;
+}
 /* minimal tool-call stack: tight padding, no header; NARROW + equal gaps top &
    bottom (negative top cancels the previous block's 14px bottom margin). */
 /* tool/sys stack: blend into the page — no border, no panel fill — so it's
@@ -1002,11 +1007,34 @@ footer .input-row {
   display: flex; align-items: stretch; gap: 8px; padding: 8px 10px;
 }
 footer .input-row > button { flex-shrink: 0; }
-/* ✨ + 📎 stacked in a column beside the input (frees horizontal width for the
-   textarea); the column stretches to the input height, each button = half. */
+/* 🎤 + 📎 stacked in a column beside the input (frees width for the textarea);
+   the column stretches to the input height, each button = half. */
 footer .in-btn-col { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
 footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
 footer #mic-btn.recording { background: #c0392b; color: #fff; border-color: #c0392b; }
+/* long-press send → small menu (清空 / 复制 / 查看 ASR 原文) */
+.send-menu {
+  position: fixed; z-index: 210; min-width: 132px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4); overflow: hidden; padding: 4px;
+}
+.send-menu-item {
+  display: block; width: 100%; text-align: left; box-sizing: border-box;
+  background: none; border: 0; color: var(--text); font: inherit; font-size: 14px;
+  padding: 9px 12px; border-radius: 6px; cursor: pointer;
+}
+.send-menu-item:hover, .send-menu-item:active { background: var(--panel2); }
+.asr-raw-ov {
+  position: fixed; inset: 0; z-index: 220; background: rgba(0,0,0,0.86);
+  display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box;
+}
+.asr-raw-box {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  max-width: 92vw; max-height: 80vh; overflow: auto; padding: 14px 16px;
+}
+.asr-raw-box h4 { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.asr-raw-box .asr-raw-text { font-size: 15px; line-height: 1.5; word-break: break-word; white-space: pre-wrap; color: var(--text); }
+.asr-raw-box .asr-raw-timing { margin-top: 10px; font: 12px ui-monospace, Menlo, monospace; color: var(--accent); }
 #mm-asr-sec .asr-opt .asr-model { color: var(--muted); font-size: 11px; }
 footer.hidden { display: none; }
 /* mirror of Claude's bottom status bar — one line under the input, scrolls
@@ -1180,6 +1208,14 @@ footer button.send {
 .tab-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .tab-toast .tt-tab { color: var(--accent); font-weight: 700; }
 .tab-toast .tt-sess { color: var(--text); }
+/* full-size preview of a pending image upload (local dataUrl) */
+.img-preview-ov {
+  position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,0.9);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 12px; box-sizing: border-box; cursor: zoom-out;
+}
+.img-preview-ov img { max-width: 96vw; max-height: 88vh; object-fit: contain; border-radius: 4px; }
+.img-preview-cap { color: #ddd; font-size: 12px; margin-top: 8px; font: 12px ui-monospace, Menlo, monospace; }
 
 #newdlg-cwds, #candidates { display: flex; flex-direction: column; gap: 6px; }
 #newdlg-cwds button {
@@ -1955,7 +1991,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <button id="upload-btn" class="icon" title="Attach image">📎</button>
       </div>
       <textarea id="input" placeholder="Reply to Claude…" rows="1"></textarea>
-      <button id="send" class="send" title="Send" aria-label="Send">➤</button>
+      <button id="send" class="send" title="点击发送 · 长按更多" aria-label="Send">➤</button>
     </div>
     <div id="statusline" style="display:none"></div>
   </footer>
@@ -5880,10 +5916,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const item = document.createElement("span"); item.className = "sys-item";
     if (kind === "sys") {
       const p = parseSysMsg(b.text);
+      // Only badge as "queued" when we CAN'T tell it's a system event (no xml
+      // tag → possibly the user's own queued input). A recognizable system msg
+      // (task-notification/command/…) is obviously not human, so no badge.
+      const hasTag = /^\s*<[a-z][\w-]*/i.test(b.text || "");
+      if (b.queued && !hasTag) {
+        const q = document.createElement("span"); q.className = "sys-queued"; q.textContent = "queued";
+        item.appendChild(q); item.appendChild(document.createTextNode(" "));
+      }
       const tag = document.createElement("span"); tag.className = "sys-tag"; tag.textContent = p.tag;
       item.appendChild(tag);
       item.appendChild(document.createTextNode(" " + p.body));
-      item.title = b.text || "";
+      item.title = (b.queued ? "[queued] " : "") + (b.text || "");
     } else {
       item.classList.add("tool", "tool-click");
       const nm = document.createElement("span"); nm.className = "tool-nm";
@@ -5993,7 +6037,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // Stack consecutive compact rows: System msgs (all modes) and, in BRIEF
     // mode, tool-calls (just the tool name). Same-kind neighbours append into
     // one block instead of each taking a full card.
-    const stackKind = (b.kind === "text" && b.system && !b.queued) ? "sys"
+    const stackKind = (b.kind === "text" && b.system) ? "sys"
       : (b.kind === "tool_use" && renderMode === "brief") ? "tool" : null;
     if (stackKind) {
       if (_lastStack && _lastStack.kind === stackKind) {
@@ -6016,9 +6060,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // and add buttons afterwards.
 
     if (b.kind === "text") {
-      div.className = "msg " + (b.queued ? (b.role + " queued") : (b.system ? "system" : b.role));
-      label.textContent = b.queued ? "Queued" : (b.system ? "System" : (b.role === "user" ? "You" : "Claude"));
-      if (b.queued) label.classList.add("queued-label");
+      // untagged queued (type couldn't be told apart from human input) → its OWN
+      // block (dashed "Queued" box); tagged queued is _system → stacked above.
+      const indieQueued = b.queued && !b.system;
+      div.className = "msg " + (indieQueued ? (b.role + " queued") : (b.system ? "system" : b.role));
+      label.textContent = indieQueued ? "Queued" : (b.system ? "System" : (b.role === "user" ? "You" : "Claude"));
+      if (indieQueued) label.classList.add("queued-label");
       const md = document.createElement("div"); md.className = "markdown";
       md.innerHTML = renderMarkdown(b.text);
       maybeRenderMath(md);
@@ -6716,7 +6763,65 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
                         // re-enables digit/letter shortcuts without a manual tap)
     }
   }
-  sendBtn.addEventListener("click", send);
+  // Send button: short press = submit; LONG press = menu (清空 / 复制 / 查看 ASR 原文).
+  let _sendLpTimer = null, _sendLpFired = false;
+  function _sendLpStart() { _sendLpFired = false; clearTimeout(_sendLpTimer); _sendLpTimer = setTimeout(() => { _sendLpFired = true; openSendMenu(); }, 500); }
+  function _sendLpCancel() { clearTimeout(_sendLpTimer); }
+  sendBtn.addEventListener("pointerdown", _sendLpStart);
+  sendBtn.addEventListener("pointerup", _sendLpCancel);
+  sendBtn.addEventListener("pointerleave", _sendLpCancel);
+  sendBtn.addEventListener("pointercancel", _sendLpCancel);
+  sendBtn.addEventListener("click", (e) => {
+    if (_sendLpFired) { e.preventDefault(); e.stopImmediatePropagation(); _sendLpFired = false; return; }  // long-press → menu already shown
+    send();
+  });
+  sendBtn.addEventListener("contextmenu", (e) => e.preventDefault());   // no OS menu on long-press
+
+  function _copyText(t) {
+    if (navigator.clipboard) { navigator.clipboard.writeText(t).catch(() => {}); return; }
+    const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select(); try { document.execCommand("copy"); } catch {} ta.remove();
+  }
+  function showAsrRaw() {
+    const ov = document.createElement("div"); ov.className = "asr-raw-ov";
+    const box = document.createElement("div"); box.className = "asr-raw-box";
+    if (!lastAsrRaw) {
+      const h = document.createElement("h4"); h.textContent = "(还没有语音识别记录)"; box.appendChild(h);
+    } else {
+      const h1 = document.createElement("h4"); h1.textContent = "ASR 原文(润色前)"; box.appendChild(h1);
+      const t1 = document.createElement("div"); t1.className = "asr-raw-text"; t1.textContent = lastAsrRaw; box.appendChild(t1);
+      const h2 = document.createElement("h4"); h2.textContent = "润色后"; h2.style.marginTop = "14px"; box.appendChild(h2);
+      const t2 = document.createElement("div"); t2.className = "asr-raw-text"; t2.textContent = lastPolished || "(还在润色 / 无变化)"; box.appendChild(t2);
+    }
+    const bits = [];
+    if (lastAsrSec != null) bits.push("ASR " + lastAsrSec + "s");
+    if (lastPolishSec != null) bits.push("polish " + lastPolishSec + "s");
+    if (bits.length) { const ti = document.createElement("div"); ti.className = "asr-raw-timing"; ti.textContent = "耗时:" + bits.join(" · "); box.appendChild(ti); }
+    ov.appendChild(box);
+    ov.addEventListener("click", () => ov.remove());
+    document.body.appendChild(ov);
+  }
+  function openSendMenu() {
+    const old = document.getElementById("send-menu"); if (old) old.remove();
+    const m = document.createElement("div"); m.id = "send-menu"; m.className = "send-menu";
+    const items = [
+      ["清空", () => { inputEl.value = ""; inputEl.style.height = "auto"; inputEl.dispatchEvent(new Event("input")); inputEl.focus(); }],
+      ["复制", () => _copyText(inputEl.value)],
+      ["查看 ASR 原文", showAsrRaw],
+    ];
+    for (const [label, fn] of items) {
+      const b = document.createElement("button"); b.className = "send-menu-item"; b.textContent = label;
+      b.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); fn(); });
+      m.appendChild(b);
+    }
+    document.body.appendChild(m);
+    const r = sendBtn.getBoundingClientRect();
+    m.style.left = Math.max(6, Math.min(r.right - m.offsetWidth, window.innerWidth - m.offsetWidth - 6)) + "px";
+    m.style.top = Math.max(6, r.top - m.offsetHeight - 6) + "px";   // above the send button
+    setTimeout(() => document.addEventListener("click", function onDoc(ev) {
+      if (!m.contains(ev.target) && ev.target !== sendBtn) { m.remove(); document.removeEventListener("click", onDoc); }
+    }), 0);
+  }
   // Portrait (phone) → Enter inserts a newline (default), send via the Send
   // button. Landscape (desktop) → Enter sends, Shift/Opt+Enter insert a newline.
   const isPhone = () => window.innerHeight >= window.innerWidth;
@@ -6777,6 +6882,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // ---------- voice input: record → ASR → polish → fill ----------
   const micBtn = document.getElementById("mic-btn");
   let _mediaRec = null, _mediaChunks = [], _recording = false;
+  let lastAsrRaw = "", lastPolished = "", lastAsrSec = null, lastPolishSec = null;   // long-press debug view
   let asrConfigs = [], asrWhich = localStorage.getItem("cc_asr_which") || "";
 
   function _markAsrCurrent() {
@@ -6835,21 +6941,42 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const blob = new Blob(_mediaChunks, { type: _mediaRec.mimeType });
       if (!blob.size) { _setMic("idle"); return; }
       try {
-        const which = asrWhich ? ("?which=" + encodeURIComponent(asrWhich)) : "";
-        const ar = await authedFetch("/api/asr" + which, { method: "POST", headers: { "content-type": blob.type || "audio/webm" }, body: blob, timeoutMs: 60000 });
+        const qs = new URLSearchParams();
+        if (asrWhich) qs.set("which", asrWhich);
+        if (attachedSid) qs.set("sid", attachedSid);   // context → ASR prompt (bias domain vocab)
+        const asrT0 = Date.now();
+        const ar = await authedFetch("/api/asr?" + qs.toString(), { method: "POST", headers: { "content-type": blob.type || "audio/webm" }, body: blob, timeoutMs: 60000 });
         if (!ar.ok) { alert("识别失败: " + await ar.text()); _setMic("idle"); return; }
-        let text = ((await ar.json()).text || "").trim();
-        if (!text) { _setMic("idle"); return; }
-        // polish (ASR mode: no pinyin, hint possible ASR errors)
+        const asrText = ((await ar.json()).text || "").trim();
+        const asrSec = ((Date.now() - asrT0) / 1000).toFixed(1);
+        if (!asrText) { _setMic("idle"); return; }
+        lastAsrRaw = asrText; lastAsrSec = asrSec; lastPolishSec = null; lastPolished = "";   // for the long-press debug view
+        // 1) show the RAW ASR immediately with its timing; mic stays ⏳ = polishing
+        const before = inputEl.value ? (inputEl.value.replace(/\s*$/, "") + " ") : "";
+        const rawFull = before + asrText + " (ASR: " + asrSec + "s)";
+        inputEl.value = rawFull;
+        inputEl.dispatchEvent(new Event("input"));
+        inputEl.focus();
+        // 2) polish in the background; swap in the CLEAN result (no timing suffix)
+        //    ONLY if the user hasn't edited/sent in the meantime.
         try {
+          const polT0 = Date.now();
           const pr = await authedFetch("/api/polish", {
             method: "POST", headers: { "content-type": "application/json" },
-            body: JSON.stringify({ text, claude_session_id: attachedSid || "", mode: "asr" }), timeoutMs: 60000,
+            body: JSON.stringify({ text: asrText, claude_session_id: attachedSid || "", mode: "asr" }), timeoutMs: 60000,
           });
-          if (pr.ok) { const d = await pr.json(); if (d && d.text) text = d.text; }
+          lastPolishSec = ((Date.now() - polT0) / 1000).toFixed(1);
+          if (pr.ok) {
+            const d = await pr.json();
+            if (d && d.text) {
+              lastPolished = d.text;   // keep for the debug view even if the user already edited/sent
+              if (inputEl.value === rawFull) {
+                inputEl.value = before + d.text;
+                inputEl.dispatchEvent(new Event("input"));
+              }
+            }
+          }
         } catch {}
-        inputEl.value = inputEl.value ? (inputEl.value.replace(/\s*$/, "") + " " + text) : text;
-        inputEl.dispatchEvent(new Event("input"));
       } catch (e) {
         alert(e && e.name === "AbortError" ? "识别超时,请重试" : "识别失败: " + e);
       } finally {
@@ -6878,6 +7005,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const pill = document.createElement("span"); pill.className = "pill";
       if (up.dataUrl) {
         const img = document.createElement("img"); img.src = up.dataUrl;
+        img.style.cursor = "zoom-in";   // click the thumb → full-size preview (local dataUrl, no fetch)
+        img.title = "点击放大查看";
+        img.addEventListener("click", (e) => { e.stopPropagation(); openImagePreview(up.dataUrl, up.name); });
         pill.appendChild(img);
       }
       const nm = document.createElement("span");
@@ -6891,6 +7021,16 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       pill.appendChild(x);
       uploadRow.appendChild(pill);
     });
+  }
+
+  // Full-size preview of a pending upload, straight from the local dataUrl
+  // (what will be sent) — lets you verify the right image before sending.
+  function openImagePreview(dataUrl, name) {
+    const ov = document.createElement("div"); ov.className = "img-preview-ov";
+    const img = document.createElement("img"); img.src = dataUrl; ov.appendChild(img);
+    if (name) { const cap = document.createElement("div"); cap.className = "img-preview-cap"; cap.textContent = name; ov.appendChild(cap); }
+    ov.addEventListener("click", () => ov.remove());
+    document.body.appendChild(ov);
   }
 
   function fileToDataUrl(file) {
