@@ -2698,6 +2698,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   let lastIdx = null;
   let lastEpoch = null;   // server window "epoch" — mismatch → one full resync
   let hasMoreHistory = false;
+  let prevQueuedHuman = new Map();   // last poll's human (untagged) queued items — see commitDroppedQueued
   let claudeIdle = false;
   // ---------- quick-switch tabs (client-side, MRU, memory-capped) ----------
   const MAX_TABS = 5;                    // at most N kept sessions (bounds memory)
@@ -5314,6 +5315,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     refreshMetaName(sid);
     isPaused = false; sessionGone = false;
     warnEl.classList.remove("show");   // clear any stale pid-gone/mismatch banner
+    prevQueuedHuman = new Map();        // reset queued-commit tracker for the new session
     const cached = tabState[sid];
     if (cached) {
       // INSTANT switch — restore from memory, render, no network; then refresh
@@ -6235,6 +6237,42 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     _lastBottomToolUse = savedTool; _lastStack = savedStack;
   }
 
+  // A human-typed message that was QUEUED (sent while Claude was busy) has NO
+  // other record in the jsonl than its `enqueue` op — when Claude later consumes
+  // it, it does NOT become a normal user turn (verified against real logs). The
+  // live `queued` set drops it on dequeue, and the transcript delta can't
+  // re-insert it (its _idx is below the poll cursor, so ingest()'s append filter
+  // drops it) — so it would silently vanish until a full page refresh rebuilt
+  // from a snapshot. Fix: when an UNTAGGED (human) queued item leaves the live
+  // set, COMMIT it into the transcript permanently right here. Tagged/system
+  // ticks (task-notification/command/…) DO reappear as real delta entries, so we
+  // never commit those.
+  function _queuedKey(it) { return (it.timestamp || "") + "|" + (((it.message || {}).content) || ""); }
+  function _entryText(e) {
+    const c = (e.message || {}).content;
+    if (typeof c === "string") return c;
+    if (Array.isArray(c)) return c.map(b => (b && b.type === "text") ? (b.text || "") : "").join("\n");
+    return "";
+  }
+  function commitDroppedQueued(list, isReplace) {
+    const cur = new Map();
+    for (const it of (list || [])) if (!it._system) cur.set(_queuedKey(it), it);
+    if (!isReplace) {   // on a replace the fresh snapshot already carries consumed enqueues inline
+      for (const [k, it] of prevQueuedHuman) {
+        if (cur.has(k)) continue;                                   // still pending
+        const txt = (((it.message || {}).content) || "").trim();
+        if (!txt) continue;
+        if (entryCache.some(e => _entryText(e).trim() === txt)) continue;   // already in transcript
+        entryCache.push(it);                                        // commit permanently
+        const frag = document.createDocumentFragment();
+        renderEntriesInto(frag, [it]);
+        transcriptEl.appendChild(frag);
+        scrollToBottom(); hbReattach();
+      }
+    }
+    prevQueuedHuman = cur;
+  }
+
   // Mirror Claude's bottom status bar under the input. Diff to avoid re-render;
   // null (screen read failed) → keep current. "N shell(s)/monitor(s)" tokens
   // become clickable → popup the actual background commands.
@@ -6676,6 +6714,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // fully hide when hidden/paused/detached.
       syncHeartbeat();
       const entries = m.transcript || [];
+      const didReplace = (lastIdx === null || m.resync);
       if (lastIdx === null || m.resync) {
         // resync: server signalled our cursor is from an old window numbering
         // (restart / rebuild) → replace once instead of a stale-empty delta.
@@ -6695,6 +6734,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
       if (typeof m.since_idx === "number") lastIdx = m.since_idx;
       if (m.epoch) lastEpoch = m.epoch;
+      commitDroppedQueued(m.queued || [], didReplace);   // rescue human queued msgs that left the queue
       renderQueuedRegion(m.queued || []);   // live pending-queue tail (reconciled every poll)
       renderStatusline(m.status_line);      // mirror Claude's bottom status bar
       updatePromptRow(m.pending_confirm);
