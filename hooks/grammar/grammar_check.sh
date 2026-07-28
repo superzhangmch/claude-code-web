@@ -36,6 +36,25 @@ if [ -z "$prompt" ] || [ ${#prompt} -lt 10 ]; then
   exit 0
 fi
 
+# Machine-generated prompts are not user typing: harness-injected XML blocks
+# (<task-notification> etc.) and peer-bridge messages ([⇄ from peer ...]).
+if [[ "$prompt" =~ ^[[:space:]]*\<[a-zA-Z_-]+\> ]] || [[ "$prompt" == "[⇄"* ]]; then
+  echo "[$(date '+%H:%M:%S')] SKIP: machine-generated (xml/peer prefix)" >> "$LOG"
+  echo "" > "$OUT"
+  exit 0
+fi
+
+# Dedup: cron/loop/watcher prompts replay the same text verbatim — correcting
+# it again is redundant. Skip if this exact prompt was already corrected once.
+# (Hash is recorded only AFTER a successful correction, so a prompt skipped for
+# other reasons — e.g. display asleep — still gets corrected when retyped.)
+SEEN=/tmp/grammar_seen_hashes
+prompt_hash=$(printf '%s' "$prompt" | md5)
+if grep -qxF "$prompt_hash" "$SEEN" 2>/dev/null; then
+  echo "[$(date '+%H:%M:%S')] SKIP: duplicate of an already-corrected prompt" >> "$LOG"
+  exit 0
+fi
+
 # Long input (>250 chars): truncate to head 100 + tail 100 with a skipped-count marker
 if [ ${#prompt} -gt 250 ]; then
   prompt=$(printf '%s' "$prompt" | "$PY" -c 'import sys; s=sys.stdin.read(); print(f"{s[:100]} [..{len(s)-200} chars skipped..] {s[-100:]}")')
@@ -119,6 +138,9 @@ echo "[$(date '+%H:%M:%S')] corrected: ${corrected:0:80}" >> "$LOG"
 
 if [ -n "$corrected" ] && [ "$corrected" != "$prompt" ]; then
   echo "$corrected" > "$OUT"
+  # Mark as corrected so verbatim replays (cron/watcher ticks) skip the LLM.
+  printf '%s\n' "$prompt_hash" >> "$SEEN"
+  tail -n 300 "$SEEN" > "$SEEN.tmp" && mv "$SEEN.tmp" "$SEEN"
 else
   echo "" > "$OUT"
 fi
