@@ -698,7 +698,9 @@ body.pure #closetab-btn.active {
 .msg.user {
   border-left-color: var(--accent);
   background: #14171f; color: #9aa0ab;
-  margin-left: 32px;
+  /* Big indent: user requests are pushed well to the right so they're instantly
+     recognizable vs the edge-hugging responses. Scales with width, capped wide. */
+  margin-left: min(42%, 340px);
 }
 .msg.user .markdown { color: #9aa0ab; }
 /* Queued: a real "You"-style message still pending in the queue. Same layout as
@@ -746,6 +748,9 @@ body.pure #closetab-btn.active {
   white-space: pre-wrap;
 }
 .msg .grammar-hint .gh-mark { color: var(--accent); font-weight: 700; margin-right: 4px; }
+.msg .grammar-hint .gh-row { display: block; }
+.msg .grammar-hint .gh-row + .gh-row { margin-top: 4px; }
+.msg .grammar-hint .gh-label { color: var(--muted); font-weight: 700; font-size: 0.9em; margin-right: 3px; }
 /* stacked compact rows (System msgs / brief tool-calls) — INLINE flow, wraps */
 .msg.system .sys-lines { font-size: 0.75em; line-height: 1.55; color: var(--muted); word-break: break-word; }
 .msg.system .sys-item { }
@@ -808,9 +813,15 @@ body.light .msg.system.stack-tool { background: var(--panel2); }
 #hb .hb-txt { flex: 1; min-width: 0; }
 #hb .hb-txt .hb-ln { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #hb .hb-cd { flex-shrink: 0; opacity: .6; white-space: nowrap; }
-/* idle (frozen): keep the last diff shown, static dimmed dot, no pulse */
-#hb.idle .hb-dot { animation: none; opacity: .4; }
-#hb.idle { opacity: .8; }
+/* idle (frozen): keep the last diff shown; the pulsing dot becomes a static
+   green ✓ so "idle / done" reads at a glance — no squinting at a blink. */
+#hb.idle .hb-dot {
+  animation: none; opacity: 1;
+  width: auto; height: auto; margin-top: 1px; background: none; border-radius: 0;
+  color: #6ee884; font-weight: 700; font-size: 12px; line-height: 1;
+}
+#hb.idle .hb-dot::before { content: "✓"; }
+#hb.idle { opacity: .9; }
 @keyframes hbpulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
 .msg .markdown p { margin: 0 0 .7em 0; }
 .msg .markdown p:last-child { margin-bottom: 0; }
@@ -1554,7 +1565,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
      blank so more text fits on the small screen. */
   main { padding: 8px 2px; }
   .msg { padding: 9px 7px; }
-  .msg.user { margin-left: 14px; }
+  .msg.user { margin-left: 10%; }   /* phone: light indent — enough to spot, keeps text width */
 }
 
 #files-modal .modal-card.files-card {
@@ -2729,7 +2740,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   let lastEpoch = null;   // server window "epoch" — mismatch → one full resync
   let hasMoreHistory = false;
   let inputFromVoice = false;          // last input came from voice/ASR → skip grammar correction
-  const grammarMap = new Map();        // normalized sent text → learning correction (see fireGrammar)
+  const grammarMap = new Map();        // normalized sent text → auto learning correction (see fireGrammar)
+  const manualGrammarMap = new Map();  // ✎-button on-demand correction (aggressive idiomatic, separate cache)
   let claudeIdle = false;
   // ---------- quick-switch tabs (client-side, MRU, memory-capped) ----------
   const MAX_TABS = 5;                    // at most N kept sessions (bounds memory)
@@ -6262,6 +6274,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       maybeRenderMath(md);
       role.appendChild(makeLinksBtn(() => rawTextFor(b)));
       if (extractCommands(rawTextFor(b)).length) role.appendChild(makeCmdsBtn(() => rawTextFor(b)));
+      if (b.role === "user" && !b.system) role.appendChild(makeCorrectBtn(div, b.text));
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
       div.appendChild(role); div.appendChild(md);
       // Your own typed message → attach the English-learning correction if we have
@@ -6467,6 +6480,47 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       grammarMap.set(key, corr);
       _applyGrammar(key, corr);
     } catch {}
+  }
+  // On-demand ✎ button on a user-request block: correct/translate THIS message
+  // regardless of language (no gate), up to 500 chars. Shows the result inline
+  // (or a "looks natural" note when there's nothing to fix).
+  function _showManualCorrection(div, res) {
+    const ex = div.querySelector(".grammar-hint"); if (ex) ex.remove();   // replace any existing
+    res = res || {};
+    const box = document.createElement("div"); box.className = "grammar-hint";
+    const row = (mark, label, text) => {
+      const r = document.createElement("div"); r.className = "gh-row";
+      const m = document.createElement("span"); m.className = "gh-mark"; m.textContent = mark;
+      const l = document.createElement("span"); l.className = "gh-label"; l.textContent = label;
+      r.appendChild(m); r.appendChild(l); r.appendChild(document.createTextNode(text));
+      box.appendChild(r);
+    };
+    if (res.correction) row("✎", "批改 ", res.correction);   // teacher's correction (lenient; English only)
+    if (res.native) row("🗣", "地道 ", res.native);           // native version (or the translation for Chinese)
+    if (!res.correction && !res.native) row("✓", "", "looks natural — no changes");
+    div.appendChild(box);
+  }
+  function makeCorrectBtn(div, text) {
+    const btn = document.createElement("button");
+    btn.className = "copy-btn"; btn.title = "Correct / translate this message (English learning)";
+    btn.textContent = "✎";
+    btn.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      const key = (text || "").trim(); if (!key) return;
+      if (manualGrammarMap.has(key)) { _showManualCorrection(div, manualGrammarMap.get(key)); return; }
+      const prev = btn.textContent; btn.textContent = "⏳"; btn.disabled = true;
+      try {
+        const r = await authedFetch("/api/grammar", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: key, manual: true }), timeoutMs: 30000,
+        });
+        let res = { correction: "", native: "" };
+        if (r.ok) { const j = await r.json(); res = { correction: (j.correction || "").trim(), native: (j.native || "").trim() }; }
+        manualGrammarMap.set(key, res);
+        _showManualCorrection(div, res);
+      } catch {} finally { btn.textContent = prev; btn.disabled = false; }
+    });
+    return btn;
   }
 
   // Mirror Claude's bottom status bar under the input. Diff to avoid re-render;
