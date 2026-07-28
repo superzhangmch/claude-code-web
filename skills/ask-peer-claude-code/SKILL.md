@@ -65,6 +65,9 @@ session,也**不要"无缘无故"**找一个陌生 session 交流 —— 没有�
   那是另一个 claude-code 在问你 —— **直接正常回答即可**。对方正在轮询你的 transcript,
   你答完(回合结束)它**自动就能看到**,你**不需要运行任何东西去"发回去"**。只有当你想
   **主动发起一次新的**询问时,才自己调用本 skill。
+  - **若来信带 `req=<id>`**:在你回复的**开头**加一行
+    `[⇄ from peer claude <你的id> (name) re req=<id>]`,好让对方把回复和请求对上号
+    (它可能同时在等好几条)。不带 `req=` 就正常回答,无需加。
 - 想让对方以后能主动找你:在回复里带上你自己的 session id + host(用
   `my-session-id` skill 拿自己的 id)。
 
@@ -93,11 +96,32 @@ PY=~/.claude/skills/ask-peer-claude-code/ask_peer.py
 echo "你现在在干啥?进度如何?" | python3 "$PY" --to <PEER_SID> --from <MY_SID>
 # DELEGATE a task — confirm delivery and return immediately (no reply awaited):
 echo "帮我把 X 跑一下,做完自己收尾" | python3 "$PY" --to <PEER_SID> --from <MY_SID> --no-wait
-# peek only (what is it doing right now? — no message sent):
+# peek only (what is it doing right now? — no message sent). Now also returns an
+# `activity` line: "Bash[desc] · Read[path] · Edit[path]" (same as the web brief):
 python3 "$PY" --to <PEER_SID> --no-send
+# READ the peer's transcript (brief: text + tool activity), last --rounds rounds:
+python3 "$PY" --to <PEER_SID> --history --rounds 6
+#   page FURTHER back (load-earlier) with the `earliest_idx` it returned:
+python3 "$PY" --to <PEER_SID> --history --rounds 6 --before <earliest_idx>
+# read the peer's CURRENT TUI screen (snapshot, non-intrusive — refresh=false):
+python3 "$PY" --to <PEER_SID> --screen
 # pin a host explicitly if you already know it:
 python3 "$PY" --to <PEER_SID> --host <IP> --no-send
 ```
+
+### Read-only modes (peek / history / screen)
+All three send **nothing** — safe to read a peer you're already in contact with
+(still bound by the "don't 串门" rule above: don't read strangers unprompted).
+- **`--no-send`** → `status:peek` + `idle` / `pending_confirm` / recent `reply`
+  text / **`activity`** (`Bash[…] · Read[…]`, the last --rounds rounds).
+- **`--history`** → `status:history` + a readable brief transcript (`[human]` /
+  `[claude]` text + a `· Tool[…]` line per turn) + `earliest_idx` +
+  `has_more_history`. **Bounded per call** to `--rounds`; page back by re-calling
+  with `--before <earliest_idx>` (reuses `/api/state` before_idx paging — the same
+  windowing the web's "load earlier" uses; concurrency-safe). NEVER pulls a whole
+  huge session at once.
+- **`--screen`** → `status:screen` + `screen` (current TUI view only, ~200 lines).
+  Use for a menu/modal the transcript doesn't capture; NOT for history.
 
 > Reminder: the first form waits (up to `--timeout`) for the peer's turn to end.
 > Run it **in the background** (Bash `run_in_background: true`) — never foreground —
@@ -114,11 +138,24 @@ hosts configured in `~/.claude/cc_web.conf` (`hosts=<ip1>,<ip2>`) or
 not a human) · `--from-name` an OPTIONAL human name for the tag (defaults to
 `name=` in `~/.claude/cc_web.conf` / `$CC_WEB_NAME`) — just so the user can
 recognize / refer to the peer without memorizing the id; omit it and the tag is
-id-only · `--timeout` sec (default 480) · `--mode brief|medium` ·
-`--no-send` peek · `--no-wait` fire-and-confirm delivery (task delegation),
-`--deliver-timeout` sec (default 20). **Every message is auto-tagged
-`[⇄ from peer claude <id> (name)]` — there is no raw/untagged send** (removed on
-purpose: an untagged message would be indistinguishable from a human's).
+id-only · `--timeout` sec (default 480) · `--mode brief|medium` · `--rounds N` window size
+(default 4) · `--no-send` peek (+`activity`) · `--history` read transcript
+(paginate with `--before <idx>`) · `--screen` current TUI snapshot · `--no-wait`
+fire-and-confirm delivery (task delegation), `--deliver-timeout` sec (default 20) ·
+`--req <id>` correlation id for concurrent/threaded exchanges (see below).
+**Every message is auto-tagged `[⇄ from peer claude <id> (name)]` — there is no
+raw/untagged send** (removed on purpose: an untagged message would be
+indistinguishable from a human's).
+
+### Correlation id (`--req`) — only for concurrent / multi-peer
+Plain 1:1 Q&A does NOT need this (the caller already knows whom it read and which
+single request is in flight). Use it when you have **several requests in flight**
+(same peer, or multiple peers) and need to match reply↔request instead of guessing
+by timing. When `--req ab12` is set the sent tag becomes
+`[⇄ from peer claude <id> (name) req=ab12]`, and the caller's result carries
+`req_matched` (whether the reply echoed it). **Responder duty:** if a message you
+receive carries `req=<id>`, START your reply with
+`[⇄ from peer claude <your-id> (name) re req=<id>]` so the caller can demux.
 
 ## Handling the result `status`
 - **sent** (`--no-wait`) → delivered. `delivered:true` = the peer recorded it as a
@@ -133,8 +170,9 @@ purpose: an untagged message would be indistinguishable from a human's).
   `继续` (a normal tagged message) to make it retry.
 - **timeout** → peer still working after the window; peek again later or raise `--timeout`.
 - If `brief` is unclear, ask it directly ("你现在在干啥?") or add `--mode medium`,
-  or grab a screen snapshot: `GET /api/screen?claude_session_id=<SID>` (current
-  screen only — TUI scrollback is noisy, use as a snapshot not history).
+  read further back with `--history`/`--before`, or grab a screen snapshot with
+  `--screen` (current screen only — TUI scrollback is noisy, use as a snapshot not
+  history).
 
 ## Notes
 - Each message gets a short tag `[⇄ from peer claude <id8>]` so the peer can tell it's

@@ -8,17 +8,27 @@ comes from cc-web's own `claude_idle` + `pending_confirm`. Nothing here scrolls
 or disturbs the peer beyond delivering the message.
 
 Usage:
-  ask_peer.py --to <SID> [--host IP] [--token T] [--from SID]
+  ask_peer.py --to <SID> [--host IP] [--token T] [--from SID] [--req ID]
               [--timeout SEC] [--mode brief|medium] [--rounds N]
-              [--no-send] [--no-wait] [MESSAGE]
+              [--no-send] [--no-wait] [--history [--before IDX]] [--screen]
+              [MESSAGE]
 
   MESSAGE from arg or stdin (stdin avoids all shell-quoting issues — preferred
-  for multi-line / code). --no-send just reads current state (peek). Every sent
-  message is tagged "[⇄ from peer claude <id>]" — there is no untagged send.
+  for multi-line / code). Every sent message is tagged "[⇄ from peer claude
+  <id>]" — there is no untagged send.
 
-Output: one JSON object:
-  {status, reply, pending_confirm, idle, elapsed, since_idx, note}
-  status ∈ done | pending_confirm | timeout | maybe_error | peek
+Read-only modes (no message sent):
+  --no-send   peek: current idle/pending state + recent assistant text + a
+              tool-activity line ("Bash[…] · Read[…]", same as the web brief).
+  --history   dump the last --rounds rounds (brief: text + tool activity); page
+              further back with --before <earliest_idx> (reuses /api/state
+              before_idx paging — bounded per call, concurrency-safe).
+  --screen    the peer's current TUI screen snapshot (refresh=false, non-
+              intrusive; current view only, not history).
+
+Output: one JSON object. status ∈
+  done | pending_confirm | timeout | maybe_error | peek | sent | history | screen
+  (done/peek also carry `activity`; done carries `req`/`req_matched` if --req set.)
 """
 import argparse, json, os, re, sys, time, urllib.request, urllib.error
 
@@ -162,6 +172,70 @@ def _assistant_text(state):
     return "\n\n".join(out)
 
 
+def _entry_text(e):
+    c = (e.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return c.strip()
+    if isinstance(c, list):
+        return "\n".join(b.get("text", "") for b in c
+                         if isinstance(b, dict) and b.get("type") == "text").strip()
+    return ""
+
+
+def _tool_calls(e):
+    """['Bash[desc]', 'Read[path]', …] for the tool_use blocks in an assistant
+    entry. Reuses the name + one-line `desc` cc-web's brief view already computes
+    server-side (_trim_brief/_tool_summary) — same thing the web shows."""
+    out = []
+    c = (e.get("message") or {}).get("content")
+    if isinstance(c, list):
+        for b in c:
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                nm = b.get("name") or "?"
+                desc = b.get("desc")
+                out.append(f"{nm}[{desc}]" if desc else nm)
+    return out
+
+
+def _activity(state):
+    """Compact tool-activity line across the assistant turns in the window —
+    'Bash[…] · Read[…]' — mirroring the web brief view."""
+    calls = []
+    for e in state.get("transcript", []):
+        if e.get("_system"):
+            continue
+        if (e.get("type") or (e.get("message") or {}).get("role")) != "assistant":
+            continue
+        calls.extend(_tool_calls(e))
+    return " · ".join(calls)
+
+
+def _render_transcript(state):
+    """Human-readable brief transcript for --history: interleaved
+    [human]/[claude] text + a '· Tool[…]' line per assistant turn. Skips the
+    'Queued' enqueue placeholders (their delivery renders separately) so there's
+    no double; keeps _qcmd (a delivered queued msg) as a normal human turn."""
+    lines = []
+    for e in state.get("transcript", []):
+        if e.get("_queued"):
+            continue
+        role = e.get("type") or (e.get("message") or {}).get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = _entry_text(e)
+        if role == "user":
+            label = "sys" if e.get("_system") else "human"
+            if text:
+                lines.append(f"[{label}] {text}")
+        else:
+            if text:
+                lines.append(f"[claude] {text}")
+            tools = _tool_calls(e)
+            if tools:
+                lines.append("  · " + " · ".join(tools))
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--to", required=True)
@@ -175,6 +249,19 @@ def main():
     ap.add_argument("--interval", type=float, default=3)
     ap.add_argument("--mode", default="brief")
     ap.add_argument("--rounds", type=int, default=4)
+    ap.add_argument("--history", action="store_true",
+                    help="read-only: dump the last --rounds rounds of the peer's transcript "
+                         "(brief: text + tool activity). Page further back with --before <idx>.")
+    ap.add_argument("--before", type=int, default=None,
+                    help="with --history: fetch the rounds just BEFORE this _idx (load-earlier); "
+                         "reuses /api/state's before_idx paging (same as the web).")
+    ap.add_argument("--screen", action="store_true",
+                    help="read-only: return the peer's CURRENT TUI screen snapshot "
+                         "(refresh=false → non-intrusive). Current view only, not history.")
+    ap.add_argument("--req", default=None,
+                    help="correlation id: tag gets 'req=<id>' and the peer is asked to echo "
+                         "'re req=<id>' so concurrent replies can be demuxed (see SKILL.md). "
+                         "Optional — 1:1 Q&A doesn't need it.")
     ap.add_argument("--no-send", action="store_true")
     ap.add_argument("--no-wait", action="store_true",
                     help="fire-and-confirm: send, confirm delivery (message landed "
@@ -210,6 +297,46 @@ def main():
     a.to = full
     base = f"http://{host}:8765"
 
+    # --screen: current TUI screen snapshot (read-only, non-intrusive). refresh=false
+    # so we never send Ctrl+L to the peer's tab; delta defaults off so concurrent
+    # readers don't share/clobber a per-session delta baseline. Current view only.
+    if a.screen:
+        try:
+            scr = _req("GET", f"{base}/api/screen?claude_session_id={a.to}&refresh=false",
+                       token, timeout=30)
+        except Exception as e:
+            print(json.dumps({"status": "error", "note": f"cannot read screen: {e}"}))
+            return
+        print(json.dumps({"status": "screen", "host": host,
+                          "screen": scr.get("screen", "")}, ensure_ascii=False))
+        return
+
+    # --history: paginated transcript read. Reuses /api/state windowing —
+    # rounds=tail, before_idx=page-earlier (same mechanism the web's "load earlier"
+    # uses; concurrency-safe, cursor is client-held). Each call is BOUNDED to
+    # --rounds; page further back by re-calling with --before <earliest_idx>.
+    if a.history:
+        url = f"{base}/api/state?claude_session_id={a.to}&mode={a.mode}&rounds={a.rounds}"
+        if a.before is not None:
+            url += f"&before_idx={a.before}"
+        try:
+            st = _req("GET", url, token, timeout=30)
+        except Exception as e:
+            print(json.dumps({"status": "error", "note": f"cannot reach {base}: {e}"}))
+            return
+        tr = st.get("transcript", [])
+        earliest = tr[0].get("_idx") if tr else None
+        more = st.get("has_more_history")
+        print(json.dumps({"status": "history", "host": host,
+                          "transcript": _render_transcript(st),
+                          "earliest_idx": earliest, "has_more_history": more,
+                          "epoch": st.get("epoch"),
+                          "note": (f"more earlier history exists — page back with "
+                                   f"--before {earliest}" if more and earliest is not None
+                                   else "reached the earliest history")},
+                         ensure_ascii=False))
+        return
+
     def state(since=None):
         url = (f"{base}/api/state?claude_session_id={a.to}"
                f"&mode={a.mode}&rounds={a.rounds}")
@@ -229,6 +356,7 @@ def main():
         print(json.dumps({"status": "peek", "host": host, "idle": st0.get("claude_idle"),
                           "pending_confirm": st0.get("pending_confirm"),
                           "since_idx": baseline,
+                          "activity": _activity(st0),
                           "reply": _assistant_text(st0)}, ensure_ascii=False))
         return
 
@@ -247,9 +375,14 @@ def main():
         who += f" {a.frm[:8]}"
     if name:
         who += f" ({name})"
+    # Optional correlation id: when set, the peer is asked (see SKILL.md) to start
+    # its reply with "[⇄ from peer claude <own-id> (name) re req=<id>]" so a caller
+    # with several requests in flight can match reply↔request instead of guessing
+    # by timing. Omitted for plain 1:1 Q&A (the caller already knows which/whom).
+    req_tag = f" req={a.req}" if a.req else ""
     # Header tag + an explicit END marker, so the peer knows exactly where our
     # relayed text stops — anything AFTER the end marker is the human user, not us.
-    msg = f"[⇄ from peer claude{who}] {msg}\n[⇄ end of peer message]"
+    msg = f"[⇄ from peer claude{who}{req_tag}] {msg}\n[⇄ end of peer message]"
 
     # Don't clobber a human who is mid-typing: if the peer's input box holds real
     # typed text (ghost/placeholder excluded — see /api/input-state), wait it out
@@ -336,11 +469,16 @@ def main():
                 status = "maybe_error" if _ERR_RE.search(reply[-400:]) else "done"
                 note = ("looks like an API/error state — consider re-sending '继续'"
                         if status == "maybe_error" else "")
-                print(json.dumps({"status": status, "host": host, "reply": reply,
-                                  "idle": True, "pending_confirm": None,
-                                  "elapsed": round(time.time() - t0, 1),
-                                  "since_idx": st.get("since_idx", baseline),
-                                  "note": note}, ensure_ascii=False))
+                out = {"status": status, "host": host, "reply": reply,
+                       "activity": _activity(st),
+                       "idle": True, "pending_confirm": None,
+                       "elapsed": round(time.time() - t0, 1),
+                       "since_idx": st.get("since_idx", baseline),
+                       "note": note}
+                if a.req:
+                    out["req"] = a.req
+                    out["req_matched"] = (f"re req={a.req}" in reply)
+                print(json.dumps(out, ensure_ascii=False))
                 return
         else:
             idle_streak = 0
