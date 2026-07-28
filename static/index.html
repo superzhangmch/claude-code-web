@@ -732,6 +732,15 @@ body.pure #closetab-btn.active {
 .msg .copy-btn svg { display: block; }
 .msg .copy-btn.done { color: #6ee884; }
 .msg .markdown { word-break: break-word; }
+/* English-learning correction hint, shown inside your own sent message box when
+   what you typed had real mistakes (empty/absent when it was already correct). */
+.msg .grammar-hint {
+  margin-top: 7px; padding: 5px 9px; border-left: 3px solid var(--accent);
+  background: var(--panel2); border-radius: 4px;
+  font-size: 0.82em; line-height: 1.55; color: var(--text); word-break: break-word;
+  white-space: pre-wrap;
+}
+.msg .grammar-hint .gh-mark { color: var(--accent); font-weight: 700; margin-right: 4px; }
 /* stacked compact rows (System msgs / brief tool-calls) — INLINE flow, wraps */
 .msg.system .sys-lines { font-size: 0.75em; line-height: 1.55; color: var(--muted); word-break: break-word; }
 .msg.system .sys-item { }
@@ -2698,6 +2707,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   let lastIdx = null;
   let lastEpoch = null;   // server window "epoch" — mismatch → one full resync
   let hasMoreHistory = false;
+  let inputFromVoice = false;          // last input came from voice/ASR → skip grammar correction
+  const grammarMap = new Map();        // normalized sent text → learning correction (see fireGrammar)
   let claudeIdle = false;
   // ---------- quick-switch tabs (client-side, MRU, memory-capped) ----------
   const MAX_TABS = 5;                    // at most N kept sessions (bounds memory)
@@ -6140,6 +6151,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       role.appendChild(makeLinksBtn(() => rawTextFor(b)));
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
       div.appendChild(role); div.appendChild(md);
+      // your own typed message → attach an English-learning correction if we have one
+      if (b.role === "user" && !b.system && !indieQueued) _attachGrammar(div, b.text);
       _lastBottomToolUse = null;
     } else if (b.kind === "tool_use") {
       div.className = "msg tool"; label.textContent = "Tool call";
@@ -6262,6 +6275,56 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       transcriptEl.appendChild(frag);
       scrollToBottom(); hbReattach();
     }
+  }
+
+  // ---------- English-learning correction (shown inside your own sent msg) ----------
+  // On send, if the message is English-dominant (and not voice-originated, not
+  // trivially short), we async-ask /api/grammar for a CORRECTION — real mistakes
+  // only; already-correct text returns empty and shows nothing. The result is
+  // injected into that message's box once it renders (client-only, not persisted).
+  function _gkHash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0; return "g" + h; }
+  function _isEnglishDominant(s) {
+    const letters = (s.match(/[A-Za-z]/g) || []).length;
+    let cjk = 0; for (const c of s) if (c >= "一" && c <= "鿿") cjk++;
+    return letters > 2 && letters >= cjk;      // mirrors the grammar hook's gate
+  }
+  function _shouldGrammarCheck(s) {
+    s = (s || "").trim();
+    if (s.length < 10) return false;                              // too short
+    if (s.split(/\s+/).filter(Boolean).length <= 2) return false; // ≤2 words ("go on", "perfect")
+    return _isEnglishDominant(s);
+  }
+  function _grammarLine(correction) {
+    const d = document.createElement("div"); d.className = "grammar-hint";
+    const m = document.createElement("span"); m.className = "gh-mark"; m.textContent = "✎";
+    d.appendChild(m); d.appendChild(document.createTextNode(correction));
+    return d;
+  }
+  function _attachGrammar(div, text) {          // called from renderBlock for your own msgs
+    const key = (text || "").trim();
+    div.dataset.gk = _gkHash(key);
+    const corr = grammarMap.get(key);
+    if (corr && !div.querySelector(".grammar-hint")) div.appendChild(_grammarLine(corr));
+  }
+  function _applyGrammar(key, correction) {     // inject into already-rendered box(es)
+    const sel = '[data-gk="' + _gkHash(key) + '"]';
+    for (const el of transcriptEl.querySelectorAll(sel))
+      if (!el.querySelector(".grammar-hint")) el.appendChild(_grammarLine(correction));
+  }
+  async function fireGrammar(text) {
+    const key = (text || "").trim();
+    if (grammarMap.has(key)) { _applyGrammar(key, grammarMap.get(key)); return; }
+    try {
+      const r = await authedFetch("/api/grammar", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: key }), timeoutMs: 30000,
+      });
+      if (!r.ok) return;
+      const corr = ((await r.json()).correction || "").trim();
+      if (!corr) return;                        // already correct → show nothing
+      grammarMap.set(key, corr);
+      _applyGrammar(key, corr);
+    } catch {}
   }
 
   // Mirror Claude's bottom status bar under the input. Diff to avoid re-render;
@@ -6849,6 +6912,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         body: JSON.stringify({ claude_session_id: attachedSid, text: body }),
       });
       if (resp.ok) {
+        // English-learning correction: fire async on the text we just sent, so it
+        // can be injected into that message's box when it renders. Skip voice-
+        // originated (already model output), attachments, and trivially short.
+        if (!attachPrefix && !inputFromVoice && _shouldGrammarCheck(text)) fireGrammar(text);
+        inputFromVoice = false;
         inputEl.value = ""; inputEl.style.height = "auto";
         pendingUploads = []; renderUploadRow();
         keepAlive(); schedulePoll(400);
@@ -6882,8 +6950,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
     document.body.appendChild(ta); ta.select(); try { document.execCommand("copy"); } catch {} ta.remove();
   }
-  function _useInInput(text) {   // replace the whole input with the chosen text
+  function _useInInput(text) {   // replace the whole input with the chosen text (ASR popup)
     inputEl.value = text; inputEl.style.height = "auto";
+    inputFromVoice = true;   // ASR-originated → no grammar correction on send
     inputEl.dispatchEvent(new Event("input"));
     inputEl.focus();
   }
@@ -6988,6 +7057,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     inputEl.style.height = "auto";
     inputEl.style.height = Math.max(44, Math.min(inputEl.scrollHeight, window.innerHeight * 0.4)) + "px";
   });
+  // Real user edits fire beforeinput (programmatic .value= / dispatched events do
+  // NOT) → any manual typing/paste clears the voice-origin flag so an edited
+  // voice draft gets grammar-checked like normal typing.
+  inputEl.addEventListener("beforeinput", () => { inputFromVoice = false; });
 
   // ✨ polish: send the input text to the LLM to tidy dictated/voice-typed text,
   // replace the box with the cleaned version (review before you send).
@@ -7128,6 +7201,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         const before = inputEl.value ? (inputEl.value.replace(/\s*$/, "") + " ") : "";
         const rawFull = before + asrText + " (ASR: " + asrSec + "s)";
         inputEl.value = rawFull;
+        inputFromVoice = true;   // voice-originated → no grammar correction on send
         inputEl.dispatchEvent(new Event("input"));
         inputEl.focus();
         // 2) polish in the background; swap in the CLEAN result (no timing suffix)
