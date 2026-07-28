@@ -6221,33 +6221,67 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
 
   // Client-side queued dedup. The server sends everything in order — a HUMAN
-  // enqueue as an inline "Queued" block, plus every real user turn. When a msg
-  // that was queued later gets PROCESSED it re-appears as a normal user turn; we
-  // pair them (strict exact text, only user turns, one-to-one, enqueue BEFORE
-  // turn) and HIDE the "Queued" placeholder — keeping the processed turn at its
-  // real position. Unmatched queued msgs (cancelled / sent-without-a-turn) stay
-  // shown as "Queued" at their own position. Window-local: only pairs what we've
-  // loaded, so starting mid-file / loading earlier is fine.
-  function _userTurnText(e) {
-    if (!e || e.type !== "user" || e.isMeta || e._queued) return "";
+  // enqueue as an inline "Queued" placeholder; the DELIVERED form of a queued msg
+  // is EITHER a `queued_command` (flagged `_qcmd`, ~80%) OR a plain user turn
+  // (~20%). A placeholder is HIDDEN once its delivery is present. Two-tier match:
+  //  1. `_qcmd`: its timestamp is the ENQUEUE (queue) time, so it sits within ~1ms
+  //     of its enqueue → pair by content + |Δt|<100ms. Order-independent and it
+  //     disambiguates repeated content (many "继续" enqueues) that pure position
+  //     mismatches (a distant same-text qcmd could otherwise steal a placeholder).
+  //  2. plain user-turn delivery: shares NO timestamp with the enqueue (it carries
+  //     the real DELIVERY time, seconds later), so pair by content + STRICT
+  //     position: oldest same-content pending enqueue, BUT a real unpaired user
+  //     input in between breaks the chain — a later same-text turn after a genuine
+  //     direct message is a RE-TYPE, not a delivery. `[Request interrupted by
+  //     user]` markers + meta/caveat turns are NOT real inputs (queuing interrupts
+  //     Claude, logging that marker right before the real delivery), so they never
+  //     count as a delivery nor as a chain-breaker.
+  // Window-local: only what's loaded; a delivery whose enqueue isn't loaded simply
+  // has no placeholder to hide (no double).
+  function _msgText(e) {
     const c = (e.message || {}).content;
     if (typeof c === "string") return c.trim();
     if (Array.isArray(c)) return c.map(b => (b && b.type === "text") ? (b.text || "") : "").join("\n").trim();
     return "";
   }
+  function _isRealUserInput(e) {
+    // a genuine human turn — excludes interrupt markers, meta, and caveat/command
+    // wrappers (they are not something the user typed as a fresh message).
+    if (e.type !== "user" || e.isMeta || e._qcmd || e._queued) return false;
+    const t = _msgText(e);
+    if (!t || t.startsWith("[Request interrupted by user") || t.startsWith("<")) return false;
+    return true;
+  }
   function computePairedQueued(cache) {
-    const pend = new Map();          // text -> [enqueue _idx …] seen so far (in _idx order)
-    const paired = new Set();
+    const TOL = 100; // ms — qcmd/enqueue timestamps differ by ~1ms; 100ms is safe headroom
+    const pend = [];  // pending enqueues in order: {c, idx, t(ms), ut(user-turn-eligible)}
+    const hidden = new Set();
     for (const e of cache) {
-      if (e && e._queued) {
-        const t = (((e.message || {}).content) || "").trim();
-        if (t) { if (!pend.has(t)) pend.set(t, []); pend.get(t).push(e._idx); }
-      } else {
-        const t = _userTurnText(e);
-        if (t) { const arr = pend.get(t); if (arr && arr.length) paired.add(arr.shift()); }
+      if (!e) continue;
+      if (e._queued) {
+        if (e._system) continue;               // tagged system event, not human input
+        const c = _msgText(e); if (!c) continue;
+        pend.push({ c, idx: e._idx, t: Date.parse(e.timestamp), ut: true });
+      } else if (e._qcmd) {                     // tier 1: content + nearest timestamp
+        const c = _msgText(e); if (!c) continue;
+        const qt = Date.parse(e.timestamp);
+        let best = -1, bestDt = Infinity;
+        for (let i = 0; i < pend.length; i++) {
+          const p = pend[i];
+          if (p.c !== c) continue;
+          const dt = Math.abs(p.t - qt);
+          if (dt <= TOL && dt < bestDt) { bestDt = dt; best = i; }
+        }
+        if (best >= 0) { hidden.add(pend[best].idx); pend.splice(best, 1); }
+      } else if (_isRealUserInput(e)) {         // tier 2: content + strict position
+        const c = _msgText(e);
+        let mi = -1;
+        for (let i = 0; i < pend.length; i++) { if (pend[i].c === c && pend[i].ut) { mi = i; break; } }
+        if (mi >= 0) { hidden.add(pend[mi].idx); pend.splice(mi, 1); }
+        else { for (const p of pend) p.ut = false; }   // real unpaired input breaks the chain
       }
     }
-    return paired;
+    return hidden;
   }
   function _eqSet(a, b) { if (a.size !== b.size) return false; for (const x of a) if (!b.has(x)) return false; return true; }
 
@@ -6280,7 +6314,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   function _isEnglishDominant(s) {
     const letters = (s.match(/[A-Za-z]/g) || []).length;
     let cjk = 0; for (const c of s) if (c >= "一" && c <= "鿿") cjk++;
-    return letters > 2 && letters >= cjk;      // mirrors the grammar hook's gate
+    // Require English to be at least 2/5 of the content BY WEIGHT, where one CJK
+    // char counts as 2 chars: letters / (letters + 2*cjk) >= 2/5  ⟺  3L >= 4C.
+    return letters > 2 && 3 * letters >= 4 * cjk;
   }
   function _shouldGrammarCheck(s) {
     s = (s || "").trim();

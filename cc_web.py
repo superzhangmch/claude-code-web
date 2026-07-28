@@ -1471,6 +1471,54 @@ def _detect_prose_choices(lines: list[str]) -> Optional[dict]:
     return {"question": question, "choices": choices, "kind": "prose"}
 
 
+def _pending_is_user_echo(pending: Optional[dict], all_entries: list[dict]) -> bool:
+    """False-positive guard: a message the user just TYPED that happens to be a
+    "1. .. 2. .." numbered list, once echoed on the terminal, can look like a
+    numbered menu / selector to the detector. If the detected choices (or a
+    bare question) are really the user's OWN most-recent request echoed back,
+    it's NOT a real ask — suppress the choice banner.
+
+    Compares against the last few user-sent messages (real user turns + recent
+    enqueues). A REAL menu ("1. Yes 2. No", permission dialogs) won't match: its
+    short options are filtered (<4 chars) and don't appear in the user's text."""
+    if not pending:
+        return False
+    recent: list[str] = []
+    for e in reversed(all_entries):
+        if len(recent) >= 3:
+            break
+        t = e.get("type")
+        if t == "user" and not e.get("isMeta"):
+            m = e.get("message") or {}
+            c = m.get("content") if isinstance(m, dict) else None
+            if isinstance(c, str):
+                txt = c
+            elif isinstance(c, list):
+                txt = "\n".join(b.get("text", "") for b in c
+                                if isinstance(b, dict) and b.get("type") == "text")
+            else:
+                txt = ""
+            if txt.strip():
+                recent.append(txt)
+        elif t == "queue-operation" and e.get("operation") == "enqueue":
+            txt = e.get("content") or ""
+            if txt.strip():
+                recent.append(txt)
+    if not recent:
+        return False
+    norm = lambda s: re.sub(r"\s+", " ", s or "").strip().lower()
+    hay = norm(" \n ".join(recent))
+    if not hay:
+        return False
+    texts = [c.get("text", "") for c in (pending.get("choices") or []) if c.get("text")]
+    if not texts:
+        # selector / prose with no explicit options → compare the question line
+        q = norm(pending.get("question") or "")
+        return len(q) >= 8 and q in hay
+    hits = sum(1 for ct in texts if len(norm(ct)) >= 4 and norm(ct) in hay)
+    return hits >= max(2, (len(texts) + 1) // 2)   # majority (≥2) of options are the user's own text
+
+
 def _pending_confirm_gate_open(b: Binding) -> bool:
     """True only if BOTH the JSONL and the user's last /api/input have been
     quiet for ≥ PENDING_CONFIRM_IDLE_SEC (so a prompt is plausible). Checked
@@ -2395,13 +2443,63 @@ def _queued_render_item(e: dict) -> dict:
     return item
 
 
+def _queued_command_item(e: dict, a: dict) -> dict:
+    """A delivered `queued_command` attachment (origin.kind=human) → the SENT human
+    message, rendered at its delivery position. This is the AUTHORITATIVE record
+    that a queued msg was submitted (Claude's reply chains to its uuid via
+    parentUuid). Carries the enqueue-time timestamp (the qcmd's own ts is the queue
+    time, ~1ms off its enqueue) so the client can hide the matching "Queued"
+    placeholder by content + nearest timestamp (|Δt|<100ms) — a near-unique,
+    order-independent key that disambiguates repeated content (many "继续"). `_qcmd`
+    flags it as a delivered-queued msg; a delivery that arrives instead as a plain
+    user turn (no shared ts) is matched client-side by content + strict position."""
+    cs = _prompt_text(a.get("prompt"))
+    return {
+        "uuid": e.get("uuid"),
+        "type": "user",
+        "_idx": e.get("_idx"),
+        "_round": e.get("_round"),
+        "timestamp": a.get("timestamp") or e.get("timestamp"),
+        "sid": e.get("sessionId"),
+        "_qcmd": True,
+        "message": {"content": cs},
+    }
+
+
+def _prompt_text(p) -> str:
+    """Text of a queued_command `prompt`. It is a plain string for a text-only
+    msg, but a LIST of content blocks for a multimodal one (image paste →
+    [{type:text,text:...},{type:image,...}]). Extract/join the text blocks so an
+    image-carrying queued delivery still renders (as its text) and its "Queued"
+    placeholder clears — else list prompts were dropped, leaving a stale badge."""
+    if isinstance(p, str):
+        return p.strip()
+    if isinstance(p, list):
+        return "\n".join(b.get("text", "") for b in p
+                         if isinstance(b, dict) and b.get("type") == "text").strip()
+    return ""
+
+
+def _qcmd_human(e: dict):
+    """(attachment, prompt) if e is a human queued_command delivery, else (None, None)."""
+    a = e.get("attachment")
+    if e.get("type") == "attachment" and isinstance(a, dict) and a.get("type") == "queued_command" \
+       and (a.get("origin") or {}).get("kind") == "human":
+        s = _prompt_text(a.get("prompt"))
+        if s:
+            return a, s
+    return None, None
+
+
 def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
-    # Pure sequential pass. Queued prompts: a HUMAN `enqueue` is emitted INLINE at
-    # its own position (badge "Queued"); tagged enqueues (task-notification /
-    # command / …) are system-injected, NOT human — never shown as "Queued" (their
-    # delivered form appears on its own). Contentless dequeue/remove/popAll are
-    # dropped. NO dedup here — the client pairs a queued msg with its later "sent"
-    # user turn and removes the placeholder (see computePairedQueued in the SPA).
+    # Queued prompts: an `enqueue` is the "Queued" placeholder. Its DELIVERED form
+    # is EITHER a `queued_command` attachment (~80%, rendered as the sent msg) OR a
+    # plain user turn (~20% — same content, shortly after). NO dedup here — the
+    # client pairs an enqueue with the FIRST later same-content delivery (qcmd OR
+    # user turn), positional one-to-one, and hides the placeholder (see
+    # computePairedQueued). All matching is client-side (positional matching isn't
+    # safe to split across a batch boundary). Tagged enqueues
+    # (task-notification/command) and contentless dequeue/remove/popAll are dropped.
     out: list[dict] = []
     for e in entries:
         t = e.get("type")
@@ -2410,6 +2508,11 @@ def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
                 cs = (e.get("content") or "").strip()
                 if cs and not _LEADTAG_RE.match(cs):
                     out.append(_queued_render_item(e))
+            continue
+        if t == "attachment":
+            a, p = _qcmd_human(e)
+            if a is not None:
+                out.append(_queued_command_item(e, a))
             continue
         if t not in ("user", "assistant"):
             continue
@@ -4581,6 +4684,8 @@ async def get_state(
         screen = None
     if gate:
         pending_confirm = _detect_pending_confirm_from_screen(screen or "")
+        if _pending_is_user_echo(pending_confirm, all_entries):
+            pending_confirm = None   # it's the user's own "1. .. 2. .." msg echoed, not a menu
     status_line = _status_line(screen)
 
     return {
