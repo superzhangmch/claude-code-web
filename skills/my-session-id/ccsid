@@ -1,0 +1,14 @@
+#!/bin/bash
+# ccsid — print THIS claude-code session's id (and copy to clipboard).
+# Works anywhere the shell is a descendant of a claude process:
+# inside a Bash tool call, or typed as `! ccsid` at the claude-code prompt.
+sid=$(bash ~/.claude/skills/my-session-id/whoami.sh --id-only) || {
+    echo "ccsid: not inside a claude-code session (whoami.sh failed)" >&2
+    exit 1
+}
+out="claude_code_session_id=$sid"
+printf '%s\n' "$out"
+if command -v pbcopy >/dev/null 2>&1; then
+    printf %s "$out" | pbcopy
+    echo "(copied to clipboard)"
+fi

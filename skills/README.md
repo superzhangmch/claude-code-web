@@ -85,3 +85,19 @@ cp -R skills/my-session-id ~/.claude/skills/
 bash ~/.claude/skills/my-session-id/whoami.sh            # id / pid / cwd / status
 bash ~/.claude/skills/my-session-id/whoami.sh --id-only  # just the id
 ```
+
+### `ccsid` — one-shot session-id command
+
+`ccsid` is a tiny convenience wrapper around `whoami.sh --id-only`: it prints
+`claude_code_session_id=<id>` and copies it to the clipboard (macOS `pbcopy`).
+Run it inside any Bash tool call, or as `! ccsid` at the claude-code prompt,
+to grab the current session's id (e.g. to open it in `cc_web`).
+
+```sh
+cp skills/my-session-id/ccsid ~/.local/bin/ccsid && chmod +x ~/.local/bin/ccsid
+# then, inside a claude-code session:
+ccsid            # -> claude_code_session_id=<id>  (also copied to clipboard)
+```
+
+It depends on the `my-session-id` skill being installed at
+`~/.claude/skills/my-session-id/`.

@@ -1,0 +1,2 @@
+# compiled grammar_bar binary (build locally: swiftc grammar_bar.swift -o grammar_bar)
+grammar_bar
