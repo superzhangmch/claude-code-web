@@ -71,6 +71,9 @@ body.pure .session-card .msg-block.user,
 body.pure .session-card .msg-block.claude { background: #fff; color: #000; }
 body.pure .msg.user, body.pure .msg.assistant,
 body.pure .msg.tool, body.pure .msg.system, body.pure .msg.thinking { background: #fff; }
+/* pure mode: user-request block gets a light-grey fill so it stands out from the
+   white responses (kept light — "not that grey"). */
+body.pure .msg.user { background: #e6e6e6; }
 body.pure .msg.user, body.pure .msg.user .markdown,
 body.pure .msg.system, body.pure .msg.system .markdown { color: #000; }
 body.pure .candidate .screen-tail,
@@ -702,7 +705,9 @@ body.pure #closetab-btn.active {
    .msg.user, but a dashed left edge + accent "Queued" label mark it as not-yet-sent. */
 .msg.user.queued { border-left-style: dashed; }
 .role .queued-label { color: var(--accent); font-weight: 700; }
-.msg.assistant { background: #000; }
+/* Response (Claude) blocks: borderless — distinguished by background + the
+   "Claude" label only. User-request blocks keep their accent bar + border. */
+.msg.assistant { background: #000; border: 0; }
 .msg.tool { border-left-color: #4ec9b0; background: #1a211f; }
 /* System/tool-injected entries recorded as type=user (task notifications,
    slash-command bookkeeping, tool results) — NOT real user input. Muted, no
@@ -759,10 +764,15 @@ body.pure #closetab-btn.active {
    bottom (negative top cancels the previous block's 14px bottom margin). */
 /* tool/sys stack: blend into the page — no border, no panel fill — so it's
    the least conspicuous thing in the transcript. */
+/* The tool-call list sits between consecutive responses → use it as a subtle
+   separator band: a touch lighter than the pure-black response bg (dark), and a
+   light grey in pure mode. */
 .msg.system.stack-tool {
-  padding: 3px 10px; margin: -10px 0 4px 0;
-  background: var(--bg); border: 0; border-radius: 0;
+  padding: 4px 10px; margin: -10px 0 4px 0;
+  background: #161922; border: 0; border-radius: 0;
 }
+body.pure .msg.system.stack-tool { background: #eeeeee; }
+body.light .msg.system.stack-tool { background: var(--panel2); }
 /* stacked tool names are clickable → inline-expand server-truncated detail */
 .sys-item.tool-click { cursor: pointer; }
 .sys-item.tool-click:hover { text-decoration: underline; text-underline-offset: 2px; }
@@ -772,7 +782,12 @@ body.pure #closetab-btn.active {
 .sys-item.tool .tool-nm { color: var(--text); font-weight: 600; }
 .sys-item.tool .tool-desc { color: var(--muted); font-family: inherit; font-weight: 400; margin-left: 1px; }
 /* expanded detail matches normal (medium) tool display — not the muted sys grey */
-.msg.system .tool-detail { margin-top: 6px; color: var(--text); }
+/* Expanded tool detail (args + result after a click): box it with a border so
+   it's clearly set apart from the surrounding stack/responses. */
+.msg.system .tool-detail {
+  margin-top: 6px; color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px; overflow: hidden;
+}
 .tool-collapse-btn {
   border: 0; background: transparent; color: var(--muted);
   font-size: 12px; line-height: 1; padding: 0 4px; cursor: pointer; margin-right: 4px;
@@ -1535,6 +1550,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   #tabs-modal.modal { padding: 2px; }
   #tabs-modal .modal-card.tabs-card { width: 100vw; padding: 8px 2px; gap: 6px; }
   #tabs-modal .screen-body { padding: 6px 3px; }
+  /* Phone: borderless responses don't need side gutters — trim the horizontal
+     blank so more text fits on the small screen. */
+  main { padding: 8px 2px; }
+  .msg { padding: 9px 7px; }
+  .msg.user { margin-left: 14px; }
 }
 
 #files-modal .modal-card.files-card {
@@ -1905,7 +1925,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 
   <div id="links-modal" class="modal">
     <div class="modal-card">
-      <div class="modal-row"><h3>Links</h3><button id="links-close" class="btn" title="close">✕</button></div>
+      <div class="modal-row"><h3 id="links-title">Links</h3><button id="links-close" class="btn" title="close">✕</button></div>
       <div id="links-list" class="links-list"></div>
     </div>
   </div>
@@ -3022,7 +3042,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   });
   function openScreenInfo() {
     screenModal.classList.add("show");
-    screenModal.classList.toggle("fs", localStorage.getItem("cc_web_screen_full") === "1");
+    // Fullscreen is the DEFAULT now — only windowed if the user explicitly turned
+    // it off (stored "0"); unset (null) → fullscreen.
+    screenModal.classList.toggle("fs", localStorage.getItem("cc_web_screen_full") !== "0");
     showScreenTab("screen");
     screenVer = ""; screenLines = []; screenPaused = false; screenPageDir = 0;   // fresh: first load is a full send
     loadScreen();
@@ -3401,6 +3423,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const filesModal = document.getElementById("files-modal");
   const linksModal = document.getElementById("links-modal");
   const linksListEl = document.getElementById("links-list");
+  const linksTitleEl = document.getElementById("links-title");
   const filesListEl = document.getElementById("files-list");
   const filesPreviewEl = document.getElementById("files-preview");
   const filesPathEl = document.getElementById("files-path");
@@ -3893,6 +3916,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   screenInput.addEventListener("keydown", (e) => {
     if (e.isComposing || e.keyCode === 229) return;   // IME guard
     if (e.key === "Enter") { e.preventDefault(); screenSend(); }
+    // Esc while typing just blurs the input (stopPropagation so it doesn't ALSO
+    // reach the global handler and get sent to the tab). Once blurred, a 2nd Esc
+    // goes through the global handler → sends a real ESC to the terminal.
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); screenInput.blur(); }
   });
 
   // CPU history modal — opened by clicking the battery in the picker.
@@ -5308,6 +5335,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       entryCache: entryCache.slice(),
       lastIdx, earliestIdxLoaded, hasMoreHistory, epoch: lastEpoch,
       scrollTop: transcriptEl.scrollTop,
+      inputDraft: inputEl.value,               // unsent reply text, per tab
     };
   }
 
@@ -5325,6 +5353,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     setMeta();
     refreshMetaName(sid);
     isPaused = false; sessionGone = false;
+    shouldAutoscroll = true;   // switching to a tab: follow the latest (land at bottom)
     warnEl.classList.remove("show");   // clear any stale pid-gone/mismatch banner
     const cached = tabState[sid];
     if (cached) {
@@ -5337,7 +5366,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       claudeIdle = false;
       showTranscript();
       rebuild(true);                                   // render from cache, keep scroll
-      transcriptEl.scrollTop = (cached.scrollTop != null) ? cached.scrollTop : transcriptEl.scrollHeight;
+      // Land at the bottom (latest), like a chat. NB: the scroller is mainEl —
+      // transcriptEl is an inner div and NOT scrollable, so setting its scrollTop
+      // was a no-op (that's why switching used to land at the top). Do it now and
+      // once more after layout settles.
+      mainEl.scrollTop = mainEl.scrollHeight;
+      requestAnimationFrame(() => { mainEl.scrollTop = mainEl.scrollHeight; });
     } else {
       // first open of this session → normal load
       entryCache = []; lastIdx = null; lastEpoch = null; earliestIdxLoaded = null; hasMoreHistory = false;
@@ -5345,6 +5379,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       transcriptEl.innerHTML = "";
       showTranscript();
     }
+    // Per-tab input draft: restore THIS tab's unsent reply text (empty if none),
+    // so switching away and back continues where you left off — and a tab never
+    // shows another tab's draft. (The outgoing tab's draft was saved above via
+    // saveTabState.) Dispatch "input" to re-fit the box height to the content.
+    inputEl.value = (cached && cached.inputDraft) || "";
+    inputEl.dispatchEvent(new Event("input"));
     addOpenTab(sid, attachedName || attachedShort);
     const ot = openTabs.find(x => x.sid === sid);      // toast the full names (from cache; refreshMetaName keeps them fresh)
     showTabToast(ot && ot.tabName, (ot && ot.sessName) || label);
@@ -5899,6 +5939,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     + encodeURIComponent(p) + "&token=" + encodeURIComponent(authToken);
   function showLinks(text) {
     const { urls, paths } = extractLinks(text);
+    linksTitleEl.textContent = "Links";
     linksListEl.textContent = "";
     const mkCopy = (val) => {
       const b = document.createElement("button");
@@ -5949,6 +5990,76 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         wrap.appendChild(im);
         linksListEl.appendChild(wrap);
       }
+    });
+    linksModal.classList.add("show");
+  }
+
+  // Commands Claude asked YOU to run yourself — the "! <cmd>" run-in-session
+  // convention. Reuses the LINKS popup window (same style), repurposed with a
+  // "Commands to run" title. Handles: a fenced block line (```\n! foo\n```),
+  // a plain "! foo" line, and inline `! foo` in prose. Anchored at line start so
+  // it never catches bash negation ("if ! pgrep") or prose exclamations ("run!").
+  function extractCommands(text) {
+    const t = text || "", out = [], seen = new Set();
+    const CMD_RE = /^!\s+\S/;   // '!' + space + something, at line start (lenient — FP is fine, user checks)
+    const add = (c) => { c = (c || "").trim(); if (CMD_RE.test(c) && !seen.has(c)) { seen.add(c); out.push(c); } };
+    const strip = (line) => {
+      let s = line.trim().replace(/^(?:[-*>]\s+|\d+\.\s+)/, "");   // strip list/quote marker
+      if (s.length > 2 && s[0] === "`" && s[s.length - 1] === "`") s = s.slice(1, -1).trim();  // unwrap `! cmd`
+      return s;
+    };
+    const lines = t.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      let s = strip(lines[i]);
+      if (!CMD_RE.test(s)) continue;                              // fenced/plain "! …" line
+      // Backslash line-continuation: keep appending following lines while the
+      // command ends with "\", so a multi-line "! … && \" command stays whole.
+      while (/\\\s*$/.test(s) && i + 1 < lines.length) s += "\n" + lines[++i].trim();
+      add(s);                                                     // (add() re-checks CMD_RE)
+    }
+    let m; const INLINE = /`(!\s+[^`\n]+)`/g;                     // inline `! cmd` in prose
+    while ((m = INLINE.exec(t))) add(m[1]);
+    return out;
+  }
+  const CMD_SVG = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5l3 3.5-3 3.5"/><path d="M8.6 12H13"/></svg>';
+  function makeCmdsBtn(getRaw) {
+    const btn = document.createElement("button");
+    btn.className = "copy-btn"; btn.title = "Commands to run yourself (! …)";
+    btn.innerHTML = CMD_SVG;
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      showCmds((typeof getRaw === "function") ? getRaw() : (getRaw || ""));
+    });
+    return btn;
+  }
+  function cmdToInput(cmd) {
+    linksModal.classList.remove("show");
+    inputEl.value = cmd;                          // the '!' must LEAD the input to run in-session
+    inputEl.dispatchEvent(new Event("input"));    // re-fit the box height
+    inputEl.focus();
+  }
+  function showCmds(text) {
+    const cmds = extractCommands(text);
+    linksTitleEl.textContent = "Commands to run";
+    linksListEl.textContent = "";
+    if (!cmds.length) {
+      linksListEl.innerHTML = '<div class="links-empty">No “! …” commands to run in this block.</div>';
+      linksModal.classList.add("show");
+      return;
+    }
+    cmds.forEach((c, i) => {
+      const li = document.createElement("div"); li.className = "link-row";
+      const num = document.createElement("span"); num.className = "lnum"; num.textContent = (i + 1);
+      const node = document.createElement("span"); node.className = "lk path";
+      node.textContent = elideLink(c); node.title = c;
+      const toInput = document.createElement("button");
+      toInput.className = "btn"; toInput.textContent = "→ input"; toInput.title = "Drop into the reply box (ready to send)";
+      toInput.addEventListener("click", () => cmdToInput(c));
+      const cp = document.createElement("button");
+      cp.className = "btn"; cp.textContent = "copy";
+      cp.addEventListener("click", () => copyText(c));
+      li.appendChild(num); li.appendChild(node); li.appendChild(toInput); li.appendChild(cp);
+      linksListEl.appendChild(li);
     });
     linksModal.classList.add("show");
   }
@@ -6150,6 +6261,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       md.innerHTML = renderMarkdown(b.text);
       maybeRenderMath(md);
       role.appendChild(makeLinksBtn(() => rawTextFor(b)));
+      if (extractCommands(rawTextFor(b)).length) role.appendChild(makeCmdsBtn(() => rawTextFor(b)));
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
       div.appendChild(role); div.appendChild(md);
       // Your own typed message → attach the English-learning correction if we have
@@ -6712,7 +6824,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
     }
     switch (e.key) {
-      case "/": e.preventDefault(); inputEl.focus(); break;
+      case "/": e.preventDefault(); (screenOpen ? screenInput : inputEl).focus(); break;
       case "u":                                           // screen: page up; chat: prev user request
         if (screenOpen) { e.preventDefault(); pageScreen(-1); }
         else if (!tailOpen && !switchOpen) { e.preventDefault(); jumpUserRequest(-1); }
@@ -6726,7 +6838,23 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       case "i": case "I": e.preventDefault(); openSwitchMenu(); break;   // toggle tab list
       case "t": case "T": e.preventDefault(); tailScreen(); break;       // open/refresh tailScr
       case "s": case "S": e.preventDefault(); openScreenInfo(); break;   // open screenshot
-      case "x": case "X": case "q": case "Q": case "Escape":
+      case "ArrowUp":                                     // screen: send Arrow Up to the tab (drive a menu)
+        if (screenOpen) { e.preventDefault(); document.getElementById("key-up").click(); }
+        break;
+      case "ArrowDown":                                   // screen: send Arrow Down to the tab
+        if (screenOpen) { e.preventDefault(); document.getElementById("key-down").click(); }
+        break;
+      case "Enter":                                       // screen: confirm (send Enter to the tab)
+        if (screenOpen) { e.preventDefault(); document.getElementById("key-enter").click(); }
+        break;
+      case "Escape":
+        // In the screen popup, Esc sends a REAL ESC to the tab (cancel a menu/
+        // prompt), NOT close the window — use x / q / ✕ to close it.
+        if (screenOpen) { e.preventDefault(); document.getElementById("key-esc").click(); }
+        else if (tailOpen) { e.preventDefault(); tailBox.style.display = "none"; }
+        else if (switchOpen) { e.preventDefault(); hideSwitchMenu(); }
+        break;
+      case "x": case "X": case "q": case "Q":
         if (tailOpen) { e.preventDefault(); tailBox.style.display = "none"; }
         else if (screenOpen) { e.preventDefault(); closeScreenModal(); }
         else if (switchOpen) { e.preventDefault(); hideSwitchMenu(); }
@@ -7087,6 +7215,38 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // button. Landscape (desktop) → Enter sends, Shift/Opt+Enter insert a newline.
   const isPhone = () => window.innerHeight >= window.innerWidth;
   inputEl.addEventListener("keydown", (e) => {
+    // Readline/emacs editing keys, made to work in the textarea on every platform
+    // (macOS text fields already do these natively; this brings Linux/Windows in
+    // line and overrides the browser defaults). Plain Ctrl only, single letter.
+    //   Ctrl+A start of line   Ctrl+E end of line
+    //   Ctrl+U kill to line start   Ctrl+K kill to line end   Ctrl+W delete prev word
+    // (Note: some non-mac browsers reserve Ctrl+W for close-tab and may not let us
+    //  intercept it; on macOS — the main platform here — Ctrl+W is free.)
+    if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.length === 1) {
+      const k = e.key.toLowerCase();
+      if ("aeukw".includes(k)) {
+        const v = inputEl.value, s = inputEl.selectionStart;
+        const lineStart = v.lastIndexOf("\n", s - 1) + 1;
+        let lineEnd = v.indexOf("\n", s); if (lineEnd < 0) lineEnd = v.length;
+        const apply = (nv, caret) => {
+          inputEl.value = nv;
+          inputEl.selectionStart = inputEl.selectionEnd = caret;
+          inputEl.dispatchEvent(new Event("input"));   // resize + keep the per-tab draft in sync
+        };
+        e.preventDefault();
+        if (k === "a") inputEl.selectionStart = inputEl.selectionEnd = lineStart;
+        else if (k === "e") inputEl.selectionStart = inputEl.selectionEnd = lineEnd;
+        else if (k === "u") apply(v.slice(0, lineStart) + v.slice(s), lineStart);
+        else if (k === "k") apply(v.slice(0, s) + v.slice(lineEnd), s);
+        else if (k === "w") {                          // back over whitespace, then a word
+          let i = s;
+          while (i > 0 && /\s/.test(v[i - 1])) i--;
+          while (i > 0 && !/\s/.test(v[i - 1])) i--;
+          apply(v.slice(0, i) + v.slice(s), i);
+        }
+        return;
+      }
+    }
     if (e.key !== "Enter") return;
     // Don't submit while an IME is composing (e.g. confirming Chinese input).
     if (e.isComposing || e.keyCode === 229) return;
