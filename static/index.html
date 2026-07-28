@@ -2703,6 +2703,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   let attachedTab = "";          // tab index label (tX / wYtX) shown in the top bar
   let metaExpanded = false;      // top-bar id: collapsed (4 chars) ↔ full, toggled by click
   let entryCache = [];
+  let pairedQueued = new Set();   // _idx of inline "Queued" enqueues that have a later matching user turn → hidden
   let earliestIdxLoaded = null;
   let lastIdx = null;
   let lastEpoch = null;   // server window "epoch" — mismatch → one full resync
@@ -6151,8 +6152,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       role.appendChild(makeLinksBtn(() => rawTextFor(b)));
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
       div.appendChild(role); div.appendChild(md);
-      // your own typed message → attach an English-learning correction if we have one
-      if (b.role === "user" && !b.system && !indieQueued) _attachGrammar(div, b.text);
+      // Your own typed message → attach the English-learning correction if we have
+      // one. INCLUDES the inline "Queued" box: if the msg got queued, the ✎ shows
+      // there; when the placeholder is later replaced by the processed user turn
+      // (same content → same grammar key), the correction re-attaches to it — so
+      // it "transfers" to the sent turn automatically.
+      if (b.role === "user" && !b.system) _attachGrammar(div, b.text);
       _lastBottomToolUse = null;
     } else if (b.kind === "tool_use") {
       div.className = "msg tool"; label.textContent = "Tool call";
@@ -6215,6 +6220,37 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     return div;
   }
 
+  // Client-side queued dedup. The server sends everything in order — a HUMAN
+  // enqueue as an inline "Queued" block, plus every real user turn. When a msg
+  // that was queued later gets PROCESSED it re-appears as a normal user turn; we
+  // pair them (strict exact text, only user turns, one-to-one, enqueue BEFORE
+  // turn) and HIDE the "Queued" placeholder — keeping the processed turn at its
+  // real position. Unmatched queued msgs (cancelled / sent-without-a-turn) stay
+  // shown as "Queued" at their own position. Window-local: only pairs what we've
+  // loaded, so starting mid-file / loading earlier is fine.
+  function _userTurnText(e) {
+    if (!e || e.type !== "user" || e.isMeta || e._queued) return "";
+    const c = (e.message || {}).content;
+    if (typeof c === "string") return c.trim();
+    if (Array.isArray(c)) return c.map(b => (b && b.type === "text") ? (b.text || "") : "").join("\n").trim();
+    return "";
+  }
+  function computePairedQueued(cache) {
+    const pend = new Map();          // text -> [enqueue _idx …] seen so far (in _idx order)
+    const paired = new Set();
+    for (const e of cache) {
+      if (e && e._queued) {
+        const t = (((e.message || {}).content) || "").trim();
+        if (t) { if (!pend.has(t)) pend.set(t, []); pend.get(t).push(e._idx); }
+      } else {
+        const t = _userTurnText(e);
+        if (t) { const arr = pend.get(t); if (arr && arr.length) paired.add(arr.shift()); }
+      }
+    }
+    return paired;
+  }
+  function _eqSet(a, b) { if (a.size !== b.size) return false; for (const x of a) if (!b.has(x)) return false; return true; }
+
   function renderEntriesInto(container, entries, atTop) {
     // For prepend (atTop=true): the historical batch is rendered at the
     // top of the transcript, so it must NOT update the "bottom block"
@@ -6222,6 +6258,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     let saved = null, savedStack = null;
     if (atTop) { saved = _lastBottomToolUse; savedStack = _lastStack; }
     for (const e of entries) {
+      if (e && e._queued && pairedQueued.has(e._idx)) continue;   // placeholder paired to a real turn → hidden
       for (const b of blocksFor(e)) {
         const el = renderBlock(b);
         if (el) container.appendChild(el);
@@ -6230,52 +6267,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (atTop) { _lastBottomToolUse = saved; _lastStack = savedStack; }
   }
 
-  // Currently-queued prompts live in their OWN region below the transcript (the
-  // server sends the full live set each poll, not a delta) — so a dequeue just
-  // shrinks it and the stale "Queued" block disappears, while the real turn
-  // shows via the normal transcript delta at its own position.
-  function renderQueuedRegion(list) {
-    queuedRegion.innerHTML = "";
-    if (!list || !list.length) return;
-    const savedTool = _lastBottomToolUse, savedStack = _lastStack;   // don't disturb transcript trackers
-    _lastBottomToolUse = null; _lastStack = null;
-    for (const e of list) {
-      for (const b of blocksFor(e)) {
-        const el = renderBlock(b);
-        if (el) queuedRegion.appendChild(el);
-      }
-    }
-    _lastBottomToolUse = savedTool; _lastStack = savedStack;
-  }
-
-  // A queued prompt that was consumed/cancelled and left NO user-turn record
-  // exists in the jsonl ONLY as its `enqueue` op. The transcript delta is
-  // cursor-based, so if the enqueue's _idx slipped just below the poll cursor
-  // before it was consumed, the delta could never re-insert it (ingest() only
-  // appends _idx > lastSeen) and it vanished until a full refresh. The server
-  // now sends a STABLE `consumed_queued` list every poll (full window, not a
-  // delta) — we commit each item exactly once, deduped by content against
-  // what's already shown, so nothing can fall in the cursor crack. Completeness
-  // first: better to show a stray cancelled msg than silently lose a real one.
-  function _entryText(e) {
-    const c = (e.message || {}).content;
-    if (typeof c === "string") return c;
-    if (Array.isArray(c)) return c.map(b => (b && b.type === "text") ? (b.text || "") : "").join("\n");
-    return "";
-  }
-  function commitConsumedQueued(list) {
-    for (const it of (list || [])) {
-      const txt = (((it.message || {}).content) || "").trim();
-      if (!txt) continue;
-      // already shown? (rendered inline via delta/snapshot, or committed earlier)
-      if (entryCache.some(e => _entryText(e).trim() === txt)) continue;
-      entryCache.push(it);
-      const frag = document.createDocumentFragment();
-      renderEntriesInto(frag, [it]);
-      transcriptEl.appendChild(frag);
-      scrollToBottom(); hbReattach();
-    }
-  }
+  // (Queued prompts are now rendered INLINE in the transcript by the server —
+  // an `enqueue` becomes a "Queued" block at its own position; there is no
+  // separate queued region any more. #queued-region stays in the DOM but empty.)
 
   // ---------- English-learning correction (shown inside your own sent msg) ----------
   // On send, if the message is English-dominant (and not voice-originated, not
@@ -6396,6 +6390,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
 
   function rebuild(noScroll) {
+    pairedQueued = computePairedQueued(entryCache);   // recompute over the full loaded window
     transcriptEl.innerHTML = "";
     _lastBottomToolUse = null;
     _lastStack = null;
@@ -6423,20 +6418,40 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (!fresh.length) return;
       entryCache = fresh.concat(entryCache);
       earliestIdxLoaded = fresh[0]?._idx ?? earliestIdxLoaded;
-      const frag = document.createDocumentFragment();
-      renderEntriesInto(frag, fresh, /*atTop=*/true);
-      const prevH = mainEl.scrollHeight, prevS = mainEl.scrollTop;
-      transcriptEl.insertBefore(frag, transcriptEl.firstChild);
-      mainEl.scrollTop = prevS + (mainEl.scrollHeight - prevH);
+      const prev = pairedQueued;
+      pairedQueued = computePairedQueued(entryCache);
+      if (!_eqSet(pairedQueued, prev)) {
+        // a prepended enqueue paired with an already-shown later turn (or vice
+        // versa) → some placeholder must now be hidden: full re-render, keep view.
+        const prevH = mainEl.scrollHeight, prevS = mainEl.scrollTop;
+        rebuild(true);
+        mainEl.scrollTop = prevS + (mainEl.scrollHeight - prevH);
+      } else {
+        const frag = document.createDocumentFragment();
+        renderEntriesInto(frag, fresh, /*atTop=*/true);
+        const prevH = mainEl.scrollHeight, prevS = mainEl.scrollTop;
+        transcriptEl.insertBefore(frag, transcriptEl.firstChild);
+        mainEl.scrollTop = prevS + (mainEl.scrollHeight - prevH);
+      }
     } else {
       const lastSeen = entryCache.length ? entryCache[entryCache.length - 1]._idx : -Infinity;
       const fresh = entries.filter(e => (e._idx ?? -1) > lastSeen);
       if (!fresh.length) return;
       entryCache = entryCache.concat(fresh);
-      const frag = document.createDocumentFragment();
-      renderEntriesInto(frag, fresh);
-      transcriptEl.appendChild(frag);
-      scrollToBottom();
+      const prev = pairedQueued;
+      pairedQueued = computePairedQueued(entryCache);
+      if (!_eqSet(pairedQueued, prev)) {
+        // a new user turn paired an earlier "Queued" placeholder → rebuild to drop it
+        const wasNearBottom = mainEl.scrollHeight - mainEl.scrollTop - mainEl.clientHeight < 40;
+        const prevS = mainEl.scrollTop;
+        rebuild(true);
+        mainEl.scrollTop = wasNearBottom ? mainEl.scrollHeight : prevS;
+      } else {
+        const frag = document.createDocumentFragment();
+        renderEntriesInto(frag, fresh);
+        transcriptEl.appendChild(frag);
+        scrollToBottom();
+      }
     }
     updateLoadEarlier();
     hbReattach();   // keep the heartbeat line pinned below the newest message
@@ -6787,8 +6802,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
       if (typeof m.since_idx === "number") lastIdx = m.since_idx;
       if (m.epoch) lastEpoch = m.epoch;
-      commitConsumedQueued(m.consumed_queued || []);   // stable safety net: never lose a queued msg
-      renderQueuedRegion(m.queued || []);   // live pending-queue tail (reconciled every poll)
+      // queued msgs are now rendered INLINE in the transcript (server side) — no separate region
       renderStatusline(m.status_line);      // mirror Claude's bottom status bar
       updatePromptRow(m.pending_confirm);
     } catch (e) {
@@ -6830,9 +6844,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (hbFrozen) { el._cd.textContent = " · idle"; }
     else { const secs = Math.max(0, Math.ceil((hbNextAt - Date.now()) / 1000)); el._cd.textContent = " · " + secs + "s"; }
   }
-  // Pin the heartbeat as the LAST child of #transcript-view — i.e. BELOW the
-  // #queued-region — so pending queued msgs never appear under the status line.
-  function hbShow() { const el = ensureHb(); if (tvEl.lastChild !== el) tvEl.appendChild(el); }
+  // Pin the heartbeat (status line) just ABOVE #autoload (the ↻ fresh / ⏸ pause
+  // row), so the order bottom-to-top is: fresh/pause buttons → status line →
+  // queued → message flow. The buttons stay at the very bottom.
+  function hbShow() { const el = ensureHb(); if (el.nextSibling !== autoloadEl) tvEl.insertBefore(el, autoloadEl); }
   function hbHide() { if (hbEl && hbEl.parentNode) hbEl.parentNode.removeChild(hbEl); }
   function startHeartbeat() {
     if (attachedSid !== hbSid) { hbSid = attachedSid; hbVer = ""; hbLines = []; }   // fresh baseline per session

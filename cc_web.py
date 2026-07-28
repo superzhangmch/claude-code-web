@@ -2371,35 +2371,13 @@ def _trim_all(e: dict) -> Optional[dict]:
     return out
 
 
-def _still_queued_indices(entries: list[dict]) -> set[int]:
-    """The queue is append-only in the JSONL: `enqueue` adds an item, `dequeue`
-    and `remove` each drop one, `popAll` clears all. So an old enqueue whose
-    item was later sent/cancelled must NOT keep showing as 'queued'. Replay the
-    ops to find which enqueues are STILL in the queue at end-of-file. It's a FIFO
-    (oldest consumed first), so the survivors are just the last k enqueues where
-    k = final queue length — which also sidesteps `remove` not naming its target.
-    Returns the set of entry indices for those live enqueues."""
-    live: list[int] = []          # indices of enqueues still in the queue, FIFO
-    for i, e in enumerate(entries):
-        if e.get("type") != "queue-operation":
-            continue
-        op = e.get("operation")
-        if op == "enqueue":
-            live.append(i)
-        elif op in ("dequeue", "remove"):
-            if live:
-                live.pop(0)       # oldest goes first
-        elif op == "popAll":
-            live.clear()
-    return set(live)
-
-
 def _queued_render_item(e: dict) -> dict:
-    """One queued prompt → render dict. If its content has a recognizable system
-    tag (task-notification / command / …) we KNOW it isn't the user, so mark it
-    _system (renders as a compact System stack, summary-extracted). If there's NO
-    tag we can't tell it apart from human input, so leave it as a standalone
-    _queued block (its own box). Content is head+tail truncated either way."""
+    """One `enqueue` op → an inline transcript render dict, shown in place at the
+    enqueue's own position (badge "Queued"). SPECIAL CASE: if the content leads
+    with a recognizable system tag (task-notification / command / …) it is NOT
+    human input — mark it _system so it renders as a compact System stack
+    (summary-extracted), not a human "Queued" box. Untagged (human) content is
+    shown in full — it's a real message, not a preview."""
     cs = (e.get("content") or "").strip()
     has_tag = bool(_LEADTAG_RE.match(cs))
     item = {
@@ -2410,117 +2388,28 @@ def _queued_render_item(e: dict) -> dict:
         "timestamp": e.get("timestamp"),
         "sid": e.get("sessionId"),
         "_queued": True,
-        "message": {"content": _sys_collapse_str(cs) if has_tag else _head_tail_trunc(cs, 200)},
+        "message": {"content": _sys_collapse_str(cs) if has_tag else cs},
     }
     if has_tag:
         item["_system"] = True   # recognizable system event → compact System stack
     return item
 
 
-def _queued_items(entries: list[dict]) -> list[dict]:
-    """Render-ready list of the prompts STILL in the queue at EOF (see
-    _still_queued_indices). Delivered by /api/state as a LIVE set (not part of
-    the append-only transcript delta), so a later dequeue/remove just shrinks it
-    and the stale 'Queued' block disappears while the real turn shows via delta.
-    Content is head+tail truncated — queued items mix a human's own pending input
-    with long system/scheduler ticks we can't tell apart, so we don't show it in
-    full; the title 'Queued' + truncation is enough."""
-    live = _still_queued_indices(entries)
-    out: list[dict] = []
-    for i in sorted(live):
-        e = entries[i]
-        content = e.get("content")
-        if not (isinstance(content, str) and content.strip()):
-            continue
-        out.append(_queued_render_item(e))
-    return out
-
-
-def _still_queued_keys(entries: list[dict]) -> set:
-    """(timestamp, content) of the enqueues STILL in the queue at EOF — keying
-    by content+ts because enqueue entries carry no uuid."""
-    keys = set()
-    for i in _still_queued_indices(entries):
-        e = entries[i]
-        keys.add((e.get("timestamp"), (e.get("content") or "").strip()))
-    return keys
-
-
-def _human_user_texts(entries: list[dict]) -> set:
-    """Stripped text of every real (non-meta) user turn — used to dedup an
-    enqueue that later became its own user turn."""
-    out = set()
-    for e in entries:
-        if e.get("type") != "user" or e.get("isMeta"):
-            continue
-        msg = e.get("message") or {}
-        c = msg.get("content") if isinstance(msg, dict) else None
-        if isinstance(c, str):
-            txt = c
-        elif isinstance(c, list):
-            txt = "\n".join(b.get("text", "") for b in c
-                            if isinstance(b, dict) and b.get("type") == "text")
-        else:
-            txt = ""
-        txt = txt.strip()
-        if txt:
-            out.add(txt)
-    return out
-
-
-def _consumed_unrecorded_items(entries: list[dict], user_texts: set) -> list[dict]:
-    """Every enqueued prompt that has LEFT the queue (consumed via dequeue, or
-    cancelled/replaced via remove/popAll) and left NO other trace — its content
-    never became a real user turn. A prompt that was actually SENT usually
-    reappears as a normal user turn (deduped out here via user_texts); what
-    survives is (a) prompts fed straight to Claude with no user-turn record and
-    (b) cancelled / pre-modified prompts.
-
-    We deliver ALL of them, every poll, as a STABLE live list (like `queued`) —
-    NOT via the transcript delta. The delta is cursor-based, so an enqueue that
-    was consumed just after the client's cursor passed it fell in a crack and
-    vanished until a full refresh. A stable full-window list the client commits
-    idempotently (by content key) cannot fall in that crack. Completeness first:
-    per the user, a stray cancelled msg is FAR better than a real one silently
-    vanishing (which risks re-sending the same thing)."""
-    still = _still_queued_indices(entries)
-    out: list[dict] = []
-    for i, e in enumerate(entries):
-        if e.get("type") != "queue-operation" or e.get("operation") != "enqueue":
-            continue
-        if i in still:
-            continue
-        cs = (e.get("content") or "").strip()
-        if not cs or cs in user_texts:
-            continue
-        out.append(_queued_render_item(e))
-    return out
-
-
-def _filter_entries(entries: list[dict], mode: str,
-                    still_q_keys: Optional[set] = None,
-                    user_texts: Optional[set] = None) -> list[dict]:
-    still_q_keys = still_q_keys or set()
-    user_texts = user_texts or set()
+def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
+    # Pure sequential pass. Queued prompts: a HUMAN `enqueue` is emitted INLINE at
+    # its own position (badge "Queued"); tagged enqueues (task-notification /
+    # command / …) are system-injected, NOT human — never shown as "Queued" (their
+    # delivered form appears on its own). Contentless dequeue/remove/popAll are
+    # dropped. NO dedup here — the client pairs a queued msg with its later "sent"
+    # user turn and removes the placeholder (see computePairedQueued in the SPA).
     out: list[dict] = []
     for e in entries:
         t = e.get("type")
         if t == "queue-operation":
-            # Pending enqueues are delivered via the separate `queued` set. But a
-            # CONSUMED enqueue that never became its own user turn (a prompt fed
-            # to Claude mid-turn) would otherwise vanish entirely — show it inline
-            # so nothing is lost. Skip it only if it's still pending (in the
-            # queued region) or it matches a real user turn (dedup).
-            content = e.get("content")
-            if e.get("operation") != "enqueue" or not (isinstance(content, str) and content.strip()):
-                continue
-            cs = content.strip()
-            if (e.get("timestamp"), cs) in still_q_keys:
-                continue
-            if cs in user_texts:
-                continue
-            # tagged → compact System stack; untagged → standalone _queued block
-            out.append(_queued_render_item(e))
+            if e.get("operation") == "enqueue":
+                cs = (e.get("content") or "").strip()
+                if cs and not _LEADTAG_RE.match(cs):
+                    out.append(_queued_render_item(e))
             continue
         if t not in ("user", "assistant"):
             continue
@@ -4664,11 +4553,7 @@ async def get_state(
     else:
         sliced = all_entries[-SNAPSHOT_TAIL_ENTRIES:]
 
-    _user_texts = _human_user_texts(all_entries)
-    transcript = _filter_entries(sliced, mode,
-                                 _still_queued_keys(all_entries),
-                                 _user_texts)
-    consumed_queued = _consumed_unrecorded_items(all_entries, _user_texts)
+    transcript = _filter_entries(sliced, mode)   # queued dedup is done client-side
     new_since_idx = since_idx
     if all_entries:
         new_since_idx = all_entries[-1].get("_idx", since_idx)
@@ -4700,10 +4585,8 @@ async def get_state(
 
     return {
         "binding": _serialize_binding(b),
-        "transcript": transcript,
+        "transcript": transcript,               # queued msgs are rendered INLINE here now
         "status_line": status_line,             # bottom status bar (changed-only)
-        "queued": _queued_items(all_entries),   # live set (still-pending) over the full window, not delta
-        "consumed_queued": consumed_queued,      # stable safety-net: consumed/cancelled enqueues w/ no user turn
         "since_idx": new_since_idx,
         "has_more_history": has_more,
         "gap_before_idx": gap_before_idx,
@@ -5614,8 +5497,16 @@ async def post_grammar(payload: GrammarPayload):
         "3. Keep technical tokens EXACTLY as-is: filenames, identifiers, shell commands, model names, code, URLs.\n"
         "4. If the message mixes in some Chinese (the writer didn't know the English), translate that part into "
         "natural English as part of the correction and note it.\n"
-        "5. Output ONLY the corrected line (or OK) — no quotes, no preamble, no explanation of yourself.")
-    user_msg = "<msg>\n" + text + "\n</msg>"
+        "5. The message may contain a truncation marker like [..123 chars skipped..] (a long paste was cut to its "
+        "head and tail). Keep the marker VERBATIM in place; check the fragment BEFORE it and the fragment AFTER it "
+        "SEPARATELY; never merge them or invent text to bridge the gap. A fragment may start or end mid-sentence — "
+        "leave those cut edges as they are.\n"
+        "6. Output ONLY the corrected line (or OK) — no quotes, no preamble, no explanation of yourself.")
+    # Long paste → send head 100 + tail 100 with a skipped-count marker (same as
+    # the grammar hook). Keeps the LLM focused on the user's prose, not a wall of
+    # pasted code/logs, and avoids the output being clipped by max_tokens.
+    llm_text = text if len(text) <= 250 else f"{text[:100]} [..{len(text) - 200} chars skipped..] {text[-100:]}"
+    user_msg = "<msg>\n" + llm_text + "\n</msg>"
     url = f"{api_base}/v1/chat/completions"
     headers = {"content-type": "application/json", "authorization": f"Bearer {api_key}"}
     body = {"model": model,
@@ -5628,7 +5519,7 @@ async def post_grammar(payload: GrammarPayload):
     except Exception:
         return {"correction": ""}   # best-effort learning aid: never surface an error to the user
     # "OK" sentinel, or the model echoed the input unchanged → nothing to learn
-    if out.strip().rstrip(".") == "OK" or out == text:
+    if out.strip().rstrip(".") == "OK" or out == llm_text:
         out = ""
     return {"correction": out}
 
