@@ -2468,6 +2468,35 @@ def _human_user_texts(entries: list[dict]) -> set:
     return out
 
 
+def _consumed_unrecorded_items(entries: list[dict], user_texts: set) -> list[dict]:
+    """Every enqueued prompt that has LEFT the queue (consumed via dequeue, or
+    cancelled/replaced via remove/popAll) and left NO other trace — its content
+    never became a real user turn. A prompt that was actually SENT usually
+    reappears as a normal user turn (deduped out here via user_texts); what
+    survives is (a) prompts fed straight to Claude with no user-turn record and
+    (b) cancelled / pre-modified prompts.
+
+    We deliver ALL of them, every poll, as a STABLE live list (like `queued`) —
+    NOT via the transcript delta. The delta is cursor-based, so an enqueue that
+    was consumed just after the client's cursor passed it fell in a crack and
+    vanished until a full refresh. A stable full-window list the client commits
+    idempotently (by content key) cannot fall in that crack. Completeness first:
+    per the user, a stray cancelled msg is FAR better than a real one silently
+    vanishing (which risks re-sending the same thing)."""
+    still = _still_queued_indices(entries)
+    out: list[dict] = []
+    for i, e in enumerate(entries):
+        if e.get("type") != "queue-operation" or e.get("operation") != "enqueue":
+            continue
+        if i in still:
+            continue
+        cs = (e.get("content") or "").strip()
+        if not cs or cs in user_texts:
+            continue
+        out.append(_queued_render_item(e))
+    return out
+
+
 def _filter_entries(entries: list[dict], mode: str,
                     still_q_keys: Optional[set] = None,
                     user_texts: Optional[set] = None) -> list[dict]:
@@ -4631,9 +4660,11 @@ async def get_state(
     else:
         sliced = all_entries[-SNAPSHOT_TAIL_ENTRIES:]
 
+    _user_texts = _human_user_texts(all_entries)
     transcript = _filter_entries(sliced, mode,
                                  _still_queued_keys(all_entries),
-                                 _human_user_texts(all_entries))
+                                 _user_texts)
+    consumed_queued = _consumed_unrecorded_items(all_entries, _user_texts)
     new_since_idx = since_idx
     if all_entries:
         new_since_idx = all_entries[-1].get("_idx", since_idx)
@@ -4667,7 +4698,8 @@ async def get_state(
         "binding": _serialize_binding(b),
         "transcript": transcript,
         "status_line": status_line,             # bottom status bar (changed-only)
-        "queued": _queued_items(all_entries),   # live set (over the full window), not delta
+        "queued": _queued_items(all_entries),   # live set (still-pending) over the full window, not delta
+        "consumed_queued": consumed_queued,      # stable safety-net: consumed/cancelled enqueues w/ no user turn
         "since_idx": new_since_idx,
         "has_more_history": has_more,
         "gap_before_idx": gap_before_idx,
