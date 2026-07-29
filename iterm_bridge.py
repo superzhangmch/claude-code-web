@@ -252,6 +252,26 @@ class ItermBridge:
                         return False
         return False
 
+    async def resize_cols(self, iterm_session_id: str, dcols: int):
+        """Read the session's grid size; if dcols != 0, widen/narrow the COLUMNS
+        (rows unchanged) so claude's TUI reflows to a new chars-per-line width.
+        dcols == 0 → read only (no resize, no redraw). Returns {cols, rows} or None."""
+        if not self.app:
+            return None
+        session = self.app.get_session_by_id(iterm_session_id)
+        if session is None:
+            return None
+        try:
+            cur = session.grid_size                       # util.Size: .width=cols .height=rows
+            cols, rows = int(cur.width), int(cur.height)
+            if dcols:
+                cols = max(20, min(400, cols + dcols))
+                await asyncio.wait_for(
+                    session.async_set_grid_size(iterm2.util.Size(cols, rows)), _RPC_TIMEOUT)
+            return {"cols": cols, "rows": rows}
+        except Exception:
+            return None
+
     async def send_text_to(self, iterm_session_id: str, text: str) -> bool:
         """Send text to a specific iTerm2 session.
 

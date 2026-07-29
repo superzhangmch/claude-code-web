@@ -5156,6 +5156,32 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
     return _screen_delta(claude_session_id, text, ver)
 
 
+class ResizePayload(BaseModel):
+    claude_session_id: str
+    dcols: int = 0          # +/- columns (chars per line); 0 = read current size only
+
+
+@app.post("/api/resize", dependencies=[Depends(require_token)])
+async def post_resize(payload: ResizePayload):
+    """Widen/narrow the bound tab's terminal COLUMNS (chars per line) by `dcols`
+    so claude's TUI reflows. dcols=0 → just read the current size. {cols, rows}."""
+    b = bindings.get_by_session(payload.claude_session_id)
+    if b is None:
+        b = await _try_autobind(payload.claude_session_id)
+    if b is None:
+        raise HTTPException(status_code=409, detail="session not bound")
+    if not verify_binding(b):
+        bindings.remove_session(payload.claude_session_id)
+        raise HTTPException(status_code=410, detail="tab/pid is gone")
+    try:
+        res = await bridge.resize_cols(b.iterm_session_id, payload.dcols)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"resize failed: {e}")
+    if res is None:
+        raise HTTPException(status_code=503, detail="resize not supported / unavailable")
+    return res
+
+
 @app.get("/api/iterm-tabs", dependencies=[Depends(require_token)])
 async def get_iterm_tabs():
     """List every iTerm2 tab/session for the 'iTerm2 tabs' viewer. Each tab is

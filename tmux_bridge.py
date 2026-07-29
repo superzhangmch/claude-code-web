@@ -239,6 +239,27 @@ class TmuxBridge:
             _run, ["select-pane", "-t", iterm_session_id, "-T", name])
         return r is not None and r.returncode == 0
 
+    async def resize_cols(self, iterm_session_id: str, dcols: int):
+        """Read the pane's window size; if dcols != 0, widen/narrow COLUMNS so
+        claude reflows (needs window-size manual, else the client size wins).
+        dcols == 0 → read only. `iterm_session_id` is a pane id (%N). {cols,rows}|None."""
+        pane = iterm_session_id
+        info = _run(["display-message", "-p", "-t", pane,
+                     "#{window_id} #{window_width} #{window_height}"])
+        if not info or info.returncode != 0 or not info.stdout.strip():
+            return None
+        try:
+            win, w, h = info.stdout.split()[:3]
+            w, h = int(w), int(h)
+        except Exception:
+            return None
+        cols = w
+        if dcols:
+            cols = max(20, min(400, w + dcols))
+            _run(["set-option", "-w", "-t", win, "window-size", "manual"])
+            _run(["resize-window", "-t", win, "-x", str(cols), "-y", str(h)])
+        return {"cols": cols, "rows": h}
+
     async def send_text_to(self, iterm_session_id: str, text: str) -> bool:
         """Inject keystrokes into a pane. A trailing CR is treated as a submit:
         send the body, small delay so the TUI's input renderer absorbs it, then

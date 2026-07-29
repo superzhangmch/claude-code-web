@@ -1557,6 +1557,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #tabs-modal #tabs-input:focus { outline: none; border-color: var(--accent); }
 /* Phone: reclaim the horizontal margins — shrink the modal's outer padding and
    the card's own padding so the tab list/screen use nearly the full width. */
+/* screen-window ⚙ display-settings dropdown: column width + font zoom */
+.scr-cfg-wrap { position: relative; display: inline-block; }
+.scr-cfg-menu {
+  display: none; position: absolute; right: 0; top: 100%; margin-top: 5px; z-index: 40;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px; min-width: 178px; box-shadow: 0 8px 24px rgba(0,0,0,.45);
+}
+.scr-cfg-menu.show { display: block; }
+.scr-cfg-row { display: flex; align-items: center; gap: 6px; padding: 4px 2px; font-size: 12px; color: var(--text); }
+.scr-cfg-row > span:first-child { flex: 1; color: var(--muted); white-space: nowrap; }
+.scr-cfg-row .btn { padding: 3px 9px; }
+#cfg-cols-val { min-width: 34px; text-align: center; font-variant-numeric: tabular-nums; }
+
 @media (orientation: portrait), (max-width: 640px) {
   #tabs-modal.modal { padding: 2px; }
   #tabs-modal .modal-card.tabs-card { width: 100vw; padding: 8px 2px; gap: 6px; }
@@ -1808,7 +1821,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <span id="battery" class="battery" style="display:none" title="Click for CPU history"></span>
     <a id="remote-btn" class="battery" href="/remote/" title="Remote control" style="text-decoration:none">🖥</a>
     <span id="mode-group" class="mode-group" style="display:none">
-      <button id="mode-btn" class="btn icon" title="Display detail: brief / medium / all">▁</button>
+      <button id="mode-btn" class="btn icon" title="Display detail: brief / medium / all">⚙</button>
     </span>
     <button id="screen-btn" class="btn icon" style="display:none" title="iTerm screen + session info">&gt;_</button>
     <button id="switch-btn" class="btn icon" style="display:none" title="切换到其它 tab">⇆</button>
@@ -1949,8 +1962,22 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <span style="flex:1"></span>
         <button id="screen-pgup" class="btn" title="上翻一屏 (u) — 冻结+全量抓取 scrollback">⇞</button>
         <button id="screen-pgdn" class="btn" title="下翻一屏 (d)">⇟</button>
-        <button id="screen-fontup" class="btn" title="bigger">A</button>
-        <button id="screen-fontdown" class="btn" title="smaller">a</button>
+        <div class="scr-cfg-wrap">
+          <button id="screen-cfg" class="btn" title="display settings (width / font)">⚙</button>
+          <div id="screen-cfg-menu" class="scr-cfg-menu">
+            <div class="scr-cfg-row">
+              <span>宽度 cols</span>
+              <button id="cfg-cols-dn" class="btn" title="−20 chars/line">−20</button>
+              <span id="cfg-cols-val">—</span>
+              <button id="cfg-cols-up" class="btn" title="+20 chars/line">+20</button>
+            </div>
+            <div class="scr-cfg-row">
+              <span>字体</span>
+              <button id="screen-fontdown" class="btn" title="smaller">a −</button>
+              <button id="screen-fontup" class="btn" title="bigger">A +</button>
+            </div>
+          </div>
+        </div>
         <button id="screen-full" class="btn" title="fullscreen (desktop)">⛶</button>
         <button id="screen-close" class="btn" title="close">✕</button>
       </div>
@@ -2771,10 +2798,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   let shouldAutoscroll = true;
 
   const POLL_INTERVAL_MS = 5000;
-  // Keep polling (slower) even when claude is idle — that's exactly when a
-  // choice/question is pending and the banner needs to appear. Stops anyway
-  // once ACTIVITY_TIMEOUT_MS of no interaction trips the timeout pause.
-  const IDLE_POLL_INTERVAL_MS = 6000;
+  // Poll cadence is CHANGE-DRIVEN (busy OR idle, one rule): a poll that sees new
+  // content (new transcript entries / a pending menu / resync) snaps the interval
+  // back to POLL_INTERVAL_MS; a poll with nothing new DOUBLES it, up to
+  // IDLE_POLL_MAX_MS — 5→10→20→40→60s. So an active stream stays at 5s, while a
+  // quiet stretch (idle, or a long tool / thinking with no new entries) eases off.
+  // Interaction resets it; the inactivity timeout eventually pauses polling.
+  const IDLE_POLL_MAX_MS = 60000;
+  let idlePollDelay = POLL_INTERVAL_MS;
   // How long polling keeps running after the last interaction before it pauses.
   // Longer while the page is FOREGROUND (you're here looking at it); short
   // otherwise (and a hidden page pauses immediately via the document.hidden
@@ -3057,6 +3088,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // Fullscreen is the DEFAULT now — only windowed if the user explicitly turned
     // it off (stored "0"); unset (null) → fullscreen.
     screenModal.classList.toggle("fs", localStorage.getItem("cc_web_screen_full") !== "0");
+    document.getElementById("screen-cfg-menu").classList.remove("show");   // start closed
     showScreenTab("screen");
     screenVer = ""; screenLines = []; screenPaused = false; screenPageDir = 0;   // fresh: first load is a full send
     loadScreen();
@@ -3116,6 +3148,35 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   applyScreenScale();
   document.getElementById("screen-fontup").addEventListener("click", () => { screenScale += 0.1; applyScreenScale(); });
   document.getElementById("screen-fontdown").addEventListener("click", () => { screenScale -= 0.1; applyScreenScale(); });
+  // ⚙ config dropdown: terminal column width (±20 chars/line) + font zoom (above).
+  const scrCfgBtn = document.getElementById("screen-cfg");
+  const scrCfgMenu = document.getElementById("screen-cfg-menu");
+  const cfgColsVal = document.getElementById("cfg-cols-val");
+  async function _resizeScreen(dcols) {
+    if (!attachedSid) return;
+    try {
+      const r = await authedFetch("/api/resize", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ claude_session_id: attachedSid, dcols }), timeoutMs: 12000,
+      });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (typeof d.cols === "number") cfgColsVal.textContent = d.cols;
+      if (dcols) { screenVer = ""; screenLines = []; loadScreen(); }   // reflowed → re-grab full screen
+    } catch {}
+  }
+  scrCfgBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const show = !scrCfgMenu.classList.contains("show");
+    scrCfgMenu.classList.toggle("show", show);
+    if (show) { cfgColsVal.textContent = "…"; _resizeScreen(0); }        // populate current cols (read-only)
+  });
+  document.addEventListener("click", (e) => {                            // outside click closes it
+    if (scrCfgMenu.classList.contains("show") && !scrCfgMenu.contains(e.target) && e.target !== scrCfgBtn)
+      scrCfgMenu.classList.remove("show");
+  });
+  document.getElementById("cfg-cols-dn").addEventListener("click", (e) => { e.stopPropagation(); _resizeScreen(-20); });
+  document.getElementById("cfg-cols-up").addEventListener("click", (e) => { e.stopPropagation(); _resizeScreen(20); });
   screenRefresh.addEventListener("click", () => {
     if (screenPaused) {
       // leaving paged mode → live again, with a fresh full baseline + auto-refresh.
@@ -4252,7 +4313,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // info button / modal. loadInfo() is called from openScreenInfo above.)
 
   function refreshModeButtons() {
-    modeBtn.textContent = MODE_ICON[renderMode] || "▁";     // button shows current mode
+    modeBtn.textContent = "⚙";     // gear (opens the brief/medium/all menu; current mode is marked in the menu)
     for (const b of modeOpts) {
       if (b.dataset.mode === renderMode) b.classList.add("current");
       else b.classList.remove("current");
@@ -5400,6 +5461,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     addOpenTab(sid, attachedName || attachedShort);
     const ot = openTabs.find(x => x.sid === sid);      // toast the full names (from cache; refreshMetaName keeps them fresh)
     showTabToast(ot && ot.tabName, (ot && ot.sessName) || label);
+    idlePollDelay = POLL_INTERVAL_MS;                 // fresh session → responsive, don't inherit a stale backoff
     activityDeadline = Date.now() + _activityWindow();
     pollOnce();                                        // cached → append delta; fresh → replace
   }
@@ -6954,7 +7016,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     else { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
     updateAutoload();
   }
-  function keepAlive() { activityDeadline = Date.now() + _activityWindow(); }
+  function keepAlive() { activityDeadline = Date.now() + _activityWindow(); idlePollDelay = POLL_INTERVAL_MS; }
   function schedulePoll(delay) {
     if (pollTimer) clearTimeout(pollTimer);
     pollTimer = setTimeout(pollOnce, delay);
@@ -6969,6 +7031,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (Date.now() > activityDeadline) { setPaused(true, "timeout"); return; }
     if (polling) { schedulePoll(POLL_INTERVAL_MS); return; }
     polling = true;
+    let pollChanged = false;   // did this poll see anything new? (resets idle backoff)
     const sid = attachedSid;   // guard: bail if the user switches session mid-fetch
     try {
       const params = new URLSearchParams();
@@ -7001,6 +7064,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // fully hide when hidden/paused/detached.
       syncHeartbeat();
       const entries = m.transcript || [];
+      pollChanged = entries.length > 0 || !!m.resync || !!m.pending_confirm;
       if (lastIdx === null || m.resync) {
         // resync: server signalled our cursor is from an old window numbering
         // (restart / rebuild) → replace once instead of a stale-empty delta.
@@ -7029,7 +7093,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       polling = false;
       if (isPaused || sessionGone) {}
       else if (Date.now() > activityDeadline) setPaused(true, "timeout");
-      else if (attachedSid) schedulePoll(claudeIdle ? IDLE_POLL_INTERVAL_MS : POLL_INTERVAL_MS);
+      else if (attachedSid) {
+        // change-driven backoff (busy or idle): new content → snap back to
+        // POLL_INTERVAL_MS; nothing new → double up to IDLE_POLL_MAX_MS (5→…→60s).
+        // A pending menu counts as change (pollChanged) so its banner shows fast;
+        // interaction (keepAlive) also resets it.
+        idlePollDelay = pollChanged ? POLL_INTERVAL_MS : Math.min(idlePollDelay * 2, IDLE_POLL_MAX_MS);
+        schedulePoll(idlePollDelay);
+      }
     }
   }
 
