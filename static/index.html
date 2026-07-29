@@ -94,6 +94,13 @@ body.pure #picker-runaway .ra-kill { background: #fff; border: 1px solid #000; }
 body.pure button, body.pure .btn, body.pure a.btn, body.pure .mode-pick {
   background: #fff !important; color: #000 !important; border: 1px solid #000 !important;
 }
+/* …but that white-bg !important makes the tabs-list ACTIVE row's white title text
+   (styled for the dark-accent highlight in other themes) invisible. Flip it back
+   to black on pure white; mark selection with an inset ring instead of a fill. */
+body.pure #tabs-modal .tabs-list button.active { box-shadow: inset 0 0 0 2px #000; }
+body.pure #tabs-modal .tabs-list button.active .tl-wt,
+body.pure #tabs-modal .tabs-list button.active .tl-tab,
+body.pure #tabs-modal .tabs-list button.active .tl-sess { color: #000 !important; }
 * { box-sizing: border-box; }
 html, body {
   margin: 0; padding: 0;
@@ -742,8 +749,8 @@ body.pure #closetab-btn.active {
 /* English-learning correction hint, shown inside your own sent message box when
    what you typed had real mistakes (empty/absent when it was already correct). */
 .msg .grammar-hint {
-  margin-top: 7px; padding: 5px 9px; border-left: 3px solid var(--accent);
-  background: var(--panel2); border-radius: 4px;
+  margin-top: 7px; padding: 3px 0 3px 9px; border-left: 2px solid var(--border);
+  background: transparent; border-radius: 0;
   font-size: 0.82em; line-height: 1.55; color: var(--text); word-break: break-word;
   white-space: pre-wrap;
 }
@@ -813,6 +820,7 @@ body.light .msg.system.stack-tool { background: var(--panel2); }
 }
 #hb .hb-txt .hb-ln {   /* NO wrap — scroll right for long lines; ONE size smaller than a transcript msg */
   white-space: pre; width: max-content;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;   /* terminal alignment needs fixed-width */
   font-size: calc(13px * var(--cs, 1)); line-height: 1.5;
 }
 /* status row (dot + countdown/idle) — its own line, left-aligned, at the BOTTOM */
@@ -837,6 +845,25 @@ body.light .msg.system.stack-tool { background: var(--panel2); }
 /* idle: no live content → drop the frame/box, just show the tiny "✓ idle" line */
 #hb.idle { opacity: .9; border-color: transparent; background: none; padding: 3px 12px; }
 @keyframes hbpulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+/* committed block: content that has landed in the transcript above — outlined
+   (solid, distinct from the live dashed frame), with a countdown + keep button.
+   Vanishes after the countdown unless kept (then held 5 min, exempt from cap). */
+#hb .hb-commit {
+  border: 1px solid var(--border); border-radius: 5px;
+  padding: 2px 6px 0; margin-bottom: 5px; background: rgba(127, 127, 127, 0.06);
+  width: max-content; min-width: 100%; box-sizing: border-box;   /* wrap the widest line so the frame scrolls with the content, not left behind */
+}
+#hb .hb-commit-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 3px 0 2px; font: 0.66em/1.4 ui-monospace, Menlo, monospace; color: var(--muted);
+}
+#hb .hb-commit-tag { color: var(--muted); font-weight: 700; }
+#hb .hb-commit-cd { opacity: .7; }
+#hb .hb-commit-btn {
+  font: inherit; padding: 1px 8px; border: 1px solid var(--border);
+  border-radius: 4px; background: var(--panel2); color: var(--text); cursor: pointer;
+}
+#hb .hb-commit-btn:active { opacity: .6; }
 .msg .markdown p { margin: 0 0 .7em 0; }
 .msg .markdown p:last-child { margin-bottom: 0; }
 .msg .markdown h1, .msg .markdown h2, .msg .markdown h3 { margin: .8em 0 .4em 0; line-height: 1.3; }
@@ -1648,12 +1675,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #files-modal .files-crumbs .crumb:hover { background: var(--panel2); text-decoration: underline; }
 #files-modal .files-crumbs .crumb-sep { color: var(--muted); }
 /* links popup — extracted URLs / local paths from a message block */
-#links-modal .modal-card { max-width: 780px; width: 90vw; }   /* desktop: roomier */
+#links-modal .modal-card { width: 85vw; max-width: 85vw; max-height: 85vh; }   /* desktop: 85% of the viewport */
 @media (orientation: portrait), (max-width: 640px) {
   #links-modal.modal { padding: 4px; }
-  #links-modal .modal-card { width: 100vw; max-width: 100vw; padding: 10px 6px; }
+  #links-modal .modal-card { width: 100vw; max-width: 100vw; max-height: 96vh; padding: 10px 6px; }   /* phone: maximise */
 }
-#links-modal .links-list { overflow: auto; max-height: 70vh; display: flex; flex-direction: column; gap: 5px; }
+#links-modal .links-list { overflow: auto; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 5px; }   /* fill the (now larger) card, scroll inside */
 #links-modal .links-sec { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin-top: 6px; }
 #links-modal .links-sec:first-child { margin-top: 0; }
 #links-modal .link-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--border); }
@@ -1847,24 +1874,24 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   </header>
   <div id="switch-menu" class="switch-menu" style="display:none"></div>
   <div id="mode-menu" class="switch-menu" style="display:none">
-    <div class="menu-sec">显示详情</div>
-    <button class="sw-item mode-opt" data-mode="brief">▁ brief（默认）</button>
+    <div class="menu-sec">Display detail</div>
+    <button class="sw-item mode-opt" data-mode="brief">▁ brief (default)</button>
     <button class="sw-item mode-opt" data-mode="medium">▄ medium</button>
     <button class="sw-item mode-opt" data-mode="all">█ all</button>
-    <div class="menu-sec">实时预览(生成中)</div>
+    <div class="menu-sec">Live preview (generating)</div>
     <div class="menu-row">
-      <button class="sw-item" id="mm-live-full">全部</button>
-      <button class="sw-item" id="mm-live-2">仅 2 行 · 省流量</button>
+      <button class="sw-item" id="mm-live-full">full</button>
+      <button class="sw-item" id="mm-live-2">2 lines · lite</button>
     </div>
-    <div class="menu-sec" id="mm-asr-label" style="display:none">语音识别 ASR</div>
+    <div class="menu-sec" id="mm-asr-label" style="display:none">Speech (ASR)</div>
     <div id="mm-asr-sec"></div>
-    <div class="menu-sec">字体</div>
+    <div class="menu-sec">Font</div>
     <div class="menu-row">
-      <button class="sw-item" id="mm-fontup">A 放大</button>
-      <button class="sw-item" id="mm-fontdown">a 缩小</button>
+      <button class="sw-item" id="mm-fontup">A larger</button>
+      <button class="sw-item" id="mm-fontdown">a smaller</button>
     </div>
-    <div class="menu-sec">主题</div>
-    <button class="sw-item" id="mm-theme">◐ 主题</button>
+    <div class="menu-sec">Theme</div>
+    <button class="sw-item" id="mm-theme">◐ theme</button>
   </div>
 
   <div id="cpu-modal" class="modal">
@@ -1991,7 +2018,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
               <button id="cfg-cols-up" class="btn" title="+20 chars/line">+20</button>
             </div>
             <div class="scr-cfg-row">
-              <span>字体</span>
+              <span>Font</span>
               <button id="screen-fontdown" class="btn" title="smaller">a −</button>
               <button id="screen-fontup" class="btn" title="bigger">A +</button>
             </div>
@@ -2578,7 +2605,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const btn = document.getElementById("picker-mode");
     if (btn) { btn.textContent = THEME_GLYPH[t]; btn.title = `theme: ${t} (tap to cycle dark/light/pure)`; }
     const mm = document.getElementById("mm-theme");
-    if (mm) mm.textContent = `${THEME_GLYPH[t]} 主题：${t}（点击切换）`;
+    if (mm) mm.textContent = `${THEME_GLYPH[t]} theme: ${t} (tap to switch)`;
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute("content", THEME_METACOLOR[t]);
   }
@@ -2876,11 +2903,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
 
   function setReady(idle) {
-    if (idle === null || idle === undefined) { readyEl.style.display = "none"; return; }
-    readyEl.style.display = "";
-    readyEl.className = "ready " + (idle ? "idle" : "busy");
-    readyEl.textContent = "";
-    readyEl.title = idle ? "ready" : "busy";
+    // Header busy/idle indicator removed — status is already clear from the live
+    // block dot + the ↻/⏸ row; keeping it hidden frees header width for the tabs.
+    readyEl.style.display = "none";
   }
 
   function setStatus(s) {
@@ -6815,7 +6840,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // the live block (hbVer="") + refetches so the new line count takes effect at once.
   const _setLive = (n) => (e) => {
     e.stopPropagation(); liveLines = n; localStorage.setItem("cc_web_live_lines", String(n));
-    hbVer = ""; hbNextAt = Date.now(); refreshModeButtons();
+    hbVer = ""; hbFrame = []; hbBuf = []; hbSimple = []; if (hbEl) hbEl._sig = null;   // switch mode → clean baseline
+    hbNextAt = Date.now(); refreshModeButtons();
   };
   document.getElementById("mm-live-full").addEventListener("click", _setLive(0));
   document.getElementById("mm-live-2").addEventListener("click", _setLive(2));
@@ -6924,6 +6950,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   async function forceCheckNow() {
     if (!attachedSid) return;
     isPaused = false; polling = false;
+    hbDelay = HB_BASE; hbNextAt = Date.now();   // fresh = refresh BOTH streams now (live fetches on the sync tick below)
     keepAlive();
     const fb = document.getElementById("autoload-fresh");
     if (fb) { fb.disabled = true; fb.textContent = "↻ …"; }
@@ -7112,18 +7139,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           }
         }
         ingest(entries, "append");
-        // A just-committed message must leave the live preview immediately (not
-        // wait a poll): trim the live block up to & INCLUDING it, keep the still-
-        // generating tail, then re-baseline so the next /api/live continues cleanly.
-        let _m = "";
+        // A just-committed real message: mark its span in the live buffer as
+        // committed → it gets outlined + a 10s countdown, then self-retires (the
+        // client owns removal). The frame/delta baseline is NOT reset — the buffer
+        // keeps the history; the server just keeps appending the current tip.
         for (let i = entries.length - 1; i >= 0; i--) {
           const e = entries[i];
           if (!e || e._queued || e._system || (e.type !== "user" && e.type !== "assistant")) continue;  // real msg only
           const t = _msgText(e);
-          if (t && t.replace(/\s+/g, "").length >= 4) { _m = t; break; }
+          if (t && t.replace(/\s+/g, "").length >= 4) { markCommitted(t); break; }
         }
-        if (_m) _trimLiveThrough(_m);
-        hbVer = ""; hbDelay = HB_BASE; hbNextAt = Date.now();
+        hbPaint();
       }
       if (typeof m.since_idx === "number") lastIdx = m.since_idx;
       if (m.epoch) lastEpoch = m.epoch;
@@ -7153,9 +7179,82 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // from the screen window): shows the last diff block's tail line(s) so you
   // know it's working between messages. 3s base, doubling to a cap when nothing
   // changes, reset on change. Stops when hidden / idle / paused / detached.
-  const HB_BASE = 3000, HB_MAX = 48000, HB_LINES = 2;   // x = last 2 lines of last diff block
-  let hbVer = "", hbSid = "", hbDelay = HB_BASE, hbNextAt = 0, hbLines = [],
-      hbBusy = false, hbTicker = null, hbEl = null, hbFrozen = false;
+  const HB_BASE = 3000, HB_MAX = 48000;
+  const COMMIT_TTL = 10000;         // committed block: 10s countdown, then it vanishes
+  const KEEP_MS = 5 * 60 * 1000;    // "keep" button holds a block for 5 min (and exempts it from the cap)
+  const LIVE_CAP = 200;             // hard cap on buffer lines (non-kept) — safety valve if marking never fires
+  const STITCH_MIN = 3;             // min matching lines to accept a frame↔buffer overlap alignment
+  // Full-mode live preview is an ACCUMULATING buffer of line objects (not a mirror
+  // of the server's current window). Each fetch reconstructs the current screen
+  // frame (hbFrame, for delta) then STITCHES it into hbBuf by content overlap.
+  // Committed content (matched to a jsonl msg) is outlined + counted down, then
+  // swept — the client owns retirement; the server just appends + forgets.
+  let hbVer = "", hbSid = "", hbDelay = HB_BASE, hbNextAt = 0,
+      hbFrame = [],      // last reconstructed frame (string[]) — the delta baseline (mirrors server region)
+      hbBuf = [],        // accumulating buffer of line objects (full mode)
+      hbSimple = [],     // plain string lines (2-line concise mode; no buffer)
+      hbBusy = false, hbTicker = null, hbEl = null, hbFrozen = false, _lineSeq = 0;
+  function _normMatch(s) { return (s || "").toLowerCase().replace(/[^0-9a-z一-鿿]+/g, ""); }
+  function mkLine(raw) { return { id: ++_lineSeq, raw, norm: _normMatch(raw), committed: false, expireAt: 0, kept: false }; }
+  // Stitch a reconstructed frame into hbBuf: align frame-head to buffer-tail by
+  // longest normalized-line overlap (prefer the rightmost alignment so genuinely
+  // new lines append), update overlapping lines in place, append the new tail.
+  // No reliable overlap → keep the committed prefix, resync only the live tail
+  // (never discards outlined history; worst case degrades to mirroring the tip).
+  function stitchFrame(frame) {
+    frame = (frame || []).map((x) => (x == null ? "" : x));
+    const fN = frame.length; if (!fN) return;
+    if (!hbBuf.length) { hbBuf = frame.map(mkLine); return; }
+    const bN = hbBuf.length, fnorm = frame.map(_normMatch);
+    let bestBase = -1, bestScore = -1;
+    for (let base = Math.max(0, bN - fN - 6); base <= bN - 1; base++) {
+      let score = 0;
+      for (let i = 0; i < fN; i++) {
+        const bi = base + i; if (bi >= bN) break;
+        if (fnorm[i] && fnorm[i] === hbBuf[bi].norm) score++;
+      }
+      if (score >= bestScore) { bestScore = score; bestBase = base; }   // >= → prefer rightmost (append-biased)
+    }
+    // Adaptive threshold: big frames need STITCH_MIN matches, short ones (e.g. the
+    // 1–2 line tail right after a commit) need only 1 — so a commit-shrink doesn't
+    // look like "no overlap" and nuke the buffer.
+    const need = Math.max(1, Math.min(STITCH_MIN, fN - 1));
+    if (bestScore < need) {                          // no reliable overlap
+      let c = 0; while (c < bN && hbBuf[c].committed) c++;
+      hbBuf = hbBuf.slice(0, c).concat(frame.map(mkLine));   // keep committed prefix, live tail = current frame
+      return;
+    }
+    for (let i = 0; i < fN; i++) {
+      const bi = bestBase + i;
+      if (bi < bN) { if (hbBuf[bi].raw !== frame[i]) { hbBuf[bi].raw = frame[i]; hbBuf[bi].norm = fnorm[i]; } }
+      else hbBuf.push(mkLine(frame[i]));
+    }
+  }
+  // A jsonl message just committed: find its span in the buffer (fuzzy, since live
+  // is raw terminal vs jsonl's clean markdown) and mark that prefix committed,
+  // (re)arming the whole committed block's 10s countdown. Kept lines keep their long expiry.
+  function markCommitted(msgText) {
+    if (liveLines === 2 || !hbBuf.length) return;
+    let a = _normMatch(msgText); if (a.length > 64) a = a.slice(-64); if (a.length < 6) return;
+    let concat = ""; const ends = [];
+    for (const ln of hbBuf) { concat += ln.norm; ends.push(concat.length); }
+    const pos = concat.lastIndexOf(a); if (pos < 0) return;
+    const endChar = pos + a.length;
+    let bline = hbBuf.length - 1;
+    for (let i = 0; i < ends.length; i++) { if (ends[i] >= endChar) { bline = i; break; } }
+    const exp = Date.now() + COMMIT_TTL;
+    for (let i = 0; i <= bline; i++) { hbBuf[i].committed = true; if (!hbBuf[i].kept) hbBuf[i].expireAt = exp; }
+    // Too short to bother holding — you read a line or two instantly; drop it now
+    // (no outline/countdown) rather than make you wait for the timer. Skip if kept.
+    let c = 0; while (c < hbBuf.length && hbBuf[c].committed) c++;
+    if (c >= 1 && c < 3 && !hbBuf.slice(0, c).some((l) => l.kept)) hbBuf.splice(0, c);
+  }
+  function sweepBuf() {   // drop expired committed lines (anywhere — a kept block at the head must not
+    const now = Date.now();   // block later expired ones from being swept); then enforce the cap (kept lines exempt)
+    if (hbBuf.some((l) => l.committed && now >= l.expireAt))
+      hbBuf = hbBuf.filter((l) => !(l.committed && now >= l.expireAt));
+    while (hbBuf.length > LIVE_CAP && !hbBuf[0].kept) hbBuf.shift();
+  }
   function ensureHb() {
     if (hbEl) return hbEl;
     hbEl = document.createElement("div"); hbEl.id = "hb";
@@ -7171,69 +7270,98 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
   function hbPaint() {
     const el = ensureHb();
-    const rows = hbLines.length ? hbLines : (hbFrozen ? [] : ["working…"]);   // idle+empty → no content line
-    if (el._txt.childElementCount !== rows.length) {
-      el._txt.textContent = "";
-      for (const _ of rows) { const d = document.createElement("div"); d.className = "hb-ln"; el._txt.appendChild(d); }
+    const now = Date.now();
+    const sl = el._txt.scrollLeft;                           // preserve horizontal scroll across a rebuild
+    if (liveLines === 2) {                                   // concise: plain lines, no buffer/outline
+      const rows = hbSimple.length ? hbSimple : (hbFrozen ? [] : ["working…"]);
+      const sig = "2" + rows.join("\n");
+      if (sig !== el._sig) {
+        el._sig = sig; el._commitCd = null; el._txt.textContent = "";
+        for (const r of rows) { const d = document.createElement("div"); d.className = "hb-ln"; d.textContent = r; el._txt.appendChild(d); }
+        el._txt.scrollLeft = sl;
+      }
+      el._cd.textContent = hbFrozen ? " · idle" : " · " + Math.max(0, Math.ceil((hbNextAt - now) / 1000)) + "s";
+      return;
     }
-    rows.forEach((r, i) => { el._txt.children[i].textContent = r; });
-    if (hbFrozen) { el._cd.textContent = " · idle"; }
-    else { const secs = Math.max(0, Math.ceil((hbNextAt - Date.now()) / 1000)); el._cd.textContent = " · " + secs + "s"; }
+    // full mode: committed prefix (outlined + countdown) then the live rest
+    let c = 0; while (c < hbBuf.length && hbBuf[c].committed) c++;
+    const committed = hbBuf.slice(0, c), live = hbBuf.slice(c);
+    const anyKept = committed.some((l) => l.kept);
+    const sig = committed.map((l) => l.id + (l.kept ? "k" : "c") + ":" + l.raw).join("\n")
+              + "" + live.map((l) => l.id + ":" + l.raw).join("\n")
+              + ((!committed.length && !live.length && !hbFrozen) ? "w" : "");
+    if (sig !== el._sig) {
+      el._sig = sig; el._commitCd = null; el._txt.textContent = "";
+      if (committed.length) {
+        const box = document.createElement("div"); box.className = "hb-commit";
+        for (const ln of committed) { const d = document.createElement("div"); d.className = "hb-ln"; d.textContent = ln.raw; box.appendChild(d); }
+        const bar = document.createElement("div"); bar.className = "hb-commit-bar";
+        const tag = document.createElement("span"); tag.className = "hb-commit-tag"; tag.textContent = "✓";
+        const cd = document.createElement("span"); cd.className = "hb-commit-cd";
+        const mkBtn = (label, fn) => { const b = document.createElement("button"); b.className = "hb-commit-btn"; b.textContent = label; b.onclick = fn; return b; };
+        const removeNow = () => { committed.forEach((l) => { l.expireAt = 0; l.kept = false; }); sweepBuf(); hbPaint(); };
+        bar.append(tag, cd);
+        if (anyKept) {
+          bar.append(mkBtn("remove", removeNow));
+        } else {
+          bar.append(mkBtn("keep 5m", () => { const t = Date.now() + KEEP_MS; committed.forEach((l) => { l.kept = true; l.expireAt = t; }); hbPaint(); }));
+          bar.append(mkBtn("remove", removeNow));
+        }
+        box.appendChild(bar); el._txt.appendChild(box); el._commitCd = cd;
+      }
+      for (const ln of live) { const d = document.createElement("div"); d.className = "hb-ln"; d.textContent = ln.raw; el._txt.appendChild(d); }
+      if (!committed.length && !live.length && !hbFrozen) { const d = document.createElement("div"); d.className = "hb-ln"; d.textContent = "working…"; el._txt.appendChild(d); }
+      el._txt.scrollLeft = sl;
+    }
+    if (el._commitCd) {   // countdown text isn't in the sig — refresh it every paint
+      const exp = committed.reduce((m, l) => Math.max(m, l.expireAt), 0);
+      const secs = Math.max(0, Math.ceil((exp - now) / 1000));
+      el._commitCd.textContent = anyKept ? `kept ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}` : `gone in ${secs}s`;
+    }
+    el._cd.textContent = hbFrozen ? " · idle" : " · " + Math.max(0, Math.ceil((hbNextAt - now) / 1000)) + "s";
   }
   // Pin the heartbeat (status line) just ABOVE #autoload (the ↻ fresh / ⏸ pause
   // row), so the order bottom-to-top is: fresh/pause buttons → status line →
   // queued → message flow. The buttons stay at the very bottom.
   function hbShow() { const el = ensureHb(); if (el.nextSibling !== autoloadEl) tvEl.insertBefore(el, autoloadEl); }
   function hbHide() { if (hbEl && hbEl.parentNode) hbEl.parentNode.removeChild(hbEl); }
-  function startHeartbeat() {
-    if (attachedSid !== hbSid) { hbSid = attachedSid; hbVer = ""; hbLines = []; }   // fresh baseline per session
-    hbFrozen = false; ensureHb().classList.remove("idle");
-    if (hbTicker) return;
-    hbDelay = HB_BASE; hbNextAt = Date.now();       // fetch on the first tick
-    hbShow(); hbPaint();
-    hbTicker = setInterval(hbTick, 1000);
-  }
-  function freezeHeartbeat() {                       // idle → stop polling; CLEAR live (nothing is generating)
-    if (hbTicker) { clearInterval(hbTicker); hbTicker = null; }
-    hbFrozen = true; hbLines = []; hbVer = "";       // drop any stale live tail so idle can't show old content
-    if (hbEl) hbEl._stat.textContent = "";
-    ensureHb().classList.add("idle");
-    hbShow(); hbPaint();
-  }
+  function _hbReset() { hbSid = attachedSid; hbVer = ""; hbFrame = []; hbBuf = []; hbSimple = []; if (hbEl) hbEl._sig = null; }
   function stopHeartbeat() {                          // fully hide (hidden / paused / detached)
     if (hbTicker) { clearInterval(hbTicker); hbTicker = null; }
     hbFrozen = false; if (hbEl) hbEl.classList.remove("idle");
     hbHide();
   }
+  // One entry point: ensure the element + 1s ticker exist; the ticker decides
+  // busy(fetch)/idle(age-out) each second. No separate start/freeze — idle just
+  // stops fetching and lets committed blocks run their countdown, then goes ✓.
   function syncHeartbeat() {
     if (!attachedSid || document.hidden || isPaused) { stopHeartbeat(); return; }
-    if (claudeIdle) freezeHeartbeat(); else startHeartbeat();
+    if (attachedSid !== hbSid) _hbReset();
+    ensureHb(); hbShow();
+    if (!hbTicker) { hbDelay = HB_BASE; hbNextAt = Date.now(); hbTicker = setInterval(hbTick, 1000); }
+    hbTick();
   }
   function hbTick() {
     if (!attachedSid || document.hidden || isPaused) { stopHeartbeat(); return; }
-    if (claudeIdle) { freezeHeartbeat(); return; }
-    if (attachedSid !== hbSid) { hbSid = attachedSid; hbVer = ""; hbLines = []; hbNextAt = Date.now(); }
+    if (attachedSid !== hbSid) { _hbReset(); hbNextAt = Date.now(); }
+    if (claudeIdle) {                          // idle: turn done → whatever's still shown is final. Convert the
+      hbFrozen = true;                         // whole tail to committed so it fades on a countdown instead of
+      if (hbBuf.length < 5) {                  // vanishing while you may still be reading — UNLESS it's <5 lines
+        hbBuf = hbBuf.filter((l) => l.kept);   // (read instantly, just clear; keep any pinned block)
+      } else {
+        const exp = Date.now() + COMMIT_TTL;
+        for (const l of hbBuf) { if (!l.committed && !l.kept) { l.committed = true; l.expireAt = exp; } }
+      }
+      sweepBuf();
+      ensureHb().classList.add("idle");        // ✓ status; outer live-frame off (the commit box carries its own)
+      if (hbEl && !hbBuf.length) hbEl._stat.textContent = "";
+      hbPaint();
+      if (!hbBuf.length) { clearInterval(hbTicker); hbTicker = null; }   // fully idle+empty → stop ticking
+      return;
+    }
+    hbFrozen = false; ensureHb().classList.remove("idle");
     if (Date.now() >= hbNextAt && !hbBusy) hbFetch();
-    hbPaint();
-  }
-  function _normMatch(s) { return (s || "").toLowerCase().replace(/[^0-9a-z一-鿿]+/g, ""); }
-  // Drop live-preview lines up to & INCLUDING the one where `msgText` ends, so a
-  // just-committed jsonl message vanishes from the live block instantly (it's now
-  // in the transcript) while the still-generating tail below it stays. Fuzzy match
-  // (normalized) since live is raw terminal text vs jsonl's clean markdown.
-  function _trimLiveThrough(msgText) {
-    if (!hbLines.length) return;
-    let a = _normMatch(msgText);
-    if (a.length > 64) a = a.slice(-64);
-    if (a.length < 6) return;
-    let concat = ""; const ends = [];
-    for (const l of hbLines) { concat += _normMatch(l); ends.push(concat.length); }
-    const pos = concat.lastIndexOf(a);
-    if (pos < 0) return;                       // not in live (already gone) → nothing to trim
-    const endChar = pos + a.length;
-    let bline = hbLines.length - 1;
-    for (let i = 0; i < ends.length; i++) { if (ends[i] >= endChar) { bline = i; break; } }
-    hbLines = hbLines.slice(bline + 1);
+    sweepBuf();
     hbPaint();
   }
   async function hbFetch() {
@@ -7243,7 +7371,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const _st = ensureHb()._stat;
       if (liveLines === 2) {
         // Concise mode: the OLD activity probe — the last 2 lines of the freshest
-        // DIFF block (what's being written right now). Tiny; no reconstruction.
+        // DIFF block (what's being written right now). Tiny; no buffer/outline.
         const r = await authedFetch("/api/activity?claude_session_id=" + encodeURIComponent(sid)
           + "&lines=2&ver=" + encodeURIComponent(hbVer), { timeoutMs: 8000 });
         if (sid !== attachedSid) return;
@@ -7251,10 +7379,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         const d = await r.json();
         if (sid !== attachedSid) return;
         if (d.same) { hbDelay = Math.min(hbDelay * 2, HB_MAX); _st.textContent = "·"; }
-        else { hbDelay = HB_BASE; hbVer = d.ver || ""; hbLines = (d.lines || []).filter(Boolean);
-               _st.textContent = `${hbLines.join("").length}B/${hbLines.length}l`; }
+        else { hbDelay = HB_BASE; hbVer = d.ver || ""; hbSimple = (d.lines || []).filter(Boolean);
+               _st.textContent = `${hbSimple.join("").length}B/${hbSimple.length}L`; }
       } else {
-        // Full mode: the live region after the anchor, per-line delta.
+        // Full mode: reconstruct the current frame (delta vs hbFrame), then stitch
+        // it into the accumulating buffer.
         const r = await authedFetch("/api/live", {
           method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ claude_session_id: sid, ver: hbVer, mobile: isPhone(), max_lines: 120 }),
@@ -7266,22 +7395,22 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         if (sid !== attachedSid) return;
         if (d.same) { hbDelay = Math.min(hbDelay * 2, HB_MAX); _st.textContent = "·"; }
         else if (typeof d.full === "string") {
-          hbDelay = HB_BASE; hbLines = d.full ? d.full.split("\n") : []; hbVer = d.ver || "";
-          _st.textContent = `${d.full.length}B/${hbLines.length}l`;
+          hbDelay = HB_BASE; hbFrame = d.full ? d.full.split("\n") : []; hbVer = d.ver || "";
+          stitchFrame(hbFrame); _st.textContent = `${d.full.length}B/${hbFrame.length}L`;
         } else if (d.changed && d.base === hbVer) {
           hbDelay = HB_BASE;
-          const k = d.scroll || 0, prev = hbLines, lines = [];
+          const k = d.scroll || 0, prev = hbFrame, lines = [];
           for (let i = 0; i < d.n; i++) { const j = i + k; lines[i] = (j >= 0 && j < prev.length) ? prev[j] : ""; }
           for (const [i, v] of d.changed) if (i >= 0 && i < d.n) lines[i] = (typeof v === "string") ? v : v.c.repeat(v.n);
-          hbLines = lines; hbVer = d.ver || "";
+          hbFrame = lines; hbVer = d.ver || ""; stitchFrame(hbFrame);
           const b = d.changed.reduce((a, [i, v]) => a + (typeof v === "string" ? v.length : (v.n || 0)), 0);
-          _st.textContent = `Δ${b}B/${d.changed.length}l`;
-        } else { hbDelay = HB_BASE; hbVer = ""; }
+          _st.textContent = `Δ${b}B/${d.changed.length}L`;
+        } else { hbDelay = HB_BASE; hbVer = ""; }   // base mismatch → next fetch full
       }
       hbShow();
       scrollToBottom();   // keep the newest line in view (only if already near bottom)
     } catch { hbDelay = Math.min(hbDelay * 2, HB_MAX); }
-    finally { hbBusy = false; hbNextAt = Date.now() + hbDelay; hbPaint(); }
+    finally { hbBusy = false; hbNextAt = Date.now() + hbDelay; sweepBuf(); hbPaint(); }
   }
   // keep the heartbeat pinned below the last message after new content arrives
   function hbReattach() { if (hbTicker || hbFrozen) hbShow(); }

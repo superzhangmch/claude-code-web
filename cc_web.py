@@ -91,6 +91,7 @@ def _load_conf() -> dict:
         "model": "claude-haiku-4-5",
         "cwds": [],
         "asr": [],     # list of {label, api_base, key, model} — voice-input ASR backends
+        "claude_config": "",   # path to claude's .claude.json (per-project trust); default ~/.claude.json
     }
     try:
         for line in CONF_PATH.read_text(encoding="utf-8").splitlines():
@@ -1837,6 +1838,57 @@ def _cwd_allowed(cwd: str) -> bool:
         if p == b or b in p.parents:
             return True
     return False
+
+
+def _claude_json_path() -> Path:
+    """Path to claude's .claude.json (holds per-project trust). Overridable via
+    `claude_config=<path>` in cc_web.conf for non-standard installs (custom home
+    or CLAUDE_CONFIG_DIR); defaults to ~/.claude.json. Re-read each call so
+    editing the conf needs no restart."""
+    override = (_load_conf().get("claude_config") or "").strip()
+    return Path(override).expanduser() if override else (Path.home() / ".claude.json")
+
+
+def _pretrust_cwd(cwd: str) -> None:
+    """Pre-seed claude's trust for `cwd` in ~/.claude.json so a fresh session
+    doesn't block on the "trust this folder?" prompt. That prompt stalls binding:
+    claude only writes its ~/.claude/sessions/<pid>.json AFTER trust is accepted,
+    so until then there's no sessionId to bind and the client hangs on
+    "Opening new claude tab…". cc_web only opens tabs under an allowed suggested
+    dir, so trusting them is safe. Deterministic (writes the config claude reads
+    at startup) — no dependence on the prompt's wording. Best-effort + atomic write."""
+    p = _claude_json_path()
+    try:
+        d = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except Exception:
+        return
+    if not isinstance(d, dict):
+        return
+    keys = {cwd.rstrip("/")}
+    try:
+        keys.add(str(Path(cwd).expanduser().resolve()))   # claude may store the realpath
+    except Exception:
+        pass
+    projects = d.setdefault("projects", {})
+    changed = False
+    for k in keys:
+        entry = projects.get(k)
+        if not isinstance(entry, dict):
+            entry = {}
+            projects[k] = entry
+        if not entry.get("hasTrustDialogAccepted"):
+            entry["hasTrustDialogAccepted"] = True
+            entry.setdefault("hasCompletedProjectOnboarding", True)
+            entry.setdefault("allowedTools", [])
+            changed = True
+    if not changed:
+        return
+    try:
+        tmp = p.with_name(p.name + ".ccwebtmp")
+        tmp.write_text(json.dumps(d), encoding="utf-8")
+        tmp.replace(p)   # atomic swap — never leave a half-written config
+    except Exception:
+        pass
 
 
 async def _ensure_iterm2_running() -> None:
@@ -4970,27 +5022,41 @@ async def get_session_info(claude_session_id: str):
 # assumed; a stale/mismatched ver just degrades to a full send — never wrong).
 _SCREEN_DELTA_CACHE: dict[str, dict] = {}
 _DELTA_MIN_RUN = 5   # need this many consecutive matching lines to accept a scroll align
+_SCREEN_DELTA_RING = 4   # frames kept per cache_key so a few interleaved clients each find their base
 
 
 def _screen_delta(cache_key: str, text: str, ver: str) -> dict:
     """Incremental screen update. ver = content hash. Unchanged → tiny {same}.
-    Else, if the client's last ver matches our cached previous frame, find the
-    alignment offset k (cur[i] == prev[i+k]) with the LONGEST run of consecutive
+    Else, if the client's last ver matches a recent frame we kept, find the
+    alignment offset k (cur[i] == base[i+k]) with the LONGEST run of consecutive
     matching lines and send only the differing lines (a whole line of one
-    repeated char ships compressed as {c,n}); reconstruction from prev at offset
+    repeated char ships compressed as {c,n}); reconstruction from base at offset
     k is exact for any k, so a bad k only enlarges the diff, never corrupts.
-    Else full. cache_key keeps the full-screen and the tail peek independent."""
+    Else full. cache_key keeps the full-screen and the tail peek independent.
+
+    We keep a small RING of recent frames per cache_key (not just the last one):
+    with 2-3 clients polling the same screen, whichever polls first no longer
+    advances a single slot out from under the others — each client's held ver is
+    still in the ring, so each gets a delta from ITS base instead of a full."""
     cur_lines = text.split("\n")
     new_ver = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
-    prev = _SCREEN_DELTA_CACHE.get(cache_key)
-    # Bound growth: one entry per (session[:tail]) accrues forever otherwise.
+    ring = _SCREEN_DELTA_CACHE.get(cache_key)
+    # Bound growth: one ring per (session[:tail]) accrues forever otherwise.
     if len(_SCREEN_DELTA_CACHE) > 256 and cache_key not in _SCREEN_DELTA_CACHE:
-        _SCREEN_DELTA_CACHE.clear()
-    _SCREEN_DELTA_CACHE[cache_key] = {"ver": new_ver, "lines": cur_lines}
+        _SCREEN_DELTA_CACHE.clear(); ring = None
+    if not isinstance(ring, list):        # migrate/init (old single-frame dict → ring)
+        ring = []
+        _SCREEN_DELTA_CACHE[cache_key] = ring
+    # Find the client's base among the recent frames BEFORE adding the current one.
+    base = next((f for f in ring if f["ver"] == ver), None) if (ver and ver != new_ver) else None
+    if not ring or ring[-1]["ver"] != new_ver:      # record current frame (dedupe newest), keep last N
+        ring.append({"ver": new_ver, "lines": cur_lines})
+        if len(ring) > _SCREEN_DELTA_RING:
+            del ring[0:len(ring) - _SCREEN_DELTA_RING]
     if ver and ver == new_ver:
         return {"ver": new_ver, "same": True}
-    if prev and ver and prev.get("ver") == ver:
-        pl = prev["lines"]
+    if base is not None:
+        pl = base["lines"]
         n, p = len(cur_lines), len(pl)
         # Scan k with k=0 and small offsets preferred on ties (favour no scroll).
         best_k, best_run = 0, 0
@@ -5208,19 +5274,32 @@ def _compress_dashes(lines: list[str]) -> list[str]:
 
 
 def _strip_code_listing(lines: list[str]) -> list[str]:
-    """Phone: drop runs of line-numbered code (Edit/Write/file displays) — >=3
-    consecutive lines that start with an integer + whitespace (right-aligned line
-    numbers) — replaced by a compact marker so prose stays readable on a small
-    screen. Numbered lists ('1. …', with a dot) are NOT matched."""
+    """Drop runs of line-numbered code (Edit/Write/file displays) — >=3 numbered
+    lines (integer + whitespace, right-aligned line numbers) — replaced by a
+    compact marker: nobody reads the code listing in a live preview, a marker that
+    it's there is enough. A wrapped CONTINUATION line (no leading number, but
+    indented at/past the number's end column) belongs to the previous numbered
+    line, so it extends the run instead of breaking it. Numbered lists ('1. …',
+    with a dot, no whitespace after the digits) are NOT matched."""
     out: list[str] = []
     i, n = 0, len(lines)
-    numbered = lambda s: bool(re.match(r"^\s*\d+\s", s))
+    numbered = lambda s: re.match(r"^(\s*)(\d+)\s", s)
     while i < n:
-        if numbered(lines[i]):
-            j = i
-            while j < n and numbered(lines[j]):
-                j += 1
-            if j - i >= 3:
+        m = numbered(lines[i])
+        if m:
+            lead = m.group(1)                            # leading indent BEFORE the number
+            gutter = len(lead) + len(m.group(2))         # column right after the line number
+            j, nums, gap = i, 0, 0
+            while j < n:
+                mj = numbered(lines[j])
+                if mj and mj.group(1) == lead:           # numbered line with the SAME leading indent
+                    nums += 1; gap = 0; j += 1; continue
+                s = lines[j]                             # a wrapped continuation: indented past the
+                if (j > i and gap < 1 and s.strip()      # gutter, and AT MOST ONE between numbered lines
+                        and (len(s) - len(s.lstrip())) >= gutter):
+                    gap += 1; j += 1; continue
+                break
+            if nums >= 3:
                 out.append("  ⋯ code ⋯")
                 i = j
                 continue
@@ -5271,9 +5350,8 @@ async def post_live(payload: LivePayload):
         anchors = _last_real_texts(entries, 3)
     ml = max(2, min(int(payload.max_lines or 120), 200))
     live, matched = _live_region(_collapse_blanks(screen or ""), anchors, ml)
-    live = _compress_dashes(live)              # shrink long divider runs (both platforms)
-    if payload.mobile:
-        live = _strip_code_listing(live)
+    live = _compress_dashes(live)              # shrink long divider runs
+    live = _strip_code_listing(live)           # nobody reads code in a live preview — a marker that it exists is enough
     live = live[-ml:]                          # re-cap after compress/strip changed line count
     # Per-line incremental: reuse the screen-delta encoder — unchanged → {same},
     # else {full} or {base,scroll,changed:[[i,line]…]} so the client replaces just
@@ -6054,6 +6132,7 @@ async def post_resume(payload: ResumePayload):
     cwd = _project_path_from_jsonl(jsonl)
     if not cwd:
         raise HTTPException(status_code=400, detail="cannot determine cwd for session")
+    _pretrust_cwd(cwd)                      # skip the "trust this folder?" prompt so binding isn't stalled
     await _ensure_iterm2_running()
     try:
         await bridge.ensure_connected()
@@ -6192,6 +6271,7 @@ async def post_new_session(payload: NewSessionPayload):
         Path(cwd).expanduser().mkdir(parents=True, exist_ok=True)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"cannot create dir: {e}")
+    _pretrust_cwd(cwd)                      # skip the "trust this folder?" prompt so binding isn't stalled
     await _ensure_iterm2_running()
     try:
         await bridge.ensure_connected()
