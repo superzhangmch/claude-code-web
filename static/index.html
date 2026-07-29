@@ -434,7 +434,7 @@ header > *:not(#meta-stack) { flex-shrink: 0; }
   }
   header { overflow: visible; }   /* let the wrapped rows show, don't clip */
   #tab-bar .qtab, #closetab-btn {
-    padding: 1px 6px; font-size: 9px; max-width: 120px; margin: 0;
+    padding: 1px 3px; font-size: 9px; max-width: 120px; margin: 0; gap: 2px;
     line-height: 1; border-radius: 4px;
   }
   #tab-bar .qtab-name { line-height: 1; }
@@ -800,28 +800,42 @@ body.light .msg.system.stack-tool { background: var(--panel2); }
 .tool-collapse-btn:hover { color: #ff6a6a; }
 /* liveness heartbeat — pinned after the last message; shows the last changed
    screen line + countdown to next check while claude is busy. */
-#hb {
-  display: flex; align-items: flex-start; gap: 7px;
-  padding: 5px 12px; margin: 2px 0 4px 0;
-  font: 0.68em/1.4 ui-monospace, Menlo, monospace; color: var(--muted);
-  min-width: 0;
+#hb {   /* the LIVE / realtime block — a prominent framed box so it's clearly not the transcript */
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+  padding: 8px 10px; margin: 10px 0 6px 0;
+  border: 1px dashed var(--accent); border-radius: 7px;
+  background: rgba(127, 127, 127, 0.06);
+  color: var(--muted); min-width: 0;
+}
+#hb .hb-txt {   /* horizontal-scroll the live block: keeps terminal alignment, no wrap guessing */
+  min-width: 0; width: 100%;
+  overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
+}
+#hb .hb-txt .hb-ln {   /* NO wrap — scroll right for long lines; ONE size smaller than a transcript msg */
+  white-space: pre; width: max-content;
+  font-size: calc(13px * var(--cs, 1)); line-height: 1.5;
+}
+/* status row (dot + countdown/idle) — its own line, left-aligned, at the BOTTOM */
+#hb .hb-status {
+  display: flex; align-items: center; gap: 6px;
+  font: 0.68em/1.4 ui-monospace, Menlo, monospace;
 }
 #hb .hb-dot {
   width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
-  flex-shrink: 0; margin-top: 4px; animation: hbpulse 1.2s ease-in-out infinite;
+  flex-shrink: 0; animation: hbpulse 1.2s ease-in-out infinite;
 }
-#hb .hb-txt { flex: 1; min-width: 0; }
-#hb .hb-txt .hb-ln { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #hb .hb-cd { flex-shrink: 0; opacity: .6; white-space: nowrap; }
+#hb .hb-stat { flex-shrink: 0; opacity: .45; white-space: nowrap; }   /* last /api/live fetch size */
 /* idle (frozen): keep the last diff shown; the pulsing dot becomes a static
    green ✓ so "idle / done" reads at a glance — no squinting at a blink. */
 #hb.idle .hb-dot {
   animation: none; opacity: 1;
-  width: auto; height: auto; margin-top: 1px; background: none; border-radius: 0;
+  width: auto; height: auto; background: none; border-radius: 0;
   color: #6ee884; font-weight: 700; font-size: 12px; line-height: 1;
 }
 #hb.idle .hb-dot::before { content: "✓"; }
-#hb.idle { opacity: .9; }
+/* idle: no live content → drop the frame/box, just show the tiny "✓ idle" line */
+#hb.idle { opacity: .9; border-color: transparent; background: none; padding: 3px 12px; }
 @keyframes hbpulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
 .msg .markdown p { margin: 0 0 .7em 0; }
 .msg .markdown p:last-child { margin-bottom: 0; }
@@ -1837,6 +1851,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <button class="sw-item mode-opt" data-mode="brief">▁ brief（默认）</button>
     <button class="sw-item mode-opt" data-mode="medium">▄ medium</button>
     <button class="sw-item mode-opt" data-mode="all">█ all</button>
+    <div class="menu-sec">实时预览(生成中)</div>
+    <div class="menu-row">
+      <button class="sw-item" id="mm-live-full">全部</button>
+      <button class="sw-item" id="mm-live-2">仅 2 行 · 省流量</button>
+    </div>
     <div class="menu-sec" id="mm-asr-label" style="display:none">语音识别 ASR</div>
     <div id="mm-asr-sec"></div>
     <div class="menu-sec">字体</div>
@@ -2795,6 +2814,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   let _lastStack = null;   // {kind:'sys'|'tool', box} — consecutive System msgs / brief tool-calls stack here
   let activityDeadline = 0;
   let renderMode = localStorage.getItem("cc_mode") || "brief";
+  let liveLines = parseInt(localStorage.getItem("cc_web_live_lines") || "0", 10) || 0;  // live block: 0=full, 2=concise (省流量)
   let shouldAutoscroll = true;
 
   const POLL_INTERVAL_MS = 5000;
@@ -2805,6 +2825,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // quiet stretch (idle, or a long tool / thinking with no new entries) eases off.
   // Interaction resets it; the inactivity timeout eventually pauses polling.
   const IDLE_POLL_MAX_MS = 60000;
+  const BUSY_POLL_MAX_MS = 8000;   // while claude is busy, cap the backoff low so a completing turn is noticed fast
   let idlePollDelay = POLL_INTERVAL_MS;
   // How long polling keeps running after the last interaction before it pauses.
   // Longer while the page is FOREGROUND (you're here looking at it); short
@@ -4318,6 +4339,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (b.dataset.mode === renderMode) b.classList.add("current");
       else b.classList.remove("current");
     }
+    const lf = document.getElementById("mm-live-full"), l2 = document.getElementById("mm-live-2");
+    if (lf && l2) { lf.classList.toggle("current", liveLines === 0); l2.classList.toggle("current", liveLines === 2); }
   }
 
   // ---------- picker ----------
@@ -6788,6 +6811,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   document.getElementById("mm-fontdown").addEventListener("click", (e) => {
     e.stopPropagation(); chatScale -= 0.1; applyChatScale(true);
   });
+  // live-preview size: full vs concise (2 lines). Keeps the menu open; re-baselines
+  // the live block (hbVer="") + refetches so the new line count takes effect at once.
+  const _setLive = (n) => (e) => {
+    e.stopPropagation(); liveLines = n; localStorage.setItem("cc_web_live_lines", String(n));
+    hbVer = ""; hbNextAt = Date.now(); refreshModeButtons();
+  };
+  document.getElementById("mm-live-full").addEventListener("click", _setLive(0));
+  document.getElementById("mm-live-2").addEventListener("click", _setLive(2));
   document.getElementById("mm-theme").addEventListener("click", (e) => {
     e.stopPropagation(); cycleTheme();
   });
@@ -7081,6 +7112,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           }
         }
         ingest(entries, "append");
+        // A just-committed message must leave the live preview immediately (not
+        // wait a poll): trim the live block up to & INCLUDING it, keep the still-
+        // generating tail, then re-baseline so the next /api/live continues cleanly.
+        let _m = "";
+        for (let i = entries.length - 1; i >= 0; i--) {
+          const e = entries[i];
+          if (!e || e._queued || e._system || (e.type !== "user" && e.type !== "assistant")) continue;  // real msg only
+          const t = _msgText(e);
+          if (t && t.replace(/\s+/g, "").length >= 4) { _m = t; break; }
+        }
+        if (_m) _trimLiveThrough(_m);
+        hbVer = ""; hbDelay = HB_BASE; hbNextAt = Date.now();
       }
       if (typeof m.since_idx === "number") lastIdx = m.since_idx;
       if (m.epoch) lastEpoch = m.epoch;
@@ -7098,7 +7141,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // POLL_INTERVAL_MS; nothing new → double up to IDLE_POLL_MAX_MS (5→…→60s).
         // A pending menu counts as change (pollChanged) so its banner shows fast;
         // interaction (keepAlive) also resets it.
-        idlePollDelay = pollChanged ? POLL_INTERVAL_MS : Math.min(idlePollDelay * 2, IDLE_POLL_MAX_MS);
+        const _cap = claudeIdle ? IDLE_POLL_MAX_MS : BUSY_POLL_MAX_MS;   // busy → cap low (catch turn-end fast)
+        idlePollDelay = pollChanged ? POLL_INTERVAL_MS : Math.min(idlePollDelay * 2, _cap);
         schedulePoll(idlePollDelay);
       }
     }
@@ -7115,16 +7159,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   function ensureHb() {
     if (hbEl) return hbEl;
     hbEl = document.createElement("div"); hbEl.id = "hb";
-    const dot = document.createElement("span"); dot.className = "hb-dot";
     const txt = document.createElement("div"); txt.className = "hb-txt";
+    const status = document.createElement("div"); status.className = "hb-status";
+    const dot = document.createElement("span"); dot.className = "hb-dot";
     const cd = document.createElement("span"); cd.className = "hb-cd";
-    hbEl.append(dot, txt, cd);
-    hbEl._txt = txt; hbEl._cd = cd;
+    const stat = document.createElement("span"); stat.className = "hb-stat";   // last-fetch bytes/lines
+    status.append(dot, cd, stat);
+    hbEl.append(txt, status);           // live text on top, status (dot + Xs/idle + fetch stat) at the BOTTOM
+    hbEl._txt = txt; hbEl._cd = cd; hbEl._stat = stat;
     return hbEl;
   }
   function hbPaint() {
     const el = ensureHb();
-    const rows = hbLines.length ? hbLines : ["working…"];
+    const rows = hbLines.length ? hbLines : (hbFrozen ? [] : ["working…"]);   // idle+empty → no content line
     if (el._txt.childElementCount !== rows.length) {
       el._txt.textContent = "";
       for (const _ of rows) { const d = document.createElement("div"); d.className = "hb-ln"; el._txt.appendChild(d); }
@@ -7146,10 +7193,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     hbShow(); hbPaint();
     hbTicker = setInterval(hbTick, 1000);
   }
-  function freezeHeartbeat() {                       // idle → stop polling, keep showing the last diff
+  function freezeHeartbeat() {                       // idle → stop polling; CLEAR live (nothing is generating)
     if (hbTicker) { clearInterval(hbTicker); hbTicker = null; }
-    hbFrozen = true; ensureHb().classList.add("idle");
-    if (!hbLines.length && !hbBusy) { hbFetch(); return; }  // nothing captured yet → grab it once
+    hbFrozen = true; hbLines = []; hbVer = "";       // drop any stale live tail so idle can't show old content
+    if (hbEl) hbEl._stat.textContent = "";
+    ensureHb().classList.add("idle");
     hbShow(); hbPaint();
   }
   function stopHeartbeat() {                          // fully hide (hidden / paused / detached)
@@ -7168,19 +7216,70 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (Date.now() >= hbNextAt && !hbBusy) hbFetch();
     hbPaint();
   }
+  function _normMatch(s) { return (s || "").toLowerCase().replace(/[^0-9a-z一-鿿]+/g, ""); }
+  // Drop live-preview lines up to & INCLUDING the one where `msgText` ends, so a
+  // just-committed jsonl message vanishes from the live block instantly (it's now
+  // in the transcript) while the still-generating tail below it stays. Fuzzy match
+  // (normalized) since live is raw terminal text vs jsonl's clean markdown.
+  function _trimLiveThrough(msgText) {
+    if (!hbLines.length) return;
+    let a = _normMatch(msgText);
+    if (a.length > 64) a = a.slice(-64);
+    if (a.length < 6) return;
+    let concat = ""; const ends = [];
+    for (const l of hbLines) { concat += _normMatch(l); ends.push(concat.length); }
+    const pos = concat.lastIndexOf(a);
+    if (pos < 0) return;                       // not in live (already gone) → nothing to trim
+    const endChar = pos + a.length;
+    let bline = hbLines.length - 1;
+    for (let i = 0; i < ends.length; i++) { if (ends[i] >= endChar) { bline = i; break; } }
+    hbLines = hbLines.slice(bline + 1);
+    hbPaint();
+  }
   async function hbFetch() {
     hbBusy = true;
     const sid = attachedSid;
     try {
-      const r = await authedFetch("/api/activity?claude_session_id=" + encodeURIComponent(sid)
-        + "&lines=" + HB_LINES + "&ver=" + encodeURIComponent(hbVer), { timeoutMs: 8000 });
-      if (sid !== attachedSid) return;
-      if (!r.ok) { hbDelay = Math.min(hbDelay * 2, HB_MAX); return; }
-      const d = await r.json();
-      if (sid !== attachedSid) return;
-      if (d.same) { hbDelay = Math.min(hbDelay * 2, HB_MAX); }              // no change → back off (double)
-      else { hbDelay = HB_BASE; hbVer = d.ver || ""; hbLines = (d.lines || []).filter(Boolean); }  // moving → reset
+      const _st = ensureHb()._stat;
+      if (liveLines === 2) {
+        // Concise mode: the OLD activity probe — the last 2 lines of the freshest
+        // DIFF block (what's being written right now). Tiny; no reconstruction.
+        const r = await authedFetch("/api/activity?claude_session_id=" + encodeURIComponent(sid)
+          + "&lines=2&ver=" + encodeURIComponent(hbVer), { timeoutMs: 8000 });
+        if (sid !== attachedSid) return;
+        if (!r.ok) { hbDelay = Math.min(hbDelay * 2, HB_MAX); return; }
+        const d = await r.json();
+        if (sid !== attachedSid) return;
+        if (d.same) { hbDelay = Math.min(hbDelay * 2, HB_MAX); _st.textContent = "·"; }
+        else { hbDelay = HB_BASE; hbVer = d.ver || ""; hbLines = (d.lines || []).filter(Boolean);
+               _st.textContent = `${hbLines.join("").length}B/${hbLines.length}l`; }
+      } else {
+        // Full mode: the live region after the anchor, per-line delta.
+        const r = await authedFetch("/api/live", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ claude_session_id: sid, ver: hbVer, mobile: isPhone(), max_lines: 120 }),
+          timeoutMs: 8000,
+        });
+        if (sid !== attachedSid) return;
+        if (!r.ok) { hbDelay = Math.min(hbDelay * 2, HB_MAX); return; }
+        const d = await r.json();
+        if (sid !== attachedSid) return;
+        if (d.same) { hbDelay = Math.min(hbDelay * 2, HB_MAX); _st.textContent = "·"; }
+        else if (typeof d.full === "string") {
+          hbDelay = HB_BASE; hbLines = d.full ? d.full.split("\n") : []; hbVer = d.ver || "";
+          _st.textContent = `${d.full.length}B/${hbLines.length}l`;
+        } else if (d.changed && d.base === hbVer) {
+          hbDelay = HB_BASE;
+          const k = d.scroll || 0, prev = hbLines, lines = [];
+          for (let i = 0; i < d.n; i++) { const j = i + k; lines[i] = (j >= 0 && j < prev.length) ? prev[j] : ""; }
+          for (const [i, v] of d.changed) if (i >= 0 && i < d.n) lines[i] = (typeof v === "string") ? v : v.c.repeat(v.n);
+          hbLines = lines; hbVer = d.ver || "";
+          const b = d.changed.reduce((a, [i, v]) => a + (typeof v === "string" ? v.length : (v.n || 0)), 0);
+          _st.textContent = `Δ${b}B/${d.changed.length}l`;
+        } else { hbDelay = HB_BASE; hbVer = ""; }
+      }
       hbShow();
+      scrollToBottom();   // keep the newest line in view (only if already near bottom)
     } catch { hbDelay = Math.min(hbDelay * 2, HB_MAX); }
     finally { hbBusy = false; hbNextAt = Date.now() + hbDelay; hbPaint(); }
   }

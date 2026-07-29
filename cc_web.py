@@ -4658,6 +4658,7 @@ async def get_state(
         sliced = all_entries[-SNAPSHOT_TAIL_ENTRIES:]
 
     transcript = _filter_entries(sliced, mode)   # queued dedup is done client-side
+    _pool_stash(claude_session_id, transcript)   # remember what we served → /api/live anchors (browser view)
     new_since_idx = since_idx
     if all_entries:
         new_since_idx = all_entries[-1].get("_idx", since_idx)
@@ -5069,6 +5070,221 @@ def _screen_activity(sid: str, text: str, ver: str, want: int = 2) -> dict:
     return {"ver": new_ver, "moving": True, "lines": [p[:160] for p in picked]}
 
 
+_LIVE_NORM_RE = re.compile(r"[^0-9a-z一-鿿]+")
+
+
+def _norm_match(s: str) -> str:
+    """Normalize for fuzzy screen↔jsonl matching: keep only letters/digits/CJK,
+    lowercased — drops emoji, ⏺/✻ markers, list signs, box-drawing, punctuation,
+    whitespace and hard-wrap newlines, so terminal-rendered text lines up with the
+    raw jsonl text."""
+    return _LIVE_NORM_RE.sub("", (s or "").lower())
+
+
+def _entry_text(e: dict) -> str:
+    """Plain text of a conversation entry (user/assistant), or "" for a
+    tool-call / tool-result / non-text turn."""
+    c = (e.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return c.strip()
+    if isinstance(c, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
+            return ""
+        return "\n".join(b.get("text", "") for b in c
+                         if isinstance(b, dict) and b.get("type") == "text").strip()
+    return ""
+
+
+def _last_real_texts(entries: list[dict], n: int = 3) -> list[str]:
+    """Text of the last up-to-n real messages (user/assistant, not tool/meta/
+    sidechain), newest first. jsonl-cache fallback anchor source for /api/live."""
+    out: list[str] = []
+    for e in reversed(entries):
+        if e.get("isSidechain") or e.get("isMeta") or e.get("toolUseResult"):
+            continue
+        if e.get("type") not in ("user", "assistant"):
+            continue
+        t = _entry_text(e)
+        if t:
+            out.append(t)
+            if len(out) >= n:
+                break
+    return out
+
+
+# Small per-session pool {_idx: text-tail} of recently-served messages, so
+# /api/live can resolve a client-sent anchor _idx → text WITHOUT re-reading the
+# jsonl. Populated by /api/state (which already has the text). Bounded.
+_LIVE_TEXT_POOL: dict[str, dict[int, str]] = {}
+
+
+def _pool_stash(sid: str, items: list[dict]) -> None:
+    if not sid or not items:
+        return
+    d = _LIVE_TEXT_POOL.setdefault(sid, {})
+    for e in items:
+        if e.get("type") not in ("user", "assistant"):
+            continue
+        if e.get("_queued") or e.get("_system"):     # pending placeholder / collapsed system → bad needle
+            continue
+        idx = e.get("_idx")
+        if idx is None:
+            continue
+        t = _entry_text(e)
+        if t:
+            d[idx] = t[-160:]                      # tail is enough for a screen needle
+    if len(d) > 6:                                 # keep only the newest 6 idx
+        for k in sorted(d)[:-6]:
+            del d[k]
+    if len(_LIVE_TEXT_POOL) > 128:                 # bound sessions
+        _LIVE_TEXT_POOL.clear()
+        _LIVE_TEXT_POOL[sid] = d
+
+
+def _live_region(text: str, anchors, max_lines: int = 120):
+    """The screen lines AFTER the newest matching anchor — i.e. output claude is
+    generating NOW that isn't in the transcript yet. `anchors` = last real jsonl
+    messages (newest first); each is normalized and its tail is found in the
+    normalized screen (LAST occurrence); the first anchor that matches wins and we
+    take everything below it. Returns (lines, matched). None match (scrolled off /
+    brand-new) → last `max_lines` content lines, matched=False."""
+    lines = text.split("\n")
+    concat, ends = "", []
+    for l in lines:
+        concat += _norm_match(l)
+        ends.append(len(concat))
+    matched = False
+    for anchor in (anchors or []):                          # newest → oldest
+        a = _norm_match(anchor)
+        if len(a) > 64:
+            a = a[-64:]                                     # tail is the part nearest the live region
+        if len(a) < 6:
+            continue                                        # too short → unreliable needle
+        pos = concat.rfind(a)
+        if pos < 0:
+            continue
+        end_char = pos + len(a)
+        bline = len(lines) - 1
+        for i, e in enumerate(ends):
+            if e >= end_char:
+                bline = i
+                break
+        lines = lines[bline + 1:]
+        matched = True
+        break
+    live = [l.rstrip() for l in lines if not _act_is_noise(l)]   # drop blanks/box/footer, keep spinner
+    if len(live) > max_lines:
+        live = live[-max_lines:]
+    return [l[:200] for l in live], matched
+
+
+_DASH_CHARS = "-─—━"
+
+
+def _compress_dashes(lines: list[str]) -> list[str]:
+    """Shrink long divider runs so they don't waste rows on a narrow screen:
+    (1) an all-dash line longer than 5 → 5 dashes;
+    (2) a line whose HEAD and TAIL are both dash-runs with >10 dashes total →
+        clamp the head and tail runs to 5 each, keep any middle text
+        (e.g. '──…── second brain ──…──' → '───── second brain ─────')."""
+    out: list[str] = []
+    for s in lines:
+        st = s.strip()
+        if st and all(c in _DASH_CHARS for c in st):
+            out.append(st[0] * 5 if len(st) > 5 else s)
+            continue
+        n = len(s)
+        i = 0
+        while i < n and s[i] in _DASH_CHARS:
+            i += 1
+        j = n
+        while j > 0 and s[j - 1] in _DASH_CHARS:
+            j -= 1
+        if i > 0 and j < n and (i + (n - j)) > 10:      # head-run + tail-run > 10 dashes
+            out.append(s[0] * 5 + s[i:j] + s[0] * 5)
+        else:
+            out.append(s)
+    return out
+
+
+def _strip_code_listing(lines: list[str]) -> list[str]:
+    """Phone: drop runs of line-numbered code (Edit/Write/file displays) — >=3
+    consecutive lines that start with an integer + whitespace (right-aligned line
+    numbers) — replaced by a compact marker so prose stays readable on a small
+    screen. Numbered lists ('1. …', with a dot) are NOT matched."""
+    out: list[str] = []
+    i, n = 0, len(lines)
+    numbered = lambda s: bool(re.match(r"^\s*\d+\s", s))
+    while i < n:
+        if numbered(lines[i]):
+            j = i
+            while j < n and numbered(lines[j]):
+                j += 1
+            if j - i >= 3:
+                out.append("  ⋯ code ⋯")
+                i = j
+                continue
+        out.append(lines[i])
+        i += 1
+    return out
+
+
+class LivePayload(BaseModel):
+    claude_session_id: str
+    ver: str = ""              # content hash of the last live block the client holds
+    mobile: bool = False       # phone → extra trimming (drop line-numbered code blocks)
+    max_lines: int = 120       # live block size: ~120 = full screen; small (e.g. 2) = concise / low-traffic
+    # (no anchors needed — the server uses its own record of what it last served
+    #  this session, which is exactly what the browser has rendered.)
+
+
+@app.post("/api/live", dependencies=[Depends(require_token)])
+async def post_live(payload: LivePayload):
+    """The 'live' in-progress response: the screen tail AFTER `anchor` (the last
+    jsonl message the client already renders) — what claude is writing right now
+    that hasn't flushed to the transcript. Unchanged since `ver` → {same}. This
+    is how the heartbeat shows realtime generation without waiting on the jsonl."""
+    b = bindings.get_by_session(payload.claude_session_id)
+    if b is None:
+        b = await _try_autobind(payload.claude_session_id)
+    if b is None:
+        raise HTTPException(status_code=409, detail="session not bound")
+    if not verify_binding(b):
+        bindings.remove_session(payload.claude_session_id)
+        raise HTTPException(status_code=410, detail="tab/pid is gone")
+    try:
+        screen = await bridge.get_screen_for(b.iterm_session_id, max_lines=100,
+                                             refresh=False, strip_input=True)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"cannot read screen: {e}")
+    # Anchors = what the server most recently SERVED this session (its pool) =
+    # exactly what the browser has rendered → live is only the not-yet-shown tail,
+    # with NO client input and NO jsonl read. Cold pool (restart / no /api/state
+    # yet) → derive from the warm jsonl cache once.
+    pool = _LIVE_TEXT_POOL.get(payload.claude_session_id, {})
+    anchors = [pool[k] for k in sorted(pool, reverse=True)[:3]]   # newest served first
+    if not anchors:
+        try:
+            entries = jsonl_cache.entries(b.jsonl_path) if (b.jsonl_path and b.jsonl_path.exists()) else []
+        except Exception:
+            entries = []
+        anchors = _last_real_texts(entries, 3)
+    ml = max(2, min(int(payload.max_lines or 120), 200))
+    live, matched = _live_region(_collapse_blanks(screen or ""), anchors, ml)
+    live = _compress_dashes(live)              # shrink long divider runs (both platforms)
+    if payload.mobile:
+        live = _strip_code_listing(live)
+    live = live[-ml:]                          # re-cap after compress/strip changed line count
+    # Per-line incremental: reuse the screen-delta encoder — unchanged → {same},
+    # else {full} or {base,scroll,changed:[[i,line]…]} so the client replaces just
+    # the changed lines / appends new ones (client reconstructs like the screen
+    # modal). Cache key includes `mobile` so phone/desktop keep separate baselines.
+    out = _screen_delta(f"{payload.claude_session_id}:live:{int(payload.mobile)}:{ml}",
+                        "\n".join(live), payload.ver)
+    out["matched"] = matched
+    return out
+
+
 @app.get("/api/input-state", dependencies=[Depends(require_token)])
 async def get_input_state(claude_session_id: str):
     """Is the human mid-typing in claude's input box? Used by the ask-peer skill
@@ -5106,7 +5322,7 @@ async def get_activity(claude_session_id: str, ver: str = "", lines: int = 2):
         bindings.remove_session(claude_session_id)
         raise HTTPException(status_code=410, detail="tab/pid is gone")
     try:
-        screen = await bridge.get_screen_for(b.iterm_session_id, max_lines=60,
+        screen = await bridge.get_screen_for(b.iterm_session_id, max_lines=100,
                                              refresh=False, strip_input=True)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"cannot read screen: {e}")
@@ -5652,8 +5868,10 @@ async def post_grammar(payload: GrammarPayload):
             "that is merely non-idiomatic-but-acceptable. If there are no real mistakes, output exactly OK for this part.\n"
             "B) NATIVE — how a native speaker would naturally and idiomatically say the same thing (this MAY differ a "
             "lot from the original — rephrase freely for the most natural version).\n"
-            "If the message is Chinese or mixes Chinese in, do BOTH for the English rendering. Keep technical tokens "
-            "(filenames, identifiers, shell commands, model names, code, URLs) EXACTLY as-is. " + _trunc_rule + "\n"
+            "Any non-English words (e.g. Chinese) → TRANSLATE them into English inline; BOTH lines must be ENTIRELY "
+            "English — no Chinese characters at all, and do NOT keep the original word or add a parenthetical gloss "
+            "like `(memory leak)`. Keep technical tokens (filenames, identifiers, shell commands, model names, code, "
+            "URLs) EXACTLY as-is. " + _trunc_rule + "\n"
             "Output EXACTLY two lines, nothing else, no quotes, no preamble:\n"
             "CORRECTION: <the corrected message, or OK>\n"
             "NATIVE: <the native-speaker version>")
@@ -5673,8 +5891,9 @@ async def post_grammar(payload: GrammarPayload):
             "2. If there ARE mistakes, output the corrected full message, then a short parenthetical listing the key "
             "fixes (e.g. `(their → there; \"make improve\" → \"improve\")`). Everything on ONE line, no line breaks.\n"
             "3. Keep technical tokens EXACTLY as-is: filenames, identifiers, shell commands, model names, code, URLs.\n"
-            "4. If the message mixes in some Chinese (the writer didn't know the English), translate that part into "
-            "natural English as part of the correction and note it.\n"
+            "4. Any non-English words (e.g. Chinese) → TRANSLATE into natural English. The ENTIRE output — the "
+            "corrected line AND the rule-2 fixes parenthetical — must contain NO Chinese characters: don't keep the "
+            "original word, don't gloss it like `(memory leak)`, and don't quote it in the fixes list.\n"
             "5. " + _trunc_rule + "\n"
             "6. Output ONLY the corrected line (or OK) — no quotes, no preamble, no explanation of yourself.")
     # Long paste → send head + tail with a skipped-count marker (same as the
