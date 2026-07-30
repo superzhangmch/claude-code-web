@@ -1353,6 +1353,7 @@ footer button.send {
 }
 .img-preview-ov img { max-width: 96vw; max-height: 88vh; object-fit: contain; border-radius: 4px; }
 .img-preview-cap { color: #ddd; font-size: 12px; margin-top: 8px; font: 12px ui-monospace, Menlo, monospace; }
+.link-row .lk-img { cursor: pointer; color: var(--accent); text-decoration: underline; }
 
 #newdlg-cwds, #candidates { display: flex; flex-direction: column; gap: 6px; }
 #newdlg-cwds button {
@@ -6187,10 +6188,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   function extractLinks(text) {
     const t = text || "";
     const urls = [], paths = [], seen = new Set();
-    const URLM = /https?:\/\/[^\s<>"'）)\]}，。、]+/g;
+    // Exclude markdown delimiters (` * ( ) [ ] { } | and CJK punctuation) so a URL
+    // inside `code`/**bold**/(parens) isn't swallowed with its trailing junk.
+    const URLM = /https?:\/\/[^\s<>"'`*()（）\[\]{}，。、|]+/g;
     let m;
     while ((m = URLM.exec(t))) {
-      const u = m[0].replace(/[.,;:)\]}>]+$/, "");
+      const u = m[0].replace(/[`*"'.,;:)\]}>]+$/, "");
       if (u && !seen.has(u)) { seen.add(u); urls.push(u); }
     }
     // strip URLs first so their host/path parts aren't re-matched as local paths
@@ -6255,6 +6258,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const tag = document.createElement("span");
       tag.className = "ltag " + (it.t === "url" ? "ltag-url" : "ltag-path");
       tag.textContent = it.t === "url" ? "URL" : "PATH";
+      const img = it.t === "path" && isImagePath(it.v);
       let node;
       if (it.t === "url") {
         node = document.createElement("a"); node.className = "lk";
@@ -6263,8 +6267,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       } else {
         node = document.createElement("span"); node.className = "lk path";
         node.textContent = elideLink(it.v); node.title = it.v;
+        if (img) {   // image → click the link to preview full-screen in THIS window (no new page)
+          node.classList.add("lk-img"); node.title = "click to preview";
+          node.addEventListener("click", () => openImagePreview(fsFileUrl(it.v), it.v));
+        }
       }
-      const img = it.t === "path" && isImagePath(it.v);
       if (img) tag.textContent = "IMG";
       li.appendChild(num); li.appendChild(tag); li.appendChild(node);
       if (it.t === "path") {
@@ -6280,7 +6287,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         const wrap = document.createElement("div"); wrap.className = "link-thumb";
         const im = document.createElement("img");
         im.loading = "lazy"; im.src = fsFileUrl(it.v); im.alt = it.v; im.title = "click to open full image";
-        im.addEventListener("click", () => window.open(fsFileUrl(it.v), "_blank"));
+        im.addEventListener("click", () => openImagePreview(fsFileUrl(it.v), it.v));   // full-screen in-window, not a new page
         im.addEventListener("error", () => { wrap.textContent = "(couldn't load image preview)"; wrap.classList.add("thumb-err"); });
         wrap.appendChild(im);
         linksListEl.appendChild(wrap);
