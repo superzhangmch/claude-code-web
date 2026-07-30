@@ -1232,10 +1232,6 @@ _CHROME_SUBSTR = ("auto mode", "new task?", "esc to interrupt", "tokens", "/clea
 # detection: we only scan the screen when claude has been quiet AND the
 # user hasn't typed anything recently (so a prompt is plausible).
 _last_input_ts: dict[str, float] = {}
-# Last (final-bytes, ts) per session — drop an identical resend inside a short
-# window (double-tap / client retry): only the first takes effect.
-_last_input_sig: dict[str, tuple[str, float]] = {}
-_INPUT_DEDUP_WINDOW = 1.0
 PENDING_CONFIRM_IDLE_SEC = 6.0
 
 
@@ -1254,6 +1250,27 @@ def _collapse_blanks(text: str) -> str:
             blank = False
             out.append(ln)
     return "\n".join(out)
+
+
+def _collapse_blanks_map(text: str, cy: Optional[int]) -> tuple[str, Optional[int]]:
+    """_collapse_blanks + map a raw row index `cy` (into the pre-collapse lines)
+    to its row in the collapsed output, so a cursor row stays aligned after
+    blank-run collapsing. Returns (collapsed_text, mapped_row | None)."""
+    out: list[str] = []
+    blank = False
+    mapped: Optional[int] = None
+    for i, ln in enumerate((text or "").split("\n")):
+        if ln.strip() == "":
+            if not blank:
+                blank = True
+                out.append("")
+            # else: this blank is collapsed into the previous one (out[-1])
+        else:
+            blank = False
+            out.append(ln)
+        if cy is not None and i == cy and out:
+            mapped = len(out) - 1
+    return "\n".join(out), mapped
 
 
 def _is_dash_run(s: str) -> bool:
@@ -1631,8 +1648,16 @@ def _parse_window_bytes(raw: bytes, frm: int):
     else:
         body = raw
         anchor = 0
+    # Only NEWLINE-TERMINATED lines are complete. A trailing fragment with no
+    # closing '\n' is a mid-write line (claude writes each entry as `…}\n`, so an
+    # idle file always ends in '\n') — drop it so it isn't counted here while the
+    # eof boundary excludes it too (else the round is double-counted once the
+    # newline lands). Keeps parsing consistent with JsonlCache's eof_off.
+    parts = body.split(b"\n")
+    if body and not body.endswith(b"\n") and parts:
+        parts = parts[:-1]
     entries: list[dict] = []
-    for line in body.split(b"\n"):
+    for line in parts:
         line = line.strip()
         if not line:
             continue
@@ -1697,7 +1722,13 @@ class JsonlCache:
                 entries, anchor = _parse_window_bytes(buf, have_from)
                 rounds = sum(1 for e in entries if _is_round_start_entry(e))
                 if rounds >= want_rounds or have_from == 0 or (upto - have_from) >= _CTX_READ_CAP:
-                    return entries, anchor
+                    # eof = just past the LAST complete line in the window, so a
+                    # mid-write partial tail is left for the next incremental read
+                    # (never consumed-then-orphaned). No newline at all → whole
+                    # window is one growing line; fall back to upto.
+                    last_nl = buf.rfind(b"\n")
+                    eof = (have_from + last_nl + 1) if last_nl >= 0 else upto
+                    return entries, anchor, eof
                 to_read = upto - have_from       # next read = current total → window doubles
 
     def entries(self, path: Optional[Path]) -> list[dict]:
@@ -1718,24 +1749,34 @@ class JsonlCache:
             c = None                              # truncated / replaced → reload
         if c is None:
             try:
-                entries, anchor = self._grow_read(path, st.st_size, _JSONL_LOAD_ROUNDS)
+                entries, anchor, eof = self._grow_read(path, st.st_size, _JSONL_LOAD_ROUNDS)
             except OSError:
                 return []
             _number_entries(entries, _JSONL_BASE, _JSONL_BASE)
             self._gen += 1        # window (re)built from scratch → new generation
             c = {"size": st.st_size, "mtime": st.st_mtime, "ino": st.st_ino,
-                 "anchor_off": anchor, "eof_off": st.st_size, "entries": entries,
+                 "anchor_off": anchor, "eof_off": eof, "entries": entries,
                  "gen": self._gen}
         else:
             try:
                 with path.open("rb") as f:
-                    f.seek(c["eof_off"])          # a line boundary → no partial line
+                    f.seek(c["eof_off"])          # a complete-line boundary
                     raw = f.read()
             except OSError:
                 self._touch(path)
                 return c["entries"]
+            # Consume ONLY up to the last complete line (final '\n'). Claude may be
+            # mid-writing the newest entry (assistant turns are large; writes to the
+            # jsonl are not atomic), so `raw` can end in a partial line. Advancing
+            # eof_off to EOF past that partial would ORPHAN the round — its start
+            # bytes are never re-read, so no later refresh could ever surface it
+            # (this was the "refresh won't pull the latest, but the jsonl already
+            # has it" bug). Leave the partial tail unread; the next poll — once the
+            # newline lands — picks up the whole line.
+            nl = raw.rfind(b"\n")
+            consume = nl + 1 if nl >= 0 else 0
             new: list[dict] = []
-            for line in raw.split(b"\n"):
+            for line in raw[:consume].split(b"\n"):
                 line = line.strip()
                 if not line:
                     continue
@@ -1752,7 +1793,7 @@ class JsonlCache:
             c["size"] = st.st_size
             c["mtime"] = st.st_mtime
             c["ino"] = st.st_ino
-            c["eof_off"] = st.st_size
+            c["eof_off"] = c["eof_off"] + consume     # advance only past complete lines
         self._cache[path] = c
         self._touch(path)
         self._evict()
@@ -1769,7 +1810,7 @@ class JsonlCache:
         if not c or c["anchor_off"] <= 0:
             return []
         try:
-            entries, anchor = self._grow_read(path, c["anchor_off"], want_rounds)
+            entries, anchor, _eof = self._grow_read(path, c["anchor_off"], want_rounds)
         except OSError:
             return []
         if not entries:
@@ -4865,13 +4906,7 @@ async def post_input(payload: InputPayload):
     final = body
     if payload.press_enter:
         final = final + "\r"
-    # Dedup: an identical `final` to the same session within the window is a
-    # double-tap / retry — honour only the first, silently drop the rest.
     now = _time.time()
-    sig = _last_input_sig.get(b.claude_session_id)
-    if sig and sig[0] == final and (now - sig[1]) < _INPUT_DEDUP_WINDOW:
-        return {"ok": True, "deduped": True}
-    _last_input_sig[b.claude_session_id] = (final, now)
     # Optional forced clear: Ctrl+U as its OWN keystroke (with a beat) so the
     # TUI processes it as "kill line" — never bundle it into the text stream
     # (that leaks a literal \x15 into the message).
@@ -5426,6 +5461,7 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
     if not verify_binding(b):
         bindings.remove_session(claude_session_id)
         raise HTTPException(status_code=410, detail="tab/pid is gone")
+    want_cursor = (tail == 0)   # the cursor marker only applies to the full-screen view
     try:
         # Send Ctrl+L before reading so claude's TUI redraws and we get
         # a clean capture (no leftover box-drawing chars from earlier
@@ -5434,20 +5470,26 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
         # strip_input=False → show the full screen, including the input box
         # and footer at the bottom (the attach flow strips those, but here
         # the user wants to see everything that's actually on the tab).
-        screen = await bridge.get_screen_for(b.iterm_session_id, max_lines=200,
-                                             refresh=refresh, strip_input=False)
+        res = await bridge.get_screen_for(b.iterm_session_id, max_lines=200,
+                                          refresh=refresh, strip_input=False,
+                                          with_cursor=want_cursor)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
+    screen, raw_cursor = res if want_cursor else (res, None)
     if tail > 0:
         ttext = _screen_tail(screen or "", tail)
         # tail peek: same delta scheme, independent baseline (tail text ≠ full
         # screen). refresh=false path, so it never disturbs the tab.
         return _screen_delta(f"{claude_session_id}:tail{tail}", ttext, ver) if delta \
             else {"screen": ttext}
-    text = _collapse_blanks(screen or "")
-    if not delta:
-        return {"screen": text}
-    return _screen_delta(claude_session_id, text, ver)
+    # collapse blank runs AND map the raw cursor row into the collapsed line index
+    text, cur_row = _collapse_blanks_map(screen or "", raw_cursor[0] if raw_cursor else None)
+    resp = {"screen": text} if not delta else _screen_delta(claude_session_id, text, ver)
+    if raw_cursor is not None and cur_row is not None:
+        # [row, col, visible] — row aligned to the delta's line indexing; the
+        # client draws a block caret there when visible (skips it while hidden).
+        resp["cursor"] = [cur_row, raw_cursor[1], raw_cursor[2]]
+    return resp
 
 
 class ResizePayload(BaseModel):
@@ -5504,6 +5546,7 @@ async def get_iterm_tabs():
         t["bound_to"] = bound_by_iterm.get(it)
         sid = bound_by_iterm.get(it) or sid_by_iterm.get(it)
         if sid:
+            t["sid"] = sid            # claude session id (bound OR live tab) → shown after the wN/tM label
             title, _ = _summary_of(sid)
             t["session_name"] = _user_name_of(sid) or title or ""
     return {"tabs": tabs}

@@ -388,7 +388,8 @@ class ItermBridge:
     async def get_screen_for(self, iterm_session_id: str, max_lines: int = 80,
                              refresh: bool = False,
                              strip_input: bool = True,
-                             scrollback: bool = False) -> Optional[str]:
+                             scrollback: bool = False,
+                             with_cursor: bool = False):
         """Read the current screen tail from `iterm_session_id`.
 
         When `refresh=True`, send Ctrl+L (form feed) first and wait
@@ -407,12 +408,18 @@ class ItermBridge:
         `max_lines` of SCROLLBACK: when a menu/long output fills the screen
         the conversation scrolls out of the grid, so fingerprint scoring
         would otherwise see none of it and score 0.
+
+        `with_cursor` → return (text, cursor) where cursor is (row, col, vis):
+        the terminal cursor in the CURRENT grid (same snapshot, no extra RPC),
+        row 0-based from the top of the visible grid. iTerm has no cheap
+        cursor-visibility flag, so vis is always 1 here.
         """
+        _fail = (None, None) if with_cursor else None
         if not self.app:
-            return None
+            return _fail
         session = self.app.get_session_by_id(iterm_session_id)
         if session is None:
-            return None
+            return _fail
         if refresh:
             try:
                 await session.async_send_text("\x0c")  # Ctrl+L
@@ -424,6 +431,7 @@ class ItermBridge:
         # bounds (oldest available line = overflow; total = history + grid).
         # Falls back to the visible-only read if the range read fails.
         lines = None
+        cursor = None
         if scrollback:
             try:
                 info = await asyncio.wait_for(session.async_get_line_info(), _RPC_TIMEOUT)
@@ -443,7 +451,7 @@ class ItermBridge:
                 contents = await asyncio.wait_for(
                     session.async_get_screen_contents(), _RPC_TIMEOUT)
             except Exception:
-                return None
+                return _fail
             lines = []
             for y in range(contents.number_of_lines):
                 line = contents.line(y)
@@ -454,11 +462,23 @@ class ItermBridge:
                 # output without each having to remember the workaround.
                 s = line.string.replace("\x00", " ").rstrip()
                 lines.append(s)
+            if with_cursor:
+                try:
+                    cc = contents.cursor_coord            # same snapshot as the grid above
+                    # cursor_coord.y is ABSOLUTE (scrollback-inclusive); subtract the
+                    # first visible line's absolute row (windowed_coord_range.start.y,
+                    # in the same snapshot — no extra RPC) to get a grid-relative row.
+                    base = contents.windowed_coord_range.start.y
+                    if cc is not None:
+                        cursor = (int(cc.y) - int(base), int(cc.x), 1)
+                except Exception:
+                    cursor = None
         if strip_input:
             lines = _strip_input_area(lines)
         while lines and not lines[-1]:
             lines.pop()
-        return "\n".join(lines[-max_lines:])
+        text = "\n".join(lines[-max_lines:])
+        return (text, cursor) if with_cursor else text
 
 
 def _is_dash_bar(s: str) -> bool:

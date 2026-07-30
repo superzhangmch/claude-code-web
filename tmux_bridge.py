@@ -187,23 +187,47 @@ class TmuxBridge:
     async def get_screen_for(self, iterm_session_id: str, max_lines: int = 80,
                              refresh: bool = False,
                              strip_input: bool = True,
-                             scrollback: bool = False) -> Optional[str]:
+                             scrollback: bool = False,
+                             with_cursor: bool = False):
         """Capture the pane's text. `scrollback` reads `max_lines` of history
         above the visible grid; otherwise just the current screen. `strip_input`
         drops claude's Ink input box + footer (reuses the iTerm bridge's parser).
-        `refresh` is a no-op for tmux (capture-pane always reflects live state)."""
+        `refresh` is a no-op for tmux (capture-pane always reflects live state).
+
+        `with_cursor` → return (text, cursor) where cursor is (row, col, vis):
+        the pane cursor from a SEPARATE display-message call (capture-pane has no
+        cursor). Only for the visible grid (not scrollback); row is 0-based from
+        the top of the visible pane, matching the captured lines."""
         args = ["capture-pane", "-p", "-t", iterm_session_id]
         if scrollback:
             args += ["-S", f"-{max_lines}"]
         r = await asyncio.to_thread(_run, args)
         if r is None or r.returncode != 0:
-            return None
+            return (None, None) if with_cursor else None
         lines = [ln.rstrip() for ln in r.stdout.split("\n")]
+        cursor = None
+        if with_cursor and not scrollback:
+            cursor = await self.get_cursor_for(iterm_session_id)
         if strip_input:
             lines = _strip_input_area(lines)
         while lines and not lines[-1]:
             lines.pop()
-        return "\n".join(lines[-max_lines:])
+        text = "\n".join(lines[-max_lines:])
+        return (text, cursor) if with_cursor else text
+
+    async def get_cursor_for(self, iterm_session_id: str):
+        """(row, col, vis) of the pane cursor within the visible grid, or None.
+        vis = tmux #{cursor_flag} (0 while claude hides the cursor)."""
+        r = await asyncio.to_thread(
+            _run, ["display-message", "-p", "-t", iterm_session_id,
+                   "#{cursor_y}\t#{cursor_x}\t#{cursor_flag}"])
+        if r is None or r.returncode != 0:
+            return None
+        try:
+            y, x, vis = r.stdout.strip().split("\t")
+            return (int(y), int(x), int(vis))
+        except (ValueError, AttributeError):
+            return None
 
     async def input_typed_text(self, iterm_session_id: str) -> str:
         """The text the human has actually TYPED into the input box, excluding
@@ -281,15 +305,24 @@ class TmuxBridge:
         # send-keys -H <hex...> delivers exact bytes to the pty, so ESC
         # sequences (e.g. arrow-key menu nav "\x1b[B") and CR pass through
         # verbatim — the tmux analog of iTerm's async_send_text.
+        # CHUNK it: one hex arg per byte, so a big multi-line paste (several KB of
+        # CJK = thousands of args) would overflow a single send-keys' argv and the
+        # call fails — surfacing as the misleading "iterm session vanished". Split
+        # into ≤_SEND_CHUNK-byte batches; the pty reassembles them (a bracketed
+        # paste split across batches still lands as one paste).
         try:
             raw = text.encode("utf-8")
         except Exception:
             return False
         if not raw:
             return True
-        hexpairs = [f"{b:02x}" for b in raw]
-        r = await asyncio.to_thread(_run, ["send-keys", "-t", pane, "-H", *hexpairs])
-        return r is not None and r.returncode == 0
+        _SEND_CHUNK = 400
+        for i in range(0, len(raw), _SEND_CHUNK):
+            hexpairs = [f"{b:02x}" for b in raw[i:i + _SEND_CHUNK]]
+            r = await asyncio.to_thread(_run, ["send-keys", "-t", pane, "-H", *hexpairs])
+            if r is None or r.returncode != 0:
+                return False
+        return True
 
     async def open_resume_claude_tab(self, cwd: str, session_id: str,
                                      label: str) -> Optional[str]:

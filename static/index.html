@@ -160,6 +160,7 @@ header .mode-group { display: inline-flex; gap: 2px; }
 .switch-menu .sw-item:hover { border-color: var(--accent); }
 .switch-menu .sw-item.current { border-color: var(--accent); color: var(--accent); font-weight: 700; }
 .switch-menu .sw-item .sw-wt { color: var(--muted); opacity: .7; font-size: 11px; }
+.switch-menu .sw-item .sw-sid { color: var(--muted); opacity: .55; font-size: 11px; font-family: ui-monospace, Menlo, monospace; }
 .switch-menu .sw-item .sw-tab { color: var(--accent); font-weight: 700; }   /* highlight tab-name */
 .switch-menu .sw-item .sw-sess { color: var(--muted); }
 .switch-menu .menu-sec { font-size: 10px; color: var(--muted); margin: 6px 2px 3px; text-transform: uppercase; letter-spacing: .05em; }
@@ -869,7 +870,9 @@ body.light .msg.system.stack-tool { background: var(--panel2); }
 .msg .markdown h1, .msg .markdown h2, .msg .markdown h3 { margin: .8em 0 .4em 0; line-height: 1.3; }
 .msg .markdown code {
   background: var(--code-bg); padding: 1px 5px; border-radius: 3px;
-  font: 13px ui-monospace, Menlo, monospace;
+  /* em (not a fixed px) so inline `code` scales with the chat A+/A− (--cs) too —
+     0.87em ≈ the old 13px against the 15px prose base, so it looks unchanged. */
+  font-family: ui-monospace, Menlo, monospace; font-size: 0.87em;
 }
 .msg .markdown pre {
   background: var(--code-bg); border: 1px solid var(--border);
@@ -992,6 +995,10 @@ body.light .msg.system.stack-tool { background: var(--panel2); }
 #autoload .al-btn:hover, #autoload .al-btn:active {
   color: var(--text); box-shadow: inset 0 0 0 1px var(--accent); outline: none;
 }
+#autoload .al-btn:disabled { opacity: 0.6; cursor: default; }
+/* ↻ fresh failed (network error / timeout) — the ONLY colored state, so a
+   silent failure is visible; success just shows a neutral ✓ (no green). */
+#autoload .al-btn.fresh-err { color: #ff6a6a; border-color: #ff6a6a; }
 /* Combined segmented pill [ tailScr | A | a | ↑ | ↓ | ⤓ ] FLOATING above the
    input, pinned to the footer so it stays on screen while the chat scrolls —
    so you can tap ↑ repeatedly. Theme-aware translucent fill (light/dark/pure),
@@ -1201,28 +1208,28 @@ footer button:disabled { opacity: 0.4; cursor: not-allowed; }
 footer .prompt-row {
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
-  background: #1c1f0e;
+  background: var(--panel2);
   padding: 8px 10px;
   display: flex; flex-direction: column; gap: 6px;
 }
 footer .prompt-row .pq {
-  font-size: 12px; color: #f0d050; font-weight: 600;
+  font-size: 12px; color: var(--accent); font-weight: 600;
   white-space: pre-wrap; word-break: break-word;
 }
 #choice-banner {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 10px; margin: 0 0 4px;
-  background: #2a2410; border: 1px solid var(--accent);
+  background: var(--panel2); border: 1px solid var(--accent);
   border-radius: 8px;
 }
 #choice-banner #choice-banner-text {
   flex: 1; min-width: 0;
-  font-size: 12px; color: #f0d050; font-weight: 600;
+  font-size: 12px; color: var(--accent); font-weight: 600;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 #choice-banner #choice-banner-btn {
   flex-shrink: 0;
-  border-color: var(--accent); background: #28311a; color: var(--text);
+  border-color: var(--accent); background: var(--panel2); color: var(--text);
 }
 footer .prompt-row .pchoices {
   display: flex; flex-wrap: wrap; gap: 6px;
@@ -1239,7 +1246,8 @@ footer .prompt-row .pchoice .pdigit {
 }
 footer .prompt-row .pchoice.default {
   border-color: var(--accent);
-  background: #28311a;
+  background: var(--code-bg);                     /* theme-aware: readable in light/pure too */
+  box-shadow: inset 0 0 0 1px var(--accent);      /* accent ring marks the current selection */
 }
 footer .prompt-row .pchoice:hover { background: var(--code-bg); }
 footer button.icon {
@@ -1460,6 +1468,24 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   display: flex; align-items: center; gap: 8px;
 }
 #screen-modal .modal-row h3 { margin: 0; flex: 1; font-size: 14px; }
+/* Terminal cursor marker in the screen viewer: a block caret at (row,col) + a
+   faint row highlight so you can spot which line the input caret is on. Only
+   rendered when the cursor is visible (server omits it while claude hides it). */
+#screen-modal .screen-body .scr-cur-row { background: rgba(127,127,127,0.18); }
+#screen-modal .screen-body .scr-caret {
+  background: var(--accent); color: #000; border-radius: 1px;
+  animation: scr-caret-blink 1.06s step-end infinite;   /* classic block-cursor blink */
+}
+/* Toggle the inverse highlight (not opacity) so the glyph stays readable while it
+   blinks. Idle frames don't re-render so it blinks smoothly; a burst of updates
+   restarts it → looks solid while busy, which reads as "typing vs waiting". */
+@keyframes scr-caret-blink {
+  0%, 50%      { background: var(--accent); color: #000; }
+  50.01%, 100% { background: transparent;  color: inherit; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #screen-modal .screen-body .scr-caret { animation: none; }
+}
 #screen-modal .screen-body {
   flex: 1; min-height: 0;
   background: #000; color: var(--text);
@@ -1530,22 +1556,26 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #screen-modal .screen-actions .btn:disabled {
   opacity: 0.4; cursor: not-allowed;
 }
+/* Desktop: 95% of the viewport (small gutter all around), centered by the modal.
+   Mobile overrides this to true full-screen below. */
 #tabs-modal .modal-card.tabs-card {
-  /* Fixed height (not max-height): the popup must stay a stable size so
-     swapping a tab's screen content doesn't resize the card and make the
-     centered modal jump/flash. The screen-body (flex:1) scrolls internally. */
-  width: 95vw; max-width: 1100px; height: 85vh;
-  display: flex; flex-direction: column; gap: 8px;
+  width: 95vw; max-width: none; height: 95vh;
+  display: flex; flex-direction: column; gap: 8px; padding: 10px;
 }
 #tabs-modal .modal-row { display: flex; align-items: center; gap: 8px; }
 #tabs-modal .modal-row h3 { margin: 0; flex: 1; font-size: 14px; }
 #tabs-modal .tabs-snap-row { flex-shrink: 0; }
 #tabs-modal #tabs-snap-status { font-size: 11px; color: var(--muted); margin-left: auto; }
 #tabs-modal .tabs-list {
-  display: flex; flex-direction: column; gap: 6px;
-  flex-shrink: 0; max-height: 30vh; overflow-y: auto;
+  /* Desktop: pack tabs left-to-right into as many columns as fit, wrapping down. */
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 6px; align-content: start;
+  flex-shrink: 0; max-height: 34vh; overflow-y: auto; overflow-x: hidden;   /* only up/down scroll */
 }
-#tabs-modal .tab-row { display: flex; gap: 6px; align-items: stretch; }
+/* min-width:0 lets the row shrink below its content so the label ellipsis kicks
+   in (grid/flex items default to min-width:auto → they'd otherwise overflow
+   sideways and push the Enter/Attach button off-screen). */
+#tabs-modal .tab-row { display: flex; gap: 6px; align-items: stretch; min-width: 0; }
 #tabs-modal .tabs-list button {
   background: var(--panel2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
@@ -1563,13 +1593,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #tabs-modal .tabs-list button.active { border-color: var(--accent); background: var(--accent); color: #fff; }
 #tabs-modal .tabs-list button .claude-dot { color: #6ee884; margin-right: 4px; }
 #tabs-modal .tabs-list .tl-wt { color: var(--muted); opacity: .7; font-size: 11px; }
+#tabs-modal .tabs-list .tl-sid { color: var(--muted); opacity: .55; font-size: 11px; font-family: ui-monospace, Menlo, monospace; }
 #tabs-modal .tabs-list .tl-tab { color: var(--accent); font-weight: 700; }   /* highlight tab-name */
 #tabs-modal .tabs-list .tl-sess { color: var(--muted); }
 #tabs-modal .tabs-list button.active .tl-wt,
+#tabs-modal .tabs-list button.active .tl-sid,
 #tabs-modal .tabs-list button.active .tl-tab,
 #tabs-modal .tabs-list button.active .tl-sess { color: #fff; }
 #tabs-modal .screen-body {
-  flex: 1; min-height: 0;
+  flex: 1; min-height: 0;   /* fills the rest of the full-screen card below the tab list */
   background: #000; color: var(--text);
   font: 12px ui-monospace, Menlo, monospace;
   border: 2px solid var(--accent); border-radius: 4px;
@@ -1612,8 +1644,16 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #cfg-cols-val { min-width: 34px; text-align: center; font-variant-numeric: tabular-nums; }
 
 @media (orientation: portrait), (max-width: 640px) {
-  #tabs-modal.modal { padding: 2px; }
-  #tabs-modal .modal-card.tabs-card { width: 100vw; padding: 8px 2px; gap: 6px; }
+  /* Phone: true full-screen, inset by the safe area so the header (✕/↻) clears
+     the notch and the input clears the home indicator. */
+  #tabs-modal.modal { padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  #tabs-modal .modal-card.tabs-card {
+    width: 100vw; max-width: none; border-radius: 0;
+    height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    padding: 8px 4px; gap: 6px;
+  }
+  /* single-column tabs, capped to ~3.5 rows so the 4th peeks (scroll hint). */
+  #tabs-modal .tabs-list { grid-template-columns: 1fr; max-height: 116px; }
   #tabs-modal .screen-body { padding: 6px 3px; }
   /* Phone: borderless responses don't need side gutters — trim the horizontal
      blank so more text fits on the small screen. */
@@ -2035,10 +2075,6 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           <button id="key-esc" class="btn" title="Send ESC">ESC</button>
           <button id="key-up" class="btn" title="Arrow Up">↑</button>
           <button id="key-down" class="btn" title="Arrow Down">↓</button>
-          <button id="key-up2" class="btn" title="Up ×2">↑2</button>
-          <button id="key-down2" class="btn" title="Down ×2">↓2</button>
-          <button id="key-up3" class="btn" title="Up ×3">↑3</button>
-          <button id="key-down3" class="btn" title="Down ×3">↓3</button>
           <button id="key-clearline" class="btn" title="Clear current line (Ctrl-E then Ctrl-U)">⌫ line</button>
           <button id="key-enter" class="btn" title="Enter — confirm">⏎ Enter</button>
         </div>
@@ -2772,9 +2808,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const sn = (t.session_name || "").trim();
       const wtEl = document.createElement("span"); wtEl.className = "sw-wt"; wtEl.textContent = wt;
       b.appendChild(wtEl);
+      // 4-char session-id (right after tX) so entries are identifiable at a glance
+      const sidEl = document.createElement("span"); sidEl.className = "sw-sid"; sidEl.textContent = " " + t.sid.slice(0, 4);
+      b.appendChild(sidEl);
       if (tn) { const e = document.createElement("span"); e.className = "sw-tab"; e.textContent = " [" + tabLabel(tn) + "]"; b.appendChild(e); }
       if (sn) { const e = document.createElement("span"); e.className = "sw-sess"; e.textContent = " " + clampU(sn, 40); b.appendChild(e); }
-      if (!tn && !sn) { const e = document.createElement("span"); e.textContent = " [" + t.sid.slice(0, 4) + "]"; b.appendChild(e); }
       b.addEventListener("click", () => {
         hideSwitchMenu();
         if (t.sid !== attachedSid) enterTranscript(t.sid, sn || tn || "");
@@ -3041,30 +3079,44 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // Delta-mode client state (experimental incremental screen updates).
   let screenVer = "";
   let screenLines = [];
-  // ⇞/⇟ (keys u/d): send the real PageUp/PageDown key to the tab so the TERMINAL
-  // itself pages, then re-fetch the now-paged visible screen (sendRaw refreshes).
-  // Also pauses the delta auto-refresh so a later poll / new output doesn't yank
-  // the view back to the bottom; the ↻ refresh button resumes live updates.
-  let screenPaused = false, screenPageDir = 0;   // -1 up / +1 down while paged; 0 = live
-  async function pageScreen(dir) {
-    if (!attachedSid) return;
-    screenPaused = true; screenPageDir = dir; stopAuto();
-    const before = screenBody.textContent;
-    await sendRaw(dir < 0 ? "\x1b[5~" : "\x1b[6~");   // PageUp / PageDown (sendRaw re-fetches)
-    // After the redraw settles: a PageDown that changed NOTHING means we hit the
-    // bottom → we're at the latest, so RE-ACTIVATE live delta auto-refresh.
-    // (Caveat: while claude is streaming the bottom keeps changing, so a
-    // page-down there won't register as "unchanged" and won't auto-resume.)
-    setTimeout(() => {
-      if (screenPaused && dir > 0 && screenBody.textContent === before) {
-        screenPaused = false; screenPageDir = 0; screenVer = ""; screenLines = [];
-        loadScreen(); startAuto();
-      }
-    }, 800);
+  let screenCursor = null;   // [row, col, vis] of the terminal cursor, or null (reuses _escHtml above)
+  // Render the screen text, drawing a block caret at the cursor (row,col) plus a
+  // faint row highlight — only when visible (vis!=0) and in range; claude hides
+  // the cursor (vis=0) while generating, so we don't mark a stale spot then.
+  function _screenHtml(lines, cur) {
+    if (!cur || cur[2] === 0 || cur[0] == null || cur[0] < 0 || cur[0] >= lines.length)
+      return lines.map(_escHtml).join("\n") || "(empty)";
+    const out = lines.map(_escHtml);
+    let raw = lines[cur[0]] || "";
+    const col = Math.max(0, cur[1] | 0);
+    // The captured line is rstripped, so trailing spaces you type aren't in `raw`
+    // even though cursor_x advanced. Pad up to the cursor column so the caret
+    // tracks spaces instead of sticking at the last non-blank char, then jumping.
+    if (raw.length < col) raw += " ".repeat(col - raw.length);
+    out[cur[0]] = '<span class="scr-cur-row">' + _escHtml(raw.slice(0, col))
+      + '<span class="scr-caret">' + _escHtml(raw.slice(col, col + 1) || " ") + '</span>'
+      + _escHtml(raw.slice(col + 1)) + '</span>';
+    return out.join("\n") || "(empty)";
   }
+  function renderScreenBody() { screenBody.innerHTML = _screenHtml(screenLines, screenCursor); }
+  // ⇞/⇟: just send the real PageUp/PageDown key to the tab so the TERMINAL pages.
+  // The adaptive delta poll is already running, so it picks up the scrolled screen
+  // as a normal change — no freeze, no manual full fetch, no auto-resume dance.
+  let screenPaused = false, screenPageDir = 0;   // kept 0/false (paging no longer freezes the poll)
+  function pageScreen(dir) {
+    if (!attachedSid) return;
+    sendRaw(dir < 0 ? "\x1b[5~" : "\x1b[6~");   // sendRaw also pokes the poll → the scrolled screen shows next tick
+  }
+  let _scrBusy = false, _scrPending = false;
   async function loadScreen(quiet) {
     const sid = attachedSid;
     if (!sid) return;
+    // Serialize: concurrent loads (rapid ↑/↓ bursts + the auto-tick) would race
+    // on screenVer — one advances V0→V1 while another still holds V0, whose
+    // response then fails the base check and triggers a full re-fetch, stalling
+    // the next keypress. Coalesce overlapping calls into a single follow-up.
+    if (_scrBusy) { _scrPending = true; return; }
+    _scrBusy = true;
     // Paged (⇞/⇟) mode forces a real FULL fetch — delta would just report {same}
     // / a tiny diff (the "34B" you saw), which isn't a full screen.
     const useDelta = !screenPageDir;   // delta always on (paging forces a full fetch)
@@ -3084,11 +3136,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const atBottom = screenBody.scrollHeight - screenBody.scrollTop - screenBody.clientHeight < 24;
       if (useDelta) {
         if (j.same) { screenVer = j.ver;
+          screenCursor = j.cursor || null; renderScreenBody();
           screenStat.textContent = screenPageDir ? `full-${screenPageDir < 0 ? "up" : "down"} · ${bytes}B` : `same · ${bytes}B`;
           return; }
         if (j.full !== undefined) {
           screenLines = (j.full || "").split("\n"); screenVer = j.ver;
-          screenBody.textContent = j.full || "(empty)";
+          screenCursor = j.cursor || null; renderScreenBody();
           screenStat.textContent = `full · ${bytes}B (${screenLines.length} lines)`;
         } else if (j.changed && j.base === screenVer) {      // apply the diff
           const k = j.scroll || 0;                            // alignment offset (may be negative)
@@ -3097,15 +3150,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           for (let i = 0; i < j.n; i++) lines[i] = (i + k >= 0 && i + k < prev.length) ? prev[i + k] : "";
           for (const [i, v] of j.changed) if (i >= 0 && i < j.n) lines[i] = (typeof v === "string") ? v : v.c.repeat(v.n);
           screenLines = lines; screenVer = j.ver;
-          screenBody.textContent = lines.join("\n") || "(empty)";
+          screenCursor = j.cursor || null; renderScreenBody();
           screenStat.textContent = `Δ ${j.changed.length} line${j.changed.length === 1 ? "" : "s"}`
             + (k ? ` · scroll ${k}` : "") + ` · ${bytes}B`;
-        } else {                                             // base mismatch → re-fetch full
+        } else {                                             // base mismatch → re-fetch full next pass
           screenVer = "";
-          return loadScreen(quiet);
+          _scrPending = true;
+          return;
         }
       } else {
-        screenBody.textContent = j.screen || "(empty)";
+        screenLines = (j.screen || "").split("\n");
+        screenCursor = j.cursor || null; renderScreenBody();
         screenStat.textContent = "";
       }
       // While paged (⇞/⇟) show the page action + bytes, not the delta stat.
@@ -3115,7 +3170,117 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (!quiet || atBottom) screenBody.scrollTop = screenBody.scrollHeight;
     } catch (e) {
       if (!quiet) screenBody.textContent = "Error: " + e;
+    } finally {
+      _scrBusy = false;
+      if (_scrPending) { _scrPending = false; loadScreen(quiet); }   // run the coalesced follow-up
     }
+  }
+  // Apply one screen-delta JSON (from /api/screen or the SSE stream) onto
+  // screenLines/screenBody. Returns false on a base mismatch (caller resyncs).
+  function applyScreenJson(j, bytes) {
+    const atBottom = screenBody.scrollHeight - screenBody.scrollTop - screenBody.clientHeight < 24;
+    const B = (bytes != null) ? " · " + bytes + "B" : "";   // per-poll payload
+    // cumulative link traffic since the window opened (↑ sent / ↓ received)
+    const T = "  ↑" + fmtTraffic(traffic.in_bytes - _scrTrafBase.up)
+            + " ↓" + fmtTraffic(traffic.out_bytes - _scrTrafBase.down);
+    if (j.same) {
+      screenVer = j.ver;
+      const nc = j.cursor || null;              // cursor can move with no text change
+      if (JSON.stringify(nc) !== JSON.stringify(screenCursor)) {
+        screenCursor = nc; renderScreenBody();
+        if (atBottom) screenBody.scrollTop = screenBody.scrollHeight;
+      }
+      screenStat.textContent = "same" + B + T; return true;
+    }
+    if (j.full !== undefined) {
+      screenLines = (j.full || "").split("\n"); screenVer = j.ver;
+      screenCursor = j.cursor || null; renderScreenBody();
+      screenStat.textContent = "full · " + screenLines.length + "L" + B + T;
+    } else if (j.changed && j.base === screenVer) {
+      const k = j.scroll || 0, prev = screenLines, lines = new Array(j.n);
+      for (let i = 0; i < j.n; i++) lines[i] = (i + k >= 0 && i + k < prev.length) ? prev[i + k] : "";
+      for (const [i, v] of j.changed) if (i >= 0 && i < j.n) lines[i] = (typeof v === "string") ? v : v.c.repeat(v.n);
+      screenLines = lines; screenVer = j.ver;
+      screenCursor = j.cursor || null; renderScreenBody();
+      screenStat.textContent = "Δ " + j.changed.length + "L" + (k ? " · scroll " + k : "") + B + T;
+    } else { screenVer = ""; return false; }   // base mismatch → resync (reconnect gets a full)
+    if (atBottom) screenBody.scrollTop = screenBody.scrollHeight;
+    return true;
+  }
+  // Live view = ADAPTIVE client delta poll. Idle → long period (low traffic).
+  // Any activity — a keystroke (pokeScreenPoll) OR the poll detecting a change
+  // (claude generating) — resets to the fast ramp 50→125→250→500→1000→2000ms,
+  // which then decays back to the long period once things go quiet. Client owns
+  // the lifecycle (close = stop instantly, no server state to leak); a generation
+  // token stops a stale/superseded tick from reviving.
+  const POLL_STEPS = [50, 125, 250, 500, 1000, 2000, 4000];
+  const POLL_MIN = POLL_STEPS[0];
+  const POLL_CHANGE_STEP = 2;   // a SIGNIFICANT change (real streaming) → 250ms, NOT the 50ms key floor
+  //   A spinner / elapsed-timer changes only 1 line per second. That must NOT count as a real change,
+  //   or the poll pins at 250ms (~1KB/s ≈ 60KB/min) forever while claude just "waits". Only full / scroll
+  //   / >=3 changed lines (actual output) resets to the fast cadence; a 1-2 line change decays like idle.
+  const POLL_SIGNIF_LINES = 3;
+  let _scrPollTimer = null, _scrStreamWant = false, _scrPollGen = 0, _pollStep = 0, _nextFetchAt = 0;
+  let _scrTrafBase = { up: 0, down: 0 };   // traffic snapshot at window-open → stat shows the delta since
+  function _scrAlive(gen) {
+    return gen === _scrPollGen && _scrStreamWant
+      && screenModal.classList.contains("show") && !document.hidden && !screenPaused;
+  }
+  function _scrSchedule(gen, ms) {
+    _nextFetchAt = performance.now() + ms;
+    _scrPollTimer = setTimeout(() => _scrTick(gen), ms);
+  }
+  async function _scrTick(gen) {
+    _scrPollTimer = null;
+    if (!_scrAlive(gen)) return;
+    const sid = attachedSid;
+    let significant = false;
+    try {
+      const r = await authedFetch("/api/screen?claude_session_id=" + encodeURIComponent(sid)
+        + "&delta=1&refresh=false&ver=" + encodeURIComponent(screenVer), { timeoutMs: 5000 });
+      if (_scrAlive(gen) && r.ok && sid === attachedSid) {
+        const txt = await r.text();
+        let bytes; try { bytes = new Blob([txt]).size; } catch { bytes = txt.length; }
+        const j = JSON.parse(txt);
+        // Only a SIGNIFICANT change resets to the fast cadence. A spinner / elapsed-timer
+        // touches just 1-2 lines every second — that must decay like idle, or the poll
+        // pins at 250ms (~1KB/s) forever. full / resync / scroll / >=3 changed lines = real output.
+        if (!j.same) {
+          if (j.full !== undefined || j.base !== screenVer) significant = true;
+          else significant = (j.changed && j.changed.length >= POLL_SIGNIF_LINES) || !!j.scroll;
+        }
+        applyScreenJson(j, bytes);
+      }
+    } catch {}
+    if (!_scrAlive(gen)) return;
+    // Significant change → steady 250ms cadence. Idle OR a mere spinner tick → keep
+    // decaying toward the 4s tail (the 50ms floor is reserved for keypresses via pokeScreenPoll).
+    _pollStep = significant ? POLL_CHANGE_STEP : Math.min(_pollStep + 1, POLL_STEPS.length - 1);
+    _scrSchedule(gen, POLL_STEPS[_pollStep]);
+  }
+  function startScreenStream() {
+    _scrStreamWant = true;
+    if (_scrPollTimer) return;
+    if (!attachedSid || !screenModal.classList.contains("show") || document.hidden || screenPaused) return;
+    const gen = ++_scrPollGen; _pollStep = 0;
+    _scrSchedule(gen, POLL_MIN);
+  }
+  function stopScreenStream() { _scrStreamWant = false; _scrPollGen++; if (_scrPollTimer) { clearTimeout(_scrPollTimer); _scrPollTimer = null; } }
+  // A keystroke: THROTTLE (not debounce) toward a steady ~POLL_MIN cadence during
+  // a burst. Reset the ramp to fast; then, relative to the already-scheduled next
+  // fetch t1 and now t0: if t1 is imminent (t1-t0 < min) leave it — the loop's
+  // follow-up (t1+min) catches this key's effect; if t1 is too far (> min) pull it
+  // in to now+min; if a fetch is in-flight, its reschedule (step reset above) is
+  // already min. So rapid keys never push an imminent fetch out or pile up extras.
+  function pokeScreenPoll() {
+    if (!_scrStreamWant || !screenModal.classList.contains("show") || document.hidden || screenPaused) return;
+    _pollStep = 0;
+    if (_scrPollTimer == null) return;                    // a fetch is in-flight → its reschedule is already min
+    if (_nextFetchAt - performance.now() > POLL_MIN) {    // scheduled too far out → pull it in
+      clearTimeout(_scrPollTimer);
+      _scrSchedule(_scrPollGen, POLL_MIN);
+    }
+    // else: imminent → leave it (steady cadence; loop reschedules at min after it fires)
   }
   const screenPane = document.getElementById("screen-pane");
   const infoPane = document.getElementById("info-pane");
@@ -3136,49 +3301,26 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     screenModal.classList.toggle("fs", localStorage.getItem("cc_web_screen_full") !== "0");
     document.getElementById("screen-cfg-menu").classList.remove("show");   // start closed
     showScreenTab("screen");
-    screenVer = ""; screenLines = []; screenPaused = false; screenPageDir = 0;   // fresh: first load is a full send
-    loadScreen();
+    screenVer = ""; screenLines = []; screenPaused = false; screenPageDir = 0;   // fresh: first load is a full (clean Ctrl+L redraw)
+    _scrTrafBase = { up: traffic.in_bytes, down: traffic.out_bytes };   // start counting link traffic from now
     loadInfo();
-    startAuto();   // auto-reload always on while the window is shown
+    // Paint the clean initial full FIRST (loadScreen sets screenVer), and only
+    // when it resolves start the adaptive poll — so nothing writes screenVer
+    // concurrently on open (no base-mismatch race).
+    loadScreen().then(startAuto);
   }
   document.getElementById("screen-full").addEventListener("click", () => {
     const on = !screenModal.classList.contains("fs");
     screenModal.classList.toggle("fs", on);
     localStorage.setItem("cc_web_screen_full", on ? "1" : "0");
   });
-  // Auto-reload with exponential backoff: always on while the screen window is
-  // shown. Poll fast (3s) while the screen is changing, back off 3→7→15→30→60s
-  // while idle; any update (or your input) resets the interval to 3s. Hard
-  // 1-hour total cap so a forgotten-open window doesn't poll forever. Canceled
-  // whenever the window is hidden/closed, restarted (fresh 1h) when shown again.
-  const AUTO_STEPS = [3000, 7000, 15000, 30000, 60000];
-  const AUTO_TOTAL_MS = 3600000;   // 1 hour
-  let autoTimer = null, autoDeadline = 0, autoStep = 0;
-  function stopAuto() { if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; } }
-  function scheduleAuto() {
-    autoTimer = setTimeout(autoTick, AUTO_STEPS[Math.min(autoStep, AUTO_STEPS.length - 1)]);
-  }
-  async function autoTick() {
-    autoTimer = null;
-    if (screenPaused) return;                // frozen for paged scrolling
-    if (!screenModal.classList.contains("show") || document.hidden) return;
-    if (Date.now() > autoDeadline) return;   // 1h total cap reached
-    const before = screenBody.textContent;
-    await loadScreen(true);
-    if (screenBody.textContent !== before) autoStep = 0;   // update → poll fast again
-    else autoStep = Math.min(autoStep + 1, AUTO_STEPS.length - 1);   // idle → back off
-    scheduleAuto();
-  }
+  // Live view = the adaptive delta poll (startScreenStream). start/stopAuto are
+  // the on/off switches wired to open/close/hide/page.
+  function stopAuto() { stopScreenStream(); }
   function startAuto() {
-    stopAuto();
-    if (screenPaused) return;                // don't resume polling while frozen
+    if (screenPaused) return;                // paged (⇞/⇟) → frozen, no live poll
     if (!screenModal.classList.contains("show") || document.hidden) return;
-    autoStep = 0; autoDeadline = Date.now() + AUTO_TOTAL_MS;
-    scheduleAuto();
-  }
-  function bumpAuto() {   // input resets the interval and re-polls soon
-    if (!screenModal.classList.contains("show")) return;
-    autoStep = 0; stopAuto(); scheduleAuto();
+    startScreenStream();
   }
   screenBtn.addEventListener("click", openScreenInfo);
   choiceBannerBtn.addEventListener("click", openScreenInfo);
@@ -3278,6 +3420,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         const sn = (t.session_name || "").trim();
         const wtEl = document.createElement("span"); wtEl.className = "tl-wt"; wtEl.textContent = wt + " ";
         sel.appendChild(wtEl);
+        // 4-char session-id right after the wN/tM label (if this tab has one)
+        if (t.sid) { const e = document.createElement("span"); e.className = "tl-sid"; e.textContent = t.sid.slice(0, 4) + " "; sel.appendChild(e); }
         if (tn) { const e = document.createElement("span"); e.className = "tl-tab"; e.textContent = "[" + tn + "] "; sel.appendChild(e); }
         if (sn) { const e = document.createElement("span"); e.className = "tl-sess"; e.textContent = sn; sel.appendChild(e); }
         if (!tn && !sn) sel.appendChild(document.createTextNode(t.name || "(unnamed)"));
@@ -3293,9 +3437,6 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // Attach button, show a ✓ marker + Enter to jump straight in.
         if (t.is_claude) {
           if (t.bound_to) {
-            const mark = document.createElement("span");
-            mark.className = "tab-bound"; mark.textContent = "✓ " + t.bound_to.slice(0, 4);
-            row.appendChild(mark);
             const enter = document.createElement("button");
             enter.className = "tab-act"; enter.textContent = "Enter";
             enter.addEventListener("click", () => {
@@ -3977,22 +4118,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // refresh the screen view so the user can see what happened.
   // press_enter:false because we encode \r ourselves when needed — that
   // way we can send a bare ESC without an extra Enter sneaking in.
-  const screenKeyBtns = ["key-esc", "key-up", "key-up2", "key-up3", "key-down",
-                         "key-down2", "key-down3", "key-clearline", "key-enter",
-                         "screen-send"]
-    .map(id => document.getElementById(id));
-  function setScreenKeysDisabled(on) {
-    for (const b of screenKeyBtns) b.disabled = on;
-  }
   // pressEnter:true sends a carriage return via the server's press_enter path.
   // (A bare "\r" in `text` gets rstrip()'d off server-side, so Enter must go
   // through press_enter, not the raw text — that's why ⏎ did nothing before.)
+  // Just POST the keys, then pokeScreenPoll() so the adaptive poll shows the
+  // resulting screen change quickly.
   async function sendRaw(text, pressEnter) {
     if (!attachedSid) return;
-    bumpAuto();   // interacting resets the auto-reload countdown
-    // Lock the four screen keys until the post + refresh settle, so a second
-    // click can't fire mid-flight (would queue extra arrows / double-Enter).
-    setScreenKeysDisabled(true);
     try {
       await authedFetch("/api/input", {
         method: "POST",
@@ -4004,22 +4136,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         }),
       });
     } catch {}
-    // Brief grace so claude can process and redraw, then refresh — twice,
-    // since the TUI redraw sometimes lags the keypress, and the user wants
-    // to see the screen change as feedback for ↑/↓/Enter. Quiet refresh so
-    // the box doesn't flicker/jump (no "Loading…" collapse). Re-enable the
-    // keys only after the final refresh lands.
-    setTimeout(() => loadScreen(true), 250);
-    setTimeout(async () => { await loadScreen(true); setScreenKeysDisabled(false); }, 650);
+    pokeScreenPoll();   // key sent → kick the adaptive poll to the fast ramp so the change shows quickly
   }
   const UP = "\x1b[A", DOWN = "\x1b[B";
   document.getElementById("key-esc").addEventListener("click", () => sendRaw("\x1b"));
   document.getElementById("key-up").addEventListener("click", () => sendRaw(UP));
-  document.getElementById("key-up2").addEventListener("click", () => sendRaw(UP + UP));
-  document.getElementById("key-up3").addEventListener("click", () => sendRaw(UP + UP + UP));
   document.getElementById("key-down").addEventListener("click", () => sendRaw(DOWN));
-  document.getElementById("key-down2").addEventListener("click", () => sendRaw(DOWN + DOWN));
-  document.getElementById("key-down3").addEventListener("click", () => sendRaw(DOWN + DOWN + DOWN));
   // Clear the current input line: Ctrl-E (to end of line) then Ctrl-U (kill to start).
   document.getElementById("key-clearline").addEventListener("click", () => sendRaw("\x05\x15"));
   document.getElementById("key-enter").addEventListener("click", () => sendRaw("", true));
@@ -6932,30 +7054,55 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 
   // Two explicit controls (split from the old single tap-zone):
   //   ↻ fresh  → one-shot "get latest" now, regardless of paused/idle state
-  //   ⏸/▶      → pause / resume the auto-refresh loop
+  //   ⏸/▶      → pause / resume the auto-refresh loop (also aborts an in-flight fresh)
+  let _freshCtrl = null, _freshPaused = false, _freshGen = 0;
   document.getElementById("autoload-fresh").addEventListener("click", (e) => {
     e.stopPropagation(); forceCheckNow();
   });
   document.getElementById("autoload-toggle").addEventListener("click", (e) => {
     e.stopPropagation();
-    if (isPaused) setPaused(false); else setPaused(true, "manual");
+    if (isPaused) { setPaused(false); return; }
+    // Pausing while a fresh is in flight → cancel it (so it can't hang on "↻ …"
+    // waiting out the timeout); mark it a user-abort so it restores quietly.
+    if (_freshCtrl) { _freshPaused = true; try { _freshCtrl.abort(new DOMException("paused", "AbortError")); } catch (err) {} }
+    setPaused(true, "manual");
   });
-  // Force a one-shot "get the latest" fetch now (delta — stays low-traffic).
-  // Reliability comes from the server's `resync` flag (see pollOnce): if the
-  // client's since_idx is stale/ahead of the server's window numbering (e.g.
-  // after a server restart), the server sends a fresh snapshot + resync so we
-  // replace — instead of a delta silently returning nothing. Bypasses the
-  // polling in-flight guard (explicit user action), keeps the hidden guard off
-  // the path by clearing pause first.
+  // Force a one-shot "get the latest" fetch now (delta — stays low-traffic). The
+  // server re-reads the jsonl tail every call (and its `resync` flag replaces once
+  // if our since_idx is from an old window numbering). Maintain the button state so
+  // the user KNOWS whether it truly worked — only return to "↻ fresh" on real
+  // completion, and make a silent network failure visible:
+  //   ok → ✓ fresh (brief)      network error / 10s timeout → ✗ failed (red)
+  //   pause pressed mid-flight → aborted → ↻ fresh (quiet; user chose to stop)
+  // AbortController lets pause cancel a stuck fetch instead of waiting out the
+  // timeout; _freshGen guards the revert timers against a newer click.
   async function forceCheckNow() {
     if (!attachedSid) return;
     isPaused = false; polling = false;
     hbDelay = HB_BASE; hbNextAt = Date.now();   // fresh = refresh BOTH streams now (live fetches on the sync tick below)
     keepAlive();
     const fb = document.getElementById("autoload-fresh");
-    if (fb) { fb.disabled = true; fb.textContent = "↻ …"; }
-    try { await pollOnce(); }
-    finally { if (fb) { fb.disabled = false; fb.textContent = "↻ fresh"; } updateAutoload(); }
+    const gen = ++_freshGen;
+    if (_freshCtrl) { try { _freshCtrl.abort(); } catch (e) {} }   // supersede a previous in-flight fresh
+    const ctrl = new AbortController(); _freshCtrl = ctrl; _freshPaused = false;
+    const killer = setTimeout(() => { try { ctrl.abort(new DOMException("timeout", "AbortError")); } catch (e) {} }, 10000);
+    if (fb) { fb.disabled = true; fb.textContent = "↻ …"; fb.classList.remove("fresh-err"); }
+    let ok = false;
+    try { ok = await pollOnce(ctrl.signal); } catch (e) { ok = false; }
+    clearTimeout(killer);
+    if (_freshCtrl === ctrl) _freshCtrl = null;
+    updateAutoload();
+    if (!fb || gen !== _freshGen) return;       // a newer click already owns the button
+    fb.disabled = false;
+    if (_freshPaused) {                          // user hit pause → restore, no error flash
+      fb.textContent = "↻ fresh"; fb.classList.remove("fresh-err");
+    } else if (ok) {
+      fb.textContent = "✓ fresh";
+      setTimeout(() => { if (gen === _freshGen && fb.textContent === "✓ fresh") fb.textContent = "↻ fresh"; }, 1200);
+    } else {                                     // network error / timeout → surface it (red)
+      fb.textContent = "✗ failed"; fb.classList.add("fresh-err");
+      setTimeout(() => { if (gen === _freshGen) { fb.textContent = "↻ fresh"; fb.classList.remove("fresh-err"); } }, 3000);
+    }
   }
 
   // Transcript-page keyboard shortcuts (desktop). Plain keys, ONLY when you're
@@ -6969,9 +7116,60 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     return el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA"
       || el.tagName === "SELECT" || el.isContentEditable);
   }
+  // Map a keydown to the raw terminal bytes it should send (screen passthrough).
+  // Returns null for keys we don't forward (modifiers alone, F-keys, …).
+  function keyToBytes(e) {
+    const k = e.key;
+    if (e.ctrlKey) {                                   // Ctrl-<x> → control byte
+      if (k.length === 1) {
+        const kl = k.toLowerCase();
+        // Block job-control / flow-control keys — they suspend/quit/freeze the
+        // session and leave claude in a confusing stopped state (never intended
+        // here): Ctrl-Z (suspend), Ctrl-\ (SIGQUIT), Ctrl-S (XOFF freeze output).
+        if (kl === "z" || k === "\\" || kl === "s") return null;
+        const c = kl.charCodeAt(0);
+        if (c >= 97 && c <= 122) return String.fromCharCode(c - 96);          // Ctrl-A..Z → 0x01..0x1a
+        const m = { "[": "\x1b", "]": "\x1d", " ": "\x00", "@": "\x00" };
+        if (m[k] != null) return m[k];
+      }
+      return null;
+    }
+    switch (k) {
+      case "Tab": return "\t";
+      case "Backspace": return "\x7f";
+      case "Escape": return "\x1b";
+      case "Delete": return "\x1b[3~";
+      case "ArrowUp": return "\x1b[A";
+      case "ArrowDown": return "\x1b[B";
+      case "ArrowRight": return "\x1b[C";
+      case "ArrowLeft": return "\x1b[D";
+      case "Home": return "\x1b[H";
+      case "End": return "\x1b[F";
+      case "PageUp": return "\x1b[5~";
+      case "PageDown": return "\x1b[6~";
+    }
+    if (k.length === 1) return k;                      // printable char (Shift already applied by e.key)
+    return null;
+  }
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && document.activeElement === inputEl) { inputEl.blur(); return; }
     if (!tvEl.classList.contains("show")) return;
+
+    // Screen window = full terminal PASSTHROUGH: every key (letters, digits,
+    // symbols, Enter, Tab, Backspace, Esc, arrows, Ctrl-combos) goes to the tab,
+    // so you can actually type/drive it. Cmd+X closes the window (x itself is
+    // forwarded). Paging/zoom/refresh live on the on-screen buttons. Skipped when
+    // focus is in the text-input box (that types normally + Send).
+    if (screenModal.classList.contains("show") && !_isEditable(document.activeElement)) {
+      if (e.metaKey && (e.key === "x" || e.key === "X")) { e.preventDefault(); closeScreenModal(); return; }
+      if (e.metaKey || e.altKey) return;               // leave Cmd/Alt combos to the browser/OS (copy, etc.)
+      if (e.key === "Enter") { e.preventDefault(); sendRaw("", true); return; }
+      const seq = keyToBytes(e);
+      if (seq != null) { e.preventDefault(); sendRaw(seq, false); return; }
+      if (e.ctrlKey) e.preventDefault();   // swallow blocked/unmapped Ctrl combos (no browser Ctrl-S save, Ctrl-Z undo…)
+      return;
+    }
+
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (_isEditable(document.activeElement)) return;
 
@@ -7081,15 +7279,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
 
   // ---------- polling ----------
-  async function pollOnce() {
+  // `signal` (optional): an AbortSignal from the ↻ fresh button so pause / a
+  // timeout can cancel the in-flight fetch. Returns true only on a fully
+  // successful poll (server responded + ingested) so fresh can report it.
+  async function pollOnce(signal) {
     pollTimer = null;
-    if (!attachedSid) return;
-    if (isPaused) return;
-    if (document.hidden) { schedulePoll(POLL_INTERVAL_MS); return; }
-    if (Date.now() > activityDeadline) { setPaused(true, "timeout"); return; }
-    if (polling) { schedulePoll(POLL_INTERVAL_MS); return; }
+    if (!attachedSid) return false;
+    if (isPaused) return false;
+    if (document.hidden) { schedulePoll(POLL_INTERVAL_MS); return false; }
+    if (Date.now() > activityDeadline) { setPaused(true, "timeout"); return false; }
+    if (polling) { schedulePoll(POLL_INTERVAL_MS); return false; }
     polling = true;
     let pollChanged = false;   // did this poll see anything new? (resets idle backoff)
+    let pollOk = false;        // fully-successful poll? (↻ fresh reports this)
     const sid = attachedSid;   // guard: bail if the user switches session mid-fetch
     try {
       const params = new URLSearchParams();
@@ -7098,8 +7300,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       params.set("rounds", "5");
       if (lastIdx !== null) params.set("since_idx", String(lastIdx));
       if (lastEpoch) params.set("epoch", lastEpoch);
-      const resp = await authedFetch("/api/state?" + params.toString());
-      if (sid !== attachedSid) return;   // switched away while awaiting → drop this response
+      const resp = await authedFetch("/api/state?" + params.toString(), signal ? { signal } : {});
+      if (sid !== attachedSid) return false;   // switched away while awaiting → drop this response
       if (resp.status === 410) {
         // pid gone — stop re-polling a dead session (was looping every 5s forever)
         sessionGone = true;
@@ -7156,6 +7358,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // queued msgs are now rendered INLINE in the transcript (server side) — no separate region
       renderStatusline(m.status_line);      // mirror Claude's bottom status bar
       updatePromptRow(m.pending_confirm);
+      pollOk = true;                        // reached here → clean success
     } catch (e) {
       setStatus("err");
     } finally {
@@ -7172,6 +7375,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         schedulePoll(idlePollDelay);
       }
     }
+    return pollOk;
   }
 
   // ---------- liveness heartbeat (pinned after the last message) ----------
