@@ -5553,19 +5553,30 @@ async def get_iterm_tabs():
 
 
 @app.get("/api/iterm-screen", dependencies=[Depends(require_token)])
-async def get_iterm_screen(iterm_session_id: str):
+async def get_iterm_screen(iterm_session_id: str, delta: bool = False,
+                           ver: str = "", cursor: bool = False):
     """Read the full screen of an arbitrary iTerm2 session (by its session id,
     as returned from /api/iterm-tabs). No Ctrl+L refresh here — we don't want
-    to disturb non-claude shells. strip_input=False shows everything."""
+    to disturb non-claude shells. strip_input=False shows everything.
+
+    Opt-in (defaults keep the plain {screen} the one-shot callers rely on):
+      delta=1&ver= → incremental {same}/{full}/{delta}, keyed by the iterm id;
+      cursor=1     → also return cursor [row, col, vis] (same as /api/screen)."""
     try:
         await bridge.ensure_connected()
-        screen = await bridge.get_screen_for(iterm_session_id, max_lines=400,
-                                             refresh=False, strip_input=False)
+        res = await bridge.get_screen_for(iterm_session_id, max_lines=400,
+                                          refresh=False, strip_input=False,
+                                          with_cursor=cursor)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
+    screen, raw_cursor = res if cursor else (res, None)
     if screen is None:
         raise HTTPException(status_code=404, detail="iterm session not found")
-    return {"screen": _collapse_blanks(screen)}
+    text, cur_row = _collapse_blanks_map(screen, raw_cursor[0] if raw_cursor else None)
+    resp = _screen_delta("iterm:" + iterm_session_id, text, ver) if delta else {"screen": text}
+    if raw_cursor is not None and cur_row is not None:
+        resp["cursor"] = [cur_row, raw_cursor[1], raw_cursor[2]]
+    return resp
 
 
 @app.post("/api/iterm-input", dependencies=[Depends(require_token)])

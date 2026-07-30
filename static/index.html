@@ -1471,8 +1471,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 /* Terminal cursor marker in the screen viewer: a block caret at (row,col) + a
    faint row highlight so you can spot which line the input caret is on. Only
    rendered when the cursor is visible (server omits it while claude hides it). */
-#screen-modal .screen-body .scr-cur-row { background: rgba(127,127,127,0.18); }
-#screen-modal .screen-body .scr-caret {
+/* applies to every screen viewer (main #screen-modal + the tabs/tabscr previews) */
+.screen-body .scr-cur-row { background: rgba(127,127,127,0.18); }
+.screen-body .scr-caret {
   background: var(--accent); color: #000; border-radius: 1px;
   animation: scr-caret-blink 1.06s step-end infinite;   /* classic block-cursor blink */
 }
@@ -1484,8 +1485,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   50.01%, 100% { background: transparent;  color: inherit; }
 }
 @media (prefers-reduced-motion: reduce) {
-  #screen-modal .screen-body .scr-caret { animation: none; }
+  .screen-body .scr-caret { animation: none; }
 }
+/* "append Enter on Send" toggle next to the Send button (screen + tabs viewers) */
+.send-cb { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0;
+  font-size: 13px; color: var(--muted); cursor: pointer; user-select: none; }
+.send-cb input { margin: 0; }
 #screen-modal .screen-body {
   flex: 1; min-height: 0;
   background: #000; color: var(--text);
@@ -1991,6 +1996,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       </div>
       <div id="tabs-input-row" class="tabs-input-row">
         <input id="tabs-input" type="text" placeholder="Send a prompt to this tab…" autocomplete="off">
+        <label class="send-cb" title="append Enter when sending"><input type="checkbox" id="tabs-send-enter" checked>⏎</label>
         <button id="tabs-send" class="btn">Send</button>
       </div>
     </div>
@@ -2080,6 +2086,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         </div>
         <div class="modal-row screen-input-row">
           <input id="screen-input" type="text" placeholder="type & send to this tab…" autocomplete="off">
+          <label class="send-cb" title="append Enter when sending"><input type="checkbox" id="screen-send-enter" checked>⏎</label>
           <button id="screen-send" class="btn">Send</button>
           <button id="screen-refresh" class="btn" title="refresh screen">↻</button>
         </div>
@@ -3389,6 +3396,65 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const tabsClose = document.getElementById("tabs-close");
   let tabsSelectedId = null;
 
+  // Reusable live-screen viewer: adaptive delta poll (spinner-decay) + cursor
+  // marker for a <pre>. Reuses _screenHtml/authedFetch. The main #screen-modal
+  // keeps its own copy untouched; this powers the tabs viewer. cfg = {bodyEl,
+  // getId()→target id|null, url(id,ver)→fetch url, sendKey(seq), isOpen()→bool}.
+  function makeLiveScreen(cfg) {
+    const STEPS = [50, 125, 250, 500, 1000, 2000, 4000], CHG = 2, SIG = 3;
+    let ver = "", lines = [], cursor = null;
+    let timer = null, gen = 0, step = 0, want = false, nextAt = 0;
+    const render = () => { cfg.bodyEl.innerHTML = _screenHtml(lines, cursor); };
+    const alive = (g) => g === gen && want && cfg.isOpen() && !!cfg.getId() && !document.hidden;
+    const schedule = (g, ms) => { nextAt = performance.now() + ms; timer = setTimeout(() => tick(g), ms); };
+    function apply(j) {
+      const atBottom = cfg.bodyEl.scrollHeight - cfg.bodyEl.scrollTop - cfg.bodyEl.clientHeight < 24;
+      let sig = false;
+      if (j.same) {
+        const nc = j.cursor || null;
+        if (JSON.stringify(nc) !== JSON.stringify(cursor)) { cursor = nc; render(); if (atBottom) cfg.bodyEl.scrollTop = cfg.bodyEl.scrollHeight; }
+        return false;
+      }
+      if (j.full !== undefined) { lines = (j.full || "").split("\n"); ver = j.ver; cursor = j.cursor || null; sig = true; }
+      else if (j.changed && j.base === ver) {
+        const k = j.scroll || 0, prev = lines, nl = new Array(j.n);
+        for (let i = 0; i < j.n; i++) nl[i] = (i + k >= 0 && i + k < prev.length) ? prev[i + k] : "";
+        for (const [i, v] of j.changed) if (i >= 0 && i < j.n) nl[i] = (typeof v === "string") ? v : v.c.repeat(v.n);
+        lines = nl; ver = j.ver; cursor = j.cursor || null;
+        sig = (j.changed.length >= SIG) || !!j.scroll;
+      } else { ver = ""; return false; }   // base mismatch → resync (next tick gets a full)
+      render();
+      if (atBottom) cfg.bodyEl.scrollTop = cfg.bodyEl.scrollHeight;
+      return sig;
+    }
+    async function tick(g) {
+      timer = null;
+      if (!alive(g)) return;
+      const id = cfg.getId();
+      let sig = false;
+      try {
+        const r = await authedFetch(cfg.url(id, ver), { timeoutMs: 5000 });
+        if (alive(g) && r.ok && id === cfg.getId()) sig = apply(await r.json());
+      } catch {}
+      if (!alive(g)) return;
+      step = sig ? CHG : Math.min(step + 1, STEPS.length - 1);   // real change → 250ms; spinner/idle → decay
+      schedule(g, STEPS[step]);
+    }
+    return {
+      start() { want = true; if (timer) return; if (!cfg.isOpen() || !cfg.getId() || document.hidden) return; const g = ++gen; step = 0; schedule(g, STEPS[0]); },
+      stop() { want = false; gen++; if (timer) { clearTimeout(timer); timer = null; } },
+      reset() { ver = ""; lines = []; cursor = null; },   // switching target → next fetch is a full
+      poke() { if (!want) return; step = 0; if (timer == null) return; if (nextAt - performance.now() > STEPS[0]) { clearTimeout(timer); schedule(gen, STEPS[0]); } },
+    };
+  }
+  const tabsLive = makeLiveScreen({
+    bodyEl: tabsScreenEl,
+    getId: () => tabsSelectedId,
+    isOpen: () => tabsModal.classList.contains("show"),
+    url: (id, ver) => "/api/iterm-screen?iterm_session_id=" + encodeURIComponent(id)
+      + "&delta=1&cursor=1&ver=" + encodeURIComponent(ver),
+  });
+
   async function loadItermTabs() {
     tabsListEl.textContent = "Loading…";
     try {
@@ -3430,7 +3496,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           tabsSelectedId = t.iterm_session_id;
           for (const c of tabsListEl.querySelectorAll(".tab-sel")) c.classList.remove("active");
           sel.classList.add("active");
-          loadItermScreen(t.iterm_session_id);
+          tabsLive.stop(); tabsLive.reset(); tabsLive.start();   // live delta poll of this tab
         });
         row.appendChild(sel);
         // Per-tab reverse attach. Already bound (via session→tab) → skip the
@@ -3530,24 +3596,6 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     }
   }
 
-  async function loadItermScreen(sid) {
-    // Quiet swap: keep the current content visible until the new screen
-    // arrives — no "Loading…" black blank, so tapping through tabs doesn't
-    // flash the big black box. Only show a placeholder if it's empty.
-    if (!tabsScreenEl.textContent.trim()) tabsScreenEl.textContent = "Loading…";
-    try {
-      const resp = await authedFetch("/api/iterm-screen?iterm_session_id=" + encodeURIComponent(sid));
-      if (sid !== tabsSelectedId) return;   // switched tabs mid-fetch → don't splat stale screen
-      if (!resp.ok) { tabsScreenEl.textContent = "Error: " + resp.status + " " + resp.statusText; return; }
-      const j = await resp.json();
-      if (sid !== tabsSelectedId) return;
-      const atBottom = tabsScreenEl.scrollHeight - tabsScreenEl.scrollTop - tabsScreenEl.clientHeight < 24;
-      tabsScreenEl.textContent = j.screen || "(empty)";
-      if (atBottom) tabsScreenEl.scrollTop = tabsScreenEl.scrollHeight;
-    } catch (e) {
-      tabsScreenEl.textContent = "Error: " + e;
-    }
-  }
 
   // Tabs-group title click → popup the live screen of that iTerm tab.
   const tabscrModal = document.getElementById("tabscr-modal");
@@ -3583,16 +3631,21 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   tabsBtn.addEventListener("click", () => {
     tabsModal.classList.add("show");
     tabsSelectedId = null;
+    tabsLive.stop(); tabsLive.reset();
     tabsScreenEl.textContent = "Pick a tab above to view its screen.";
     loadItermTabs();
   });
   tabsRefresh.addEventListener("click", () => {
     loadItermTabs();
-    if (tabsSelectedId) loadItermScreen(tabsSelectedId);
+    if (tabsSelectedId) { tabsLive.stop(); tabsLive.reset(); tabsLive.start(); }
   });
-  tabsClose.addEventListener("click", () => tabsModal.classList.remove("show"));
+  tabsClose.addEventListener("click", () => { tabsModal.classList.remove("show"); tabsLive.stop(); });
   tabsModal.addEventListener("click", (e) => {
-    if (e.target === tabsModal) tabsModal.classList.remove("show");
+    if (e.target === tabsModal) { tabsModal.classList.remove("show"); tabsLive.stop(); }
+  });
+  // Resume the poll when the tab returns to foreground (it pauses while hidden).
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && tabsModal.classList.contains("show") && tabsSelectedId) tabsLive.start();
   });
 
   // ---- save / resume the live session list (survive a reboot) ----
@@ -3659,9 +3712,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         }),
       });
     } catch {}
-    // Refresh the screen so the user sees the result (quiet swap, no flash).
-    setTimeout(() => { if (tabsSelectedId) loadItermScreen(tabsSelectedId); }, 250);
-    setTimeout(() => { if (tabsSelectedId) loadItermScreen(tabsSelectedId); }, 650);
+    tabsLive.poke();   // live delta poll surfaces the result fast (replaced two manual refreshes)
   }
   document.querySelectorAll("#tabs-keys .tk").forEach(btn => {
     btn.addEventListener("click", () => {
@@ -3672,7 +3723,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   tabsSendBtn.addEventListener("click", () => {
     const v = tabsInput.value;
     if (!v.trim()) return;
-    tabsSendInput(v, { pressEnter: true });
+    tabsSendInput(v, { pressEnter: document.getElementById("tabs-send-enter").checked });
     tabsInput.value = "";
   });
   tabsInput.addEventListener("keydown", (e) => {
@@ -4151,7 +4202,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const t = screenInput.value;
     if (!t) return;
     screenInput.value = "";
-    sendRaw(t, true);
+    sendRaw(t, document.getElementById("screen-send-enter").checked);
   }
   document.getElementById("screen-send").addEventListener("click", screenSend);
   screenInput.addEventListener("keydown", (e) => {
@@ -7118,15 +7169,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
   // Map a keydown to the raw terminal bytes it should send (screen passthrough).
   // Returns null for keys we don't forward (modifiers alone, F-keys, …).
-  function keyToBytes(e) {
+  function keyToBytes(e, allowJobControl) {
     const k = e.key;
     if (e.ctrlKey) {                                   // Ctrl-<x> → control byte
       if (k.length === 1) {
         const kl = k.toLowerCase();
+        if (kl === "v") return null;   // Ctrl-V: never send 0x16 — leave paste a local browser op
         // Block job-control / flow-control keys — they suspend/quit/freeze the
         // session and leave claude in a confusing stopped state (never intended
         // here): Ctrl-Z (suspend), Ctrl-\ (SIGQUIT), Ctrl-S (XOFF freeze output).
-        if (kl === "z" || k === "\\" || kl === "s") return null;
+        // allowJobControl (tabs viewer, arbitrary terminals) lets them through.
+        if (!allowJobControl && (kl === "z" || k === "\\" || kl === "s")) return null;
         const c = kl.charCodeAt(0);
         if (c >= 97 && c <= 122) return String.fromCharCode(c - 96);          // Ctrl-A..Z → 0x01..0x1a
         const m = { "[": "\x1b", "]": "\x1d", " ": "\x00", "@": "\x00" };
@@ -7153,7 +7206,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && document.activeElement === inputEl) { inputEl.blur(); return; }
-    if (!tvEl.classList.contains("show")) return;
+    // the tabs viewer is a global overlay (can be open from the home/picker where
+    // the transcript view isn't shown) → don't bail before its passthrough branch.
+    if (!tvEl.classList.contains("show") && !tabsModal.classList.contains("show")) return;
 
     // Screen window = full terminal PASSTHROUGH: every key (letters, digits,
     // symbols, Enter, Tab, Backspace, Esc, arrows, Ctrl-combos) goes to the tab,
@@ -7167,6 +7222,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const seq = keyToBytes(e);
       if (seq != null) { e.preventDefault(); sendRaw(seq, false); return; }
       if (e.ctrlKey) e.preventDefault();   // swallow blocked/unmapped Ctrl combos (no browser Ctrl-S save, Ctrl-Z undo…)
+      return;
+    }
+
+    // iTerm2 tabs viewer = full terminal passthrough to the SELECTED tab. It can
+    // be any tab (incl a non-claude shell), so job-control keys (Ctrl-Z/\/S) are
+    // ALLOWED here. Skipped when typing in the tabs text-input box.
+    if (tabsModal.classList.contains("show") && !_isEditable(document.activeElement)) {
+      if (e.metaKey || e.altKey) return;
+      if (!tabsSelectedId) return;
+      if (e.key === "Enter") { e.preventDefault(); tabsSendInput("\r", { raw: true }); return; }
+      const seq = keyToBytes(e, true);   // allowJobControl for arbitrary terminals
+      if (seq != null) { e.preventDefault(); tabsSendInput(seq, { raw: true }); return; }
+      if (e.ctrlKey) e.preventDefault();
       return;
     }
 
