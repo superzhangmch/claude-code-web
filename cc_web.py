@@ -2584,6 +2584,71 @@ def _qcmd_human(e: dict):
     return None, None
 
 
+def _prune_rewound(entries: list[dict]) -> list[dict]:
+    """Drop conversation turns that were REWOUND (undone) but still linger in the
+    jsonl. claude's transcript is a tree keyed by uuid/parentUuid; a rewind forks
+    an earlier node and continues on a new branch, leaving the abandoned branch in
+    the file. The ACTIVE path = the ancestor chain of the last main turn.
+
+    A non-active main turn is REWOUND iff its ancestry REJOINS the active path (it
+    forked off a shared ancestor) → drop. A turn whose ancestry runs to its own
+    root WITHOUT ever touching the active path is a DISJOINT tree — e.g. the same
+    session resumed after a gap starts a fresh parentUuid=None root — that's
+    legitimate earlier history, NOT a rewind → keep it. (Naively keeping only the
+    active ancestors would wrongly delete such an earlier tree.) Window-boundary
+    cases resolve to "keep" (under-prune, never delete real history).
+
+    No fork in the main tree → return unchanged (zero effect on linear sessions).
+    Sidechains (sub-agents) are excluded from the tree (else they'd look like
+    rewinds) and always pass through — the caller's filters own them."""
+    if len(entries) < 2:
+        return entries
+    main = [e for e in entries if e.get("uuid") and not e.get("isSidechain")]
+    if len(main) < 2:
+        return entries
+    by_uuid = {e["uuid"]: e for e in main}
+    kids: dict[str, int] = {}
+    for e in main:
+        p = e.get("parentUuid")
+        if p:
+            kids[p] = kids.get(p, 0) + 1
+    if not any(c >= 2 for c in kids.values()):    # no branch → nothing was rewound
+        return entries
+    active: set = set()
+    cur = main[-1]["uuid"]
+    guard = 0
+    while cur in by_uuid and guard <= len(main):
+        active.add(cur)
+        cur = by_uuid[cur].get("parentUuid")
+        guard += 1
+    # Does a chain starting at `u` reach the active path before hitting a root /
+    # the loaded-window edge? True → that turn forked off the active path (rewound).
+    reaches: dict[str, bool] = {}
+    def _reaches_active(u):
+        chain = []
+        while True:
+            if u in active:
+                val = True; break
+            if u not in by_uuid:            # root (parentUuid=None) or outside window
+                val = False; break
+            if u in reaches:
+                val = reaches[u]; break
+            chain.append(u)
+            u = by_uuid[u].get("parentUuid")
+        for x in chain:
+            reaches[x] = val
+        return val
+    keep = []
+    for e in entries:
+        u = e.get("uuid")
+        if (not u) or e.get("isSidechain") or (u in active):
+            keep.append(e)                  # non-main / sidechain / on active path
+        elif not _reaches_active(u):
+            keep.append(e)                  # disjoint tree (resume) → legitimate history
+        # else: forks off the active path → rewound → drop
+    return keep
+
+
 def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
     # Queued prompts: an `enqueue` is the "Queued" placeholder. Its DELIVERED form
     # is EITHER a `queued_command` attachment (~80%, rendered as the sent msg) OR a
@@ -3206,6 +3271,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+# gzip every response the browser will accept (it always sends Accept-Encoding:
+# gzip). Huge win on /api/state — the transcript repeats per-entry keys
+# (type/message/content/uuid/parentUuid/timestamp…) so a ~27KB JSON compresses to
+# ~4-6KB. minimum_size skips tiny bodies (small screen deltas) where it wouldn't pay.
+from starlette.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=800)
 
 
 # ---------- request models ----------
@@ -3273,6 +3344,7 @@ class UploadFileItem(BaseModel):
 
 class UploadPayload(BaseModel):
     files: list[UploadFileItem]
+    allow_any: bool = False       # long-press upload → accept non-image files too
 
 
 # ---------- public endpoints ----------
@@ -4709,18 +4781,40 @@ async def get_state(
             b.jsonl_path = real
             bindings._persist()
 
-    all_entries = jsonl_cache.entries(b.jsonl_path)
+    raw_entries = jsonl_cache.entries(b.jsonl_path)
+    all_entries = _prune_rewound(raw_entries)                 # hide rewound (undone) branches
     cur_epoch = f"{_BOOT_TOKEN}.{jsonl_cache.generation(b.jsonl_path)}"
 
     gap_before_idx: Optional[int] = None
     resync = False
+    removed_idxs: Optional[list] = None
+    active_ids = {e.get("_idx") for e in all_entries}
+    # A REWIND while the page is open: the client's last-seen tip (since_idx) is a
+    # turn that just got pruned off the active branch, so its append-only view now
+    # shows undone turns. Instead of a full replace, tell it the exact rewound
+    # _idx to DELETE in place (those <= its cursor) and send the active
+    # continuation as a normal delta — a LOCAL edit (keeps scroll + loaded
+    # history). Only when since_idx no longer names a live entry (i.e. right after
+    # a rewind); never on a normal growing session where the tip stays present.
+    stale_cursor = (since_idx is not None and bool(all_entries) and since_idx not in active_ids)
     if since_idx is not None and epoch is not None and epoch != cur_epoch:
         # The client's cursor belongs to an OLD window numbering (server restart
-        # or a window rebuild re-anchored the ids). A delta would silently return
-        # nothing → send a fresh snapshot + resync so the client REPLACES once.
-        # This is the only case that isn't a cheap delta; it's rare.
+        # or a window rebuild re-anchored the ids) → idxs can't be mapped, so a
+        # local edit is impossible: send a fresh snapshot + resync (full replace).
         sliced = _last_n_rounds(all_entries, rounds or 5)
         resync = True
+    elif stale_cursor:
+        removed_idxs = [e.get("_idx") for e in raw_entries
+                        if e.get("_idx") is not None and e.get("_idx") <= since_idx
+                        and e.get("_idx") not in active_ids]
+        delta = [e for e in all_entries if e.get("_idx", 0) > since_idx]
+        if rounds is not None:
+            capped = _last_n_rounds(delta, rounds)
+            if capped and len(capped) < len(delta):   # active continuation > N rounds → mark the gap
+                gap_before_idx = capped[0].get("_idx")
+            sliced = capped
+        else:
+            sliced = delta
     elif since_idx is not None:
         delta = [e for e in all_entries if e.get("_idx", 0) > since_idx]
         if rounds is not None:
@@ -4731,17 +4825,18 @@ async def get_state(
         else:
             sliced = delta
     elif before_idx is not None:
-        # load-earlier: serve the rounds just before `before_idx`. Take them from
-        # the loaded window first (it may already hold rounds below before_idx
-        # that weren't in the initial display), extending backward from DISK only
-        # when the window runs out. earlier() prepends in place, so all_entries
-        # (the same list) grows as we go — no full history is ever held.
+        # load-earlier: serve the rounds just before `before_idx`, extending the
+        # window backward from DISK when needed. `earlier()` prepends to the cache's
+        # raw window; RE-PRUNE each pass so (a) the newly loaded earlier rounds are
+        # actually seen (all_entries is a pruned COPY, it doesn't grow on its own),
+        # and (b) rewound branches in that older region are dropped too.
         want = rounds or 5
         older = [e for e in all_entries if e.get("_idx", 0) < before_idx]
         guard = 0
         while (sum(1 for e in older if _is_user_msg(e)) < want
                and jsonl_cache.has_earlier(b.jsonl_path) and guard < 100):
             jsonl_cache.earlier(b.jsonl_path)
+            all_entries = _prune_rewound(jsonl_cache.entries(b.jsonl_path))
             older = [e for e in all_entries if e.get("_idx", 0) < before_idx]
             guard += 1
         sliced = _last_n_rounds(older, want)
@@ -4783,7 +4878,7 @@ async def get_state(
             pending_confirm = None   # it's the user's own "1. .. 2. .." msg echoed, not a menu
     status_line = _status_line(screen)
 
-    return {
+    resp = {
         "binding": _serialize_binding(b),
         "transcript": transcript,               # queued msgs are rendered INLINE here now
         "status_line": status_line,             # bottom status bar (changed-only)
@@ -4794,7 +4889,14 @@ async def get_state(
         "pending_confirm": pending_confirm,
         "epoch": cur_epoch,
         "resync": resync,
+        "removed_idxs": removed_idxs,   # rewound turns to DELETE in place (live rewind)
     }
+    # Drop null-valued fields to save bytes on every poll — the client reads them
+    # all as "missing == default" (status_line/gap_before_idx/pending_confirm/
+    # removed_idxs are None on ordinary polls; renderStatusline/updatePromptRow &c
+    # treat undefined exactly like null). since_idx is None only on an empty
+    # session (no cursor to advance), which the client also handles.
+    return {k: v for k, v in resp.items() if v is not None}
 
 
 @app.get("/api/session-procs", dependencies=[Depends(require_token)])
@@ -6429,21 +6531,30 @@ async def post_upload(payload: UploadPayload):
         raise HTTPException(status_code=400, detail="too many files (max 8)")
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     _upload_gc()
+    allow_any = bool(payload.allow_any)
+    ANY_MAX_BYTES = 10 * 1024 * 1024        # non-image (long-press) hard cap
     out: list[dict] = []
     for f in payload.files:
         ct = (f.content_type or "").lower().strip()
-        if not ct.startswith("image/"):
+        is_img = ct.startswith("image/")
+        if not is_img and not allow_any:
             raise HTTPException(status_code=400, detail=f"not an image: {ct!r}")
         try:
             data = base64.b64decode(f.b64, validate=False)
         except Exception:
             raise HTTPException(status_code=400, detail="invalid base64")
-        if len(data) > UPLOAD_MAX_BYTES:
-            raise HTTPException(status_code=413,
-                                detail=f"image > {UPLOAD_MAX_BYTES} bytes")
+        cap = UPLOAD_MAX_BYTES if is_img else ANY_MAX_BYTES
+        if len(data) > cap:
+            raise HTTPException(status_code=413, detail=f"file > {cap} bytes")
         if not data:
             raise HTTPException(status_code=400, detail="empty file")
-        ext = _EXT_BY_CONTENT_TYPE.get(ct, ".bin")
+        if is_img:
+            ext = _EXT_BY_CONTENT_TYPE.get(ct, ".bin")
+        else:
+            # preserve the original extension (claude reads `@path` by type); sanitise
+            raw = os.path.splitext(f.name or "")[1].lstrip(".")
+            safe = "".join(c for c in raw if c.isalnum())[:10]
+            ext = ("." + safe) if safe else _EXT_BY_CONTENT_TYPE.get(ct, ".bin")
         ts = int(_time.time())
         rand = secrets.token_hex(4)
         path = UPLOAD_DIR / f"{ts}_{rand}{ext}"

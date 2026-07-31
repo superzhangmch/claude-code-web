@@ -124,6 +124,7 @@ body {
 button, .btn, .icon, label.tab-radio, label.scr-delta {
   touch-action: manipulation;
   -webkit-user-select: none; user-select: none;
+  -webkit-touch-callout: none;   /* iOS: don't let a long-press pop the system callout / cancel the gesture */
 }
 /* Also kill double-tap-to-zoom on the popup CARDS themselves: rapid button taps
    often land a beat off the button (on the card), which iOS reads as a double-
@@ -844,7 +845,7 @@ body.light .msg.system.stack-tool { background: var(--panel2); }
 }
 #hb.idle .hb-dot::before { content: "✓"; }
 /* idle: no live content → drop the frame/box, just show the tiny "✓ idle" line */
-#hb.idle { opacity: .9; border-color: transparent; background: none; padding: 3px 12px; }
+#hb.idle { opacity: .9; border-color: transparent; background: none; padding: 2px 12px; margin: 2px 0 4px 0; }
 @keyframes hbpulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
 /* committed block: content that has landed in the transcript above — outlined
    (solid, distinct from the live dashed frame), with a countdown + keep button.
@@ -2198,7 +2199,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <input id="upload-input" type="file" accept="image/*" multiple style="display:none">
       <div class="in-btn-col">
         <button id="mic-btn" class="icon" title="语音输入(录音→识别→整理)">🎤</button>
-        <button id="upload-btn" class="icon" title="Attach image">📎</button>
+        <button id="upload-btn" class="icon" title="Attach image (long-press: any file ≤10MB)">📎</button>
       </div>
       <textarea id="input" placeholder="Reply to Claude…" rows="1"></textarea>
       <button id="send" class="send" title="点击发送 · 长按更多" aria-label="Send">➤</button>
@@ -6895,6 +6896,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     loadEarlierEl.classList.toggle("show", hasMoreHistory && !!attachedSid);
   }
 
+  // Live REWIND: surgically drop the given (now-rewound) entry _idx from the
+  // cache AND the DOM — a LOCAL edit, no full rebuild, so scroll position and any
+  // "load earlier" history are preserved. (data-idx on each block == entry _idx.)
+  function removeEntriesByIdx(idxs) {
+    if (!idxs || !idxs.length) return;
+    const rm = new Set(idxs.map(String));
+    entryCache = entryCache.filter(e => !rm.has(String(e._idx)));
+    for (const x of idxs)
+      transcriptEl.querySelectorAll('[data-idx="' + x + '"]').forEach(n => n.remove());
+    pairedQueued = computePairedQueued(entryCache);
+  }
   function ingest(entries, position) {
     if (!entries?.length) {
       if (position === "replace") { entryCache = []; rebuild(); }
@@ -7399,7 +7411,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // fully hide when hidden/paused/detached.
       syncHeartbeat();
       const entries = m.transcript || [];
-      pollChanged = entries.length > 0 || !!m.resync || !!m.pending_confirm;
+      pollChanged = entries.length > 0 || !!m.resync || !!m.pending_confirm || !!(m.removed_idxs && m.removed_idxs.length);
+      // live rewind: delete the rewound turns in place BEFORE appending the active tail
+      if (m.removed_idxs && m.removed_idxs.length) removeEntriesByIdx(m.removed_idxs);
       if (lastIdx === null || m.resync) {
         // resync: server signalled our cursor is from an old window numbering
         // (restart / rebuild) → replace once instead of a stale-empty delta.
@@ -7485,20 +7499,28 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const fN = frame.length; if (!fN) return;
     if (!hbBuf.length) { hbBuf = frame.map(mkLine); return; }
     const bN = hbBuf.length, fnorm = frame.map(_normMatch);
-    let bestBase = -1, bestScore = -1;
+    // Pick the frame→buffer offset by the LONGEST RUN of consecutive matching
+    // lines — the SAME method as the screen delta (_screen_delta) — NOT the total
+    // match count. A per-frame-changing line (spinner / elapsed timer) only breaks
+    // the run in two, so the longest stable run still uniquely anchors the correct
+    // offset; repeated lines can't win a wrong offset the way raw count let them
+    // (which shifted the write and left a stale duplicate above/below). `>=` keeps
+    // the rightmost among equal runs so genuinely new tail lines append.
+    let bestBase = -1, bestRun = -1;
     for (let base = Math.max(0, bN - fN - 6); base <= bN - 1; base++) {
-      let score = 0;
+      let run = 0, longest = 0;
       for (let i = 0; i < fN; i++) {
         const bi = base + i; if (bi >= bN) break;
-        if (fnorm[i] && fnorm[i] === hbBuf[bi].norm) score++;
+        if (fnorm[i] && fnorm[i] === hbBuf[bi].norm) { run++; if (run > longest) longest = run; }
+        else run = 0;
       }
-      if (score >= bestScore) { bestScore = score; bestBase = base; }   // >= → prefer rightmost (append-biased)
+      if (longest >= bestRun) { bestRun = longest; bestBase = base; }
     }
-    // Adaptive threshold: big frames need STITCH_MIN matches, short ones (e.g. the
-    // 1–2 line tail right after a commit) need only 1 — so a commit-shrink doesn't
-    // look like "no overlap" and nuke the buffer.
+    // Adaptive threshold: big frames need STITCH_MIN consecutive matches, short
+    // ones (e.g. the 1–2 line tail right after a commit) need only 1 — so a
+    // commit-shrink doesn't look like "no overlap" and nuke the buffer.
     const need = Math.max(1, Math.min(STITCH_MIN, fN - 1));
-    if (bestScore < need) {                          // no reliable overlap
+    if (bestRun < need) {                            // no reliable overlap
       let c = 0; while (c < bN && hbBuf[c].committed) c++;
       hbBuf = hbBuf.slice(0, c).concat(frame.map(mkLine));   // keep committed prefix, live tail = current frame
       return;
@@ -8102,7 +8124,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         pill.appendChild(img);
       }
       const nm = document.createElement("span");
-      nm.textContent = up.name + " ";
+      nm.textContent = (up.dataUrl ? "" : "📄 ") + up.name + " ";   // 📄 marks a non-image file
       pill.appendChild(nm);
       const x = document.createElement("span"); x.className = "x"; x.textContent = "✕";
       x.addEventListener("click", () => {
@@ -8133,18 +8155,34 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     });
   }
 
-  async function uploadFiles(fileList) {
-    const files = Array.from(fileList).filter(f => f.type && f.type.startsWith("image/"));
+  async function uploadFiles(fileList, anyType) {
+    let files = Array.from(fileList);
+    if (!anyType) files = files.filter(f => f.type && f.type.startsWith("image/"));
     if (!files.length) return;
-    showLoading("Uploading " + files.length + " image" + (files.length > 1 ? "s" : "") + "…");
+    // Size gate CLIENT-SIDE, BEFORE reading any bytes → an oversized file never
+    // hits the wire (no wasted traffic). >10MB rejected; 5–10MB asks first.
+    if (anyType) {
+      const MB = 1024 * 1024, kept = [];
+      for (const f of files) {
+        const mb = (f.size / MB).toFixed(1);
+        if (f.size > 10 * MB) { alert("“" + f.name + "” 有 " + mb + "MB,超过 10MB 上限,已跳过。"); continue; }
+        if (f.size > 5 * MB && !confirm("“" + f.name + "” 有 " + mb + "MB,确定上传吗?")) continue;
+        kept.push(f);
+      }
+      files = kept;
+      if (!files.length) return;
+    }
+    const noun = anyType ? "file" : "image";
+    showLoading("Uploading " + files.length + " " + noun + (files.length > 1 ? "s" : "") + "…");
     const previews = [];
-    const payload = { files: [] };
+    const payload = { files: [], allow_any: !!anyType };
     for (const f of files) {
       const dataUrl = await fileToDataUrl(f);
       const i = dataUrl.indexOf(",");
       const b64 = i >= 0 ? dataUrl.slice(i + 1) : dataUrl;
-      payload.files.push({ name: f.name || "image", content_type: f.type, b64 });
-      previews.push({ name: f.name || "image", dataUrl });
+      payload.files.push({ name: f.name || noun, content_type: f.type || "", b64 });
+      const isImg = (f.type || "").startsWith("image/");
+      previews.push({ name: f.name || noun, dataUrl: isImg ? dataUrl : null });
     }
     let resp;
     try {
@@ -8175,12 +8213,58 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     inputEl.focus();
   }
 
-  uploadBtn.addEventListener("click", () => uploadInput.click());
+  // Tap = attach image. LONG-PRESS (>=500ms) = attach ANY file type. Decide on
+  // pointerup (a real user gesture, so the file dialog isn't blocked) by how long
+  // the button was held. click() is only a fallback for keyboard activation.
+  // Same long-press mechanism as the Send button (proven to work here): a 500ms
+  // timer started on pointerdown fires the "any file" picker; a plain tap (click,
+  // with the long-press suppressed) opens the image picker.
+  let _upAnyMode = false, _upLpFired = false, _upLpTimer = null;
+  function openUploadPicker(anyType) {
+    _upAnyMode = anyType;
+    uploadInput.accept = anyType ? "" : "image/*";
+    uploadInput.click();
+  }
+  // Long-press opens a small MENU (a DOM node — timers can create it; unlike
+  // input.click(), which iOS blocks outside a gesture). Tapping a menu item IS a
+  // gesture, so the file dialog it triggers is allowed on iOS too.
+  function openUploadMenu() {
+    const old = document.getElementById("upload-menu"); if (old) old.remove();
+    const m = document.createElement("div"); m.id = "upload-menu"; m.className = "send-menu";
+    const items = [
+      ["🖼 图片", () => openUploadPicker(false)],
+      ["📄 任意文件 ≤10MB", () => openUploadPicker(true)],
+    ];
+    for (const [label, fn] of items) {
+      const b = document.createElement("button"); b.className = "send-menu-item"; b.textContent = label;
+      b.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); fn(); });
+      m.appendChild(b);
+    }
+    document.body.appendChild(m);
+    const r = uploadBtn.getBoundingClientRect();     // fixed-position just above the 📎 (layout-independent)
+    m.style.position = "fixed"; m.style.left = r.left + "px";
+    m.style.bottom = (window.innerHeight - r.top + 6) + "px"; m.style.zIndex = "300";
+    setTimeout(() => document.addEventListener("click", function onDoc(ev) {
+      if (!m.contains(ev.target) && ev.target !== uploadBtn) { m.remove(); document.removeEventListener("click", onDoc); }
+    }), 0);
+  }
+  function _upLpStart() { _upLpFired = false; clearTimeout(_upLpTimer); _upLpTimer = setTimeout(() => { _upLpFired = true; openUploadMenu(); }, 500); }
+  function _upLpCancel() { clearTimeout(_upLpTimer); }
+  uploadBtn.addEventListener("pointerdown", _upLpStart);
+  uploadBtn.addEventListener("pointerup", _upLpCancel);
+  uploadBtn.addEventListener("pointerleave", _upLpCancel);
+  uploadBtn.addEventListener("pointercancel", _upLpCancel);
+  uploadBtn.addEventListener("contextmenu", (e) => e.preventDefault());   // no OS menu on long-press
+  uploadBtn.addEventListener("click", (e) => {
+    if (_upLpFired) { e.preventDefault(); e.stopImmediatePropagation(); _upLpFired = false; return; }  // long-press already opened any-file picker
+    openUploadPicker(false);
+  });
   uploadInput.addEventListener("change", async (e) => {
     if (e.target.files && e.target.files.length) {
-      await uploadFiles(e.target.files);
+      await uploadFiles(e.target.files, _upAnyMode);
       uploadInput.value = ""; // allow same file twice
     }
+    _upAnyMode = false; uploadInput.accept = "image/*";   // reset to default
   });
 
   // Drag-and-drop on the input area
