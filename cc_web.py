@@ -2616,16 +2616,14 @@ def _prune_rewound(entries: list[dict]) -> list[dict]:
         return entries
     active: set = set()
     cur = main[-1]["uuid"]
-    guard = 0
-    while cur in by_uuid and guard <= len(main):
+    while cur in by_uuid and cur not in active:   # `cur in active` → a parentUuid CYCLE → stop
         active.add(cur)
         cur = by_uuid[cur].get("parentUuid")
-        guard += 1
     # Does a chain starting at `u` reach the active path before hitting a root /
     # the loaded-window edge? True → that turn forked off the active path (rewound).
     reaches: dict[str, bool] = {}
     def _reaches_active(u):
-        chain = []
+        chain, seen = [], set()
         while True:
             if u in active:
                 val = True; break
@@ -2633,7 +2631,9 @@ def _prune_rewound(entries: list[dict]) -> list[dict]:
                 val = False; break
             if u in reaches:
                 val = reaches[u]; break
-            chain.append(u)
+            if u in seen:                   # parentUuid CYCLE not touching the active path
+                val = False; break          # → treat as disjoint (keep); NEVER loop forever
+            seen.add(u); chain.append(u)
             u = by_uuid[u].get("parentUuid")
         for x in chain:
             reaches[x] = val
