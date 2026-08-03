@@ -6355,7 +6355,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // it never catches bash negation ("if ! pgrep") or prose exclamations ("run!").
   function extractCommands(text) {
     const t = text || "", out = [], seen = new Set();
-    const CMD_RE = /^!\s+\S/;   // '!' + space + something, at line start (lenient — FP is fine, user checks)
+    const CMD_RE = /^!(?!\[)\s*\S/;   // '!' (opt. space) + something at line start; skip markdown ![img] (lenient — FP fine, user checks)
     const add = (c) => { c = (c || "").trim(); if (CMD_RE.test(c) && !seen.has(c)) { seen.add(c); out.push(c); } };
     const strip = (line) => {
       let s = line.trim().replace(/^(?:[-*>]\s+|\d+\.\s+)/, "");   // strip list/quote marker
@@ -6371,7 +6371,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       while (/\\\s*$/.test(s) && i + 1 < lines.length) s += "\n" + lines[++i].trim();
       add(s);                                                     // (add() re-checks CMD_RE)
     }
-    let m; const INLINE = /`(!\s+[^`\n]+)`/g;                     // inline `! cmd` in prose
+    let m; const INLINE = /`(!\s*[^`\n]+)`/g;                     // inline `!cmd` / `! cmd` in prose
     while ((m = INLINE.exec(t))) add(m[1]);
     return out;
   }

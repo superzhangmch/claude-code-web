@@ -5035,7 +5035,30 @@ async def post_input(payload: InputPayload):
             await asyncio.sleep(0.12)
         except Exception:
             pass
-    ok = await bridge.send_text_to(b.iterm_session_id, final)
+    # Bash-mode ('!') commands: the claude TUI toggles into a special "bash
+    # mode" on the leading '!'. Firing "!command\r" as one contiguous write
+    # races that mode transition — '!' doesn't reliably register as the toggle
+    # when it's immediately followed by more bytes, and the trailing Enter gets
+    # eaten by the re-render. So type it like a human: send '!' alone to enter
+    # the mode, let it settle, then the command body, settle, then Enter as its
+    # own keystroke.
+    if payload.press_enter and not multi_line and body.startswith("!") and len(body) > 1:
+        rest = body[1:].lstrip()   # command after '!' (bash mode renders its own '! ' prefix)
+        # Trailing space or claude's path autocomplete eats the Enter: when the
+        # command ends in a path (…/static/), Enter is consumed as "accept the
+        # completion" instead of "run". A trailing space commits the token and
+        # dismisses the popup so Enter submits. Harmless for bash ("ls " == "ls").
+        if not rest.endswith(" "):
+            rest += " "
+        ok = await bridge.send_text_to(b.iterm_session_id, "!")
+        if ok:
+            await asyncio.sleep(0.2)
+            ok = await bridge.send_text_to(b.iterm_session_id, rest)
+        if ok:
+            await asyncio.sleep(0.2)
+            ok = await bridge.send_text_to(b.iterm_session_id, "\r")
+    else:
+        ok = await bridge.send_text_to(b.iterm_session_id, final)
     if not ok:
         raise HTTPException(status_code=404, detail="iterm session vanished")
     _last_input_ts[b.claude_session_id] = now
