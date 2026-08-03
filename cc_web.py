@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, status
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -92,6 +92,8 @@ def _load_conf() -> dict:
         "cwds": [],
         "asr": [],     # list of {label, api_base, key, model} — voice-input ASR backends
         "claude_config": "",   # path to claude's .claude.json (per-project trust); default ~/.claude.json
+        "openai_realtime": None,   # {base, key} — realtime (streaming) ASR WS; url in conf, not code
+        "soniox": None,            # {base, key} — Soniox true per-token streaming ASR WS
     }
     try:
         for line in CONF_PATH.read_text(encoding="utf-8").splitlines():
@@ -106,9 +108,24 @@ def _load_conf() -> dict:
             elif k == "asr":
                 # asr=<label>|<api_base>|<key>|<model>  (multiple lines = switchable)
                 parts = [p.strip() for p in v.split("|")]
+                # asr=<label>|<api_base>|<key>|<real_model>|<display?>  — real_model stays
+                # server-side (used for the API call), only <display> is sent to the client.
                 if len(parts) >= 4 and parts[1] and parts[3]:
                     cfg["asr"].append({"label": parts[0], "api_base": parts[1].rstrip("/"),
-                                       "key": parts[2], "model": parts[3]})
+                                       "key": parts[2], "model": parts[3],
+                                       "display": (parts[4] if len(parts) >= 5 and parts[4] else parts[0])})
+            elif k == "openai_realtime":
+                # openai_realtime=<ws_base_url>|<key>|<display?>  (URL in config → swap providers freely)
+                parts = [p.strip() for p in v.split("|")]
+                if len(parts) >= 2 and parts[0] and parts[1]:
+                    cfg["openai_realtime"] = {"base": parts[0], "key": parts[1],
+                                              "display": (parts[2] if len(parts) >= 3 else "")}
+            elif k == "soniox":
+                # soniox=<ws_url>|<key>|<display?>  (true per-token streaming; url in conf, not code)
+                parts = [p.strip() for p in v.split("|")]
+                if len(parts) >= 2 and parts[0] and parts[1]:
+                    cfg["soniox"] = {"base": parts[0], "key": parts[1],
+                                     "display": (parts[2] if len(parts) >= 3 else "")}
             elif k in cfg:
                 cfg[k] = v
     except OSError:
@@ -6190,7 +6207,17 @@ def _asr_ext_for(ctype: str) -> str:
 async def get_asr_configs():
     """Labels/models of the configured ASR backends (no keys) so the UI can
     offer a switch. First entry is the default."""
-    return {"configs": [{"label": c["label"], "model": c["model"]} for c in _asr_configs()]}
+    # Only label + display go to the client — the real model name stays server-side
+    # (config maps real→display) so we never leak which external models are used.
+    rt_engines = []   # selectable realtime engines (Soniox preferred first), display names only
+    if CONF.get("soniox"):
+        rt_engines.append({"id": "soniox", "display": CONF["soniox"].get("display") or "Soniox"})
+    if CONF.get("openai_realtime"):
+        rt_engines.append({"id": "openai", "display": CONF["openai_realtime"].get("display") or "OpenAI"})
+    return {"configs": [{"label": c["label"], "display": c.get("display") or c["label"]} for c in _asr_configs()],
+            "realtime": bool(CONF.get("openai_realtime")),   # OpenAI commit-then-text streaming
+            "soniox": bool(CONF.get("soniox")),              # Soniox true per-token live streaming
+            "realtime_engines": rt_engines}
 
 
 def _asr_prompt(sid: str) -> str:
@@ -6267,6 +6294,219 @@ async def post_asr(request: Request, which: Optional[str] = None, sid: Optional[
             err = err.get("message", "")
         raise HTTPException(status_code=502, detail=f"ASR empty: {err or ''}")
     return {"text": text, "model": cfg["model"], "label": cfg["label"]}
+
+
+async def _soniox_bridge(ws: WebSocket, q):
+    """Bridge browser ↔ Soniox realtime STT (true per-token live streaming).
+    Soniox differs from OpenAI: first msg is a JSON config, audio is sent as RAW
+    PCM16 binary frames (no base64/JSON wrapping), an empty text frame = FINISH,
+    and responses are {tokens:[{text,is_final}], finished} — partials stream WHILE
+    you speak, then finalize. URL+key live in cc_web.conf (soniox=<ws_url>|<key>)."""
+    sx = CONF.get("soniox")
+    if not sx:
+        try: await ws.send_text(json.dumps({"type": "error", "error": "no soniox configured"}))
+        except Exception: pass
+        await ws.close(); return
+    try:
+        import websockets as _wslib
+    except Exception:
+        try: await ws.send_text(json.dumps({"type": "error", "error": "websockets lib missing"}))
+        except Exception: pass
+        await ws.close(); return
+    model = q.get("model") or "stt-rt-v4"
+    try: rate = int(q.get("rate") or 24000)
+    except Exception: rate = 24000
+    # language_hints → needed for zh+en code-switching (Soniox default biases one lang);
+    # gen-spark production defaults ["zh","en"]. Override via ?langs=zh,en,ja
+    langs = [s.strip() for s in (q.get("langs") or "zh,en").split(",") if s.strip()]
+    ctx = _asr_prompt(q.get("sid") or "")   # recent conversation → domain vocab bias (like OpenAI prompt)
+    # ping_interval=None: don't let the ws lib's ping-timeout kill a valid long/paused
+    # session (continuous audio keeps TCP alive). Retry the flaky handshake once.
+    up = None
+    for _attempt in range(4):   # Soniox occasionally RSTs the handshake (shared dev key throttling) → ride it out
+        try:
+            up = await _wslib.connect(sx["base"], max_size=None, ping_interval=None, open_timeout=20)
+            break
+        except Exception as e:
+            _last = e; log.info("asr-stream[soniox]: connect attempt %d failed: %s", _attempt + 1, repr(e)[:150])
+            await asyncio.sleep(0.4 * (_attempt + 1))   # small backoff between attempts
+    if up is None:
+        try: await ws.send_text(json.dumps({"type": "error", "error": "soniox: " + str(_last)[:200]}))
+        except Exception: pass
+        await ws.close(); return
+    conf = {"api_key": sx["key"], "model": model, "audio_format": "pcm_s16le",
+            "sample_rate": rate, "num_channels": 1, "language_hints": langs}
+    if ctx:
+        conf["context"] = ctx   # Soniox custom-vocabulary biasing (soniox.com/docs/stt/concepts/context)
+    try:
+        await up.send(json.dumps(conf))
+        await up.send(b"\x00\x00" * int(rate))   # ~1s warmup silence (Soniox discards first ~700ms) → protects your first word
+    except Exception as e:
+        log.info("asr-stream[soniox]: config send failed: %s", e)
+    log.info("asr-stream[soniox]: connected model=%s rate=%d langs=%s ctx=%d", model, rate, langs, len(ctx or ""))
+    stat = {"in_bytes": 0, "in_frames": 0, "msgs": 0, "who": ""}
+
+    async def up_to_client():   # Soniox token JSON → browser verbatim (client parses is_final)
+        try:
+            async for m in up:
+                await ws.send_text(m if isinstance(m, str) else m.decode("utf-8", "replace"))
+                stat["msgs"] += 1
+        except Exception as e:
+            if isinstance(e, _wslib.exceptions.ConnectionClosed):
+                code = e.rcvd.code if getattr(e, "rcvd", None) else "?"
+                reason = (e.rcvd.reason if getattr(e, "rcvd", None) else "") or ""
+                stat["who"] = stat["who"] or ("upstream-closed code=%s reason=%r" % (code, reason))
+            else:
+                stat["who"] = stat["who"] or ("upstream:" + type(e).__name__ + ":" + str(e)[:100])
+        # log the moment the upstream ends (mid-session drops show here with the real reason)
+        log.info("asr-stream[soniox]: upstream ended: %s (msgs=%d in=%dB/%dframes)",
+                    stat["who"] or "clean", stat["msgs"], stat["in_bytes"], stat["in_frames"])
+
+    async def client_to_up():   # browser RAW PCM binary → Soniox as-is; any text frame = FINISH
+        try:
+            while True:
+                data = await ws.receive()
+                if data.get("type") == "websocket.disconnect":
+                    stat["who"] = stat["who"] or "client-disconnect"; break
+                b = data.get("bytes")
+                if b is not None:
+                    stat["in_bytes"] += len(b); stat["in_frames"] += 1
+                    await up.send(b)
+                elif data.get("text"):
+                    await up.send("")   # empty frame = FINISH → Soniox drains + sends finished
+        except Exception as e:
+            stat["who"] = stat["who"] or ("client:" + type(e).__name__)
+
+    t1 = asyncio.create_task(up_to_client())
+    t2 = asyncio.create_task(client_to_up())
+    try:
+        await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in (t1, t2):
+            t.cancel()
+        try: await up.close()
+        except Exception: pass
+        try: await ws.close()
+        except Exception: pass
+        log.info("asr-stream[soniox]: closed by=%s in=%dB/%dframes msgs=%d",
+                    stat["who"] or "?", stat["in_bytes"], stat["in_frames"], stat["msgs"])
+
+
+@app.websocket("/api/asr-stream")
+async def asr_stream(ws: WebSocket):
+    """Realtime streaming ASR bridge (opt-in; the batch /api/asr path is untouched).
+    Browser streams PCM16/24kHz/mono binary frames → we relay them as
+    input_audio_buffer.append to the OpenAI Realtime transcription WS and forward
+    its transcription events (…delta / …completed) straight back. Endpoint URL +
+    key live in cc_web.conf (openai_realtime=<ws_url>|<key>) — never in code, so
+    the provider is swappable. Auth via ?token= (a browser WS can't set headers)."""
+    q = ws.query_params
+    if q.get("token") != AUTH_TOKEN:
+        await ws.close(code=1008); return
+    await ws.accept()
+    # provider select: soniox = true per-token live streaming; openai = commit-then-text.
+    provider = (q.get("provider") or "").lower()
+    if not provider:
+        provider = "soniox" if CONF.get("soniox") else "openai"
+    if provider == "soniox":
+        await _soniox_bridge(ws, q)
+        return
+    rt = CONF.get("openai_realtime")
+    if not rt:
+        try: await ws.send_text(json.dumps({"type": "error", "error": "no openai_realtime configured"}))
+        except Exception: pass
+        await ws.close(); return
+    try:
+        import websockets as _wslib   # lazy → realtime is opt-in; missing lib doesn't break the server
+    except Exception:
+        try: await ws.send_text(json.dumps({"type": "error", "error": "websockets lib missing"}))
+        except Exception: pass
+        await ws.close(); return
+    model = q.get("model") or "gpt-4o-mini-transcribe"
+    tconf = {"model": model}
+    prompt = _asr_prompt(q.get("sid") or "")
+    if prompt: tconf["prompt"] = prompt
+    if q.get("lang"): tconf["language"] = q.get("lang")
+    base = rt["base"]
+    url = base + ("&" if "?" in base else "?") + "intent=transcription"
+    up = None
+    for _attempt in range(2):   # OpenAI WS connect is occasionally flaky → one quick retry
+        try:
+            up = await _wslib.connect(url, additional_headers={"Authorization": "Bearer " + rt["key"]},
+                                      max_size=None, ping_interval=None, open_timeout=20)
+            break
+        except Exception as e:
+            _last = e; log.info("asr-stream: upstream connect attempt %d failed: %s", _attempt + 1, repr(e)[:150])
+    if up is None:
+        try: await ws.send_text(json.dumps({"type": "error", "error": "upstream: " + str(_last)[:200]}))
+        except Exception: pass
+        await ws.close(); return
+    log.info("asr-stream: connected model=%s prompt_chars=%d", model, len(prompt or ""))
+    try:
+        await up.send(json.dumps({"type": "session.update", "session": {"type": "transcription",
+            "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000},
+                                "transcription": tconf,
+                                # gpt-4o transcribe only emits text AFTER a segment is committed
+                                # (it does NOT stream deltas mid-utterance — verified). server_vad
+                                # commits at each silence gap, so a SHORT silence_duration_ms makes
+                                # text appear at every natural pause and accumulate → the most
+                                # "live" feel this model allows. Too long = text only shows at Stop.
+                                "turn_detection": {"type": "server_vad", "threshold": 0.5,
+                                                   "prefix_padding_ms": 300,
+                                                   "silence_duration_ms": 500}}}}}))
+    except Exception as e:
+        log.info("asr-stream: session.update failed: %s", e)
+
+    stat = {"in_bytes": 0, "in_frames": 0, "delta": 0, "completed": 0, "text_chars": 0, "who": ""}
+
+    async def up_to_client():   # OpenAI events → browser (verbatim; client filters delta/completed)
+        try:
+            async for m in up:
+                await ws.send_text(m if isinstance(m, str) else m.decode("utf-8", "replace"))
+                try:
+                    ev = json.loads(m); t = ev.get("type", "")
+                except Exception:
+                    continue
+                if t.endswith("transcription.delta"):
+                    stat["delta"] += 1
+                elif t.endswith("transcription.completed"):
+                    stat["completed"] += 1; stat["text_chars"] += len(ev.get("transcript") or "")
+                    # NB: do NOT log the transcript text (privacy — it's the user's speech).
+                elif t == "error" or "failed" in t:
+                    log.warning("asr-stream: OpenAI event %s: %s", t, json.dumps(ev)[:400])
+        except Exception as e:
+            stat["who"] = stat["who"] or ("upstream:" + type(e).__name__)
+
+    async def client_to_up():   # browser PCM (binary) → append; text frames = control (commit/clear)
+        try:
+            while True:
+                data = await ws.receive()
+                if data.get("type") == "websocket.disconnect":
+                    stat["who"] = stat["who"] or "client-disconnect"; break
+                b = data.get("bytes")
+                if b is not None:
+                    stat["in_bytes"] += len(b); stat["in_frames"] += 1
+                    await up.send(json.dumps({"type": "input_audio_buffer.append",
+                                              "audio": base64.b64encode(b).decode()}))
+                elif data.get("text"):
+                    await up.send(data["text"])
+        except Exception as e:
+            stat["who"] = stat["who"] or ("client:" + type(e).__name__)
+
+    t1 = asyncio.create_task(up_to_client())
+    t2 = asyncio.create_task(client_to_up())
+    try:
+        await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in (t1, t2):
+            t.cancel()
+        try: await up.close()
+        except Exception: pass
+        try: await ws.close()
+        except Exception: pass
+        log.info("asr-stream: closed by=%s in=%dB/%dframes delta=%d completed=%d chars=%d",
+                    stat["who"] or "?", stat["in_bytes"], stat["in_frames"],
+                    stat["delta"], stat["completed"], stat["text_chars"])
 
 
 @app.get("/api/server-info", dependencies=[Depends(require_token)])
