@@ -112,7 +112,10 @@ html, body {
   -webkit-text-size-adjust: 100%; text-size-adjust: 100%;
 }
 body {
-  display: flex; flex-direction: column; height: 100dvh; overflow: hidden;
+  /* Normally 100dvh (native iOS keyboard handling — input/messages scroll in sync).
+     After LaTeX is rendered, JS sets --app-h from the visualViewport so the footer
+     stays above the keyboard (fixes the black gap KaTeX exposes). Gated on LaTeX. */
+  display: flex; flex-direction: column; height: var(--app-h, 100dvh); overflow: hidden;
   /* App-wide: no double-tap-to-zoom (kills the accidental zoom from rapid taps
      on button rows / gaps). Pinch-zoom + scrolling still work. */
   touch-action: manipulation;
@@ -2466,6 +2469,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     throwOnError: false,   // broken LaTeX from the model → red source, not a crash
     ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
   };
+  // iOS keyboard viewport fix — GATED to LaTeX. OFF by default (native 100dvh, so the
+  // input/messages scroll in sync); turned ON only once math is rendered, because KaTeX
+  // exposes an iOS keyboard gap. When OFF, _vvFit is a TOTAL no-op (touches nothing) so
+  // native behavior is fully intact; when ON, body height tracks the visual viewport.
+  let _vvOn = false;
+  function _vvFit() {
+    if (!_vvOn) return;   // OFF → do nothing (native iOS keyboard behavior untouched)
+    const vv = window.visualViewport; if (!vv) return;
+    document.documentElement.style.setProperty("--app-h", Math.round(vv.height) + "px");
+    if (window.scrollY || window.scrollX) window.scrollTo(0, 0);
+  }
+  function _vvEnable() { if (!_vvOn) { _vvOn = true; _vvFit(); } }
+
   // Manual trigger (auto-detect misfires on "$50 and $20" etc): a ∑ button in the
   // message's action row; renders the math in `mdEl` only on click, then removes itself.
   function makeMathBtn(mdEl) {
@@ -2475,6 +2491,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     btn.addEventListener("click", async (e) => {
       e.stopPropagation(); btn.disabled = true;
       try { (await loadKatex())(mdEl, _katexOpts); } catch {}
+      _vvEnable();   // math rendered → enable the iOS keyboard viewport fix (gap fix)
       btn.remove();
     });
     return btn;
@@ -8723,9 +8740,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     clearTimeout(_tabResizeTimer);
     _tabResizeTimer = setTimeout(renderTabBar, 150);
   });
-  // iOS keyboard fix: 100dvh doesn't shrink when the on-screen keyboard opens, so the
-  // footer gets pushed up and a black gap shows below it. Pin the app to the *visual*
-  // viewport height (excludes the keyboard) and undo iOS's focus window-scroll.
+  // visualViewport listeners are always attached but _vvFit no-ops until LaTeX enables it.
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", _vvFit);
+    window.visualViewport.addEventListener("scroll", _vvFit);
+  }
   start();
 })();
 </script>
