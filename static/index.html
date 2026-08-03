@@ -1102,7 +1102,7 @@ footer .input-row > button { flex-shrink: 0; }
    bar is a stop button, with a live elapsed timer + animated level bars. */
 footer .rec-bar {
   position: absolute; inset: 8px 5px; z-index: 5;
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 7px;
   padding: 0 12px; border-radius: 10px; cursor: pointer;
   background: var(--panel2); color: var(--text); border: 1.5px solid var(--accent);
   box-shadow: 0 1px 6px rgba(0,0,0,.18);
@@ -1113,7 +1113,8 @@ footer .rec-bar .rec-dot {
 }
 @keyframes rec-blink { 50% { opacity: .25; } }
 footer .rec-bar .rec-time { font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 600; }
-footer .rec-bar .rec-wave { display: flex; align-items: center; gap: 3px; flex: 1; height: 20px; }
+footer .rec-bar .rec-wave { display: flex; align-items: center; gap: 3px; flex: 0 0 auto; height: 20px; }
+footer .rec-bar .rec-wave > span:nth-child(n+7) { display: none; }   /* short wave (6 bars) so the buttons fit one line */
 footer .rec-bar .rec-wave > span {
   width: 3px; height: 30%; background: var(--accent); border-radius: 2px;
   animation: rec-wave 1.1s ease-in-out infinite;
@@ -1123,13 +1124,13 @@ footer .rec-bar .rec-wave > span:nth-child(3n) { animation-delay: .36s; }
 footer .rec-bar .rec-wave > span:nth-child(4n) { animation-delay: .54s; }
 /* realtime mode: anchor to the bottom and grow UPWARD so the transcript gets its own full-width row */
 footer .rec-bar.rec-live-on {
-  inset: auto 5px 8px 5px; height: auto; max-height: 46vh;
+  inset: auto 5px 8px 5px; height: auto; max-height: 28vh;
   flex-wrap: wrap; align-items: flex-start; padding: 8px 12px; cursor: default;
 }
 footer .rec-bar.rec-live-on .rec-cancel { margin-left: auto; }
 footer .rec-bar .rec-live {
   flex-basis: 100%; width: 100%; order: 5; text-align: left;
-  font-size: 15px; line-height: 1.5; max-height: 40vh; overflow-y: auto;
+  font-size: 15px; line-height: 1.5; max-height: 20vh; overflow-y: auto;
   word-break: break-word; margin-top: 2px; padding-top: 6px;
   border-top: 1px solid var(--border);
 }
@@ -1145,7 +1146,7 @@ footer .rec-bar .rec-live .rec-spin {
 footer .rec-bar .rec-stop, footer .rec-bar .rec-cancel, footer .rec-bar .rec-send, footer .rec-bar .rec-edit {
   flex-shrink: 0; background: var(--panel); color: var(--text);
   border: 1px solid var(--border); border-radius: 7px;
-  font-size: 13px; padding: 5px 12px; cursor: pointer;
+  font-size: 12px; padding: 4px 9px; cursor: pointer;
 }
 footer .rec-bar .rec-stop:hover, footer .rec-bar .rec-cancel:hover, footer .rec-bar .rec-send:hover, footer .rec-bar .rec-edit:hover { border-color: var(--accent); }
 footer .rec-bar .rec-send { background: var(--accent); color: var(--bg); font-weight: 700; border-color: var(--accent); }  /* accent fill: commit directly, skip polish */
@@ -2229,10 +2230,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <span id="rec-time" class="rec-time">0:00</span>
         <div class="rec-wave"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
         <div id="rec-live" class="rec-live" style="display:none"></div>
-        <button id="rec-cancel" class="rec-cancel">✕ Cancel</button>
-        <button id="rec-stop" class="rec-stop">⏹ Stop</button>
-        <button id="rec-edit" class="rec-edit" style="display:none">✎ Edit</button>
-        <button id="rec-send" class="rec-send" style="display:none">➤ Send</button>
+        <button id="rec-cancel" class="rec-cancel">Cancel</button>
+        <button id="rec-stop" class="rec-stop">Polish</button>
+        <button id="rec-edit" class="rec-edit" style="display:none">Edit</button>
+        <button id="rec-send" class="rec-send" style="display:none">Send</button>
       </div>
     </div>
     <div id="statusline" style="display:none"></div>
@@ -8007,7 +8008,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   let lastAsrRaw = "", lastPolished = "", lastAsrSec = null, lastPolishSec = null;   // long-press debug view
   let asrConfigs = [], asrWhich = localStorage.getItem("cc_asr_which") || "";
   let asrRtAvail = false, sonioxAvail = false, realtimeEngines = [], asrRtEngine = localStorage.getItem("cc_asr_rt_engine") || "", asrRt = localStorage.getItem("cc_asr_rt") === "1";   // realtime (streaming) ASR
-  let _rt = null;   // active realtime-voice session (null when using the batch MediaRecorder path)
+  // (realtime-voice session state lives in Voice.s — see the Voice module below)
 
   // Two-level Voice menu: first pick a mode (⚡实时 / 🎤非实时), then the model for that mode.
   function renderAsrMenu() {
@@ -8078,17 +8079,30 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
   const recCancelEl = document.getElementById("rec-cancel");
   function _showRecBar() {
+    _batchResult = null;   // starting a fresh recording → drop any pending step-2 result
     _recStartMs = Date.now();
     recTimeEl.textContent = "0:00";
     recBar.style.display = "flex";
     recBar.classList.remove("rec-live-on");
     recWaveEl.style.display = "";        // batch shows the wave; realtime overrides (rec-live-on + hidden wave)
     recLiveEl.style.display = "none";
-    // Both modes now expose Cancel / Polish / Edit / Send (batch = same interaction as realtime).
-    [recCancelEl, recStopEl, recEditEl, recSendEl].forEach(b => b && (b.style.display = ""));
-    if (recStopEl) recStopEl.textContent = "✨ Polish";
+    // Batch phase 1 = just Cancel + Stop (record blind → transcribe → then choose an action).
+    // Realtime (Voice.start) overrides this to show Polish / Edit / Send with the live transcript.
+    [recCancelEl, recStopEl].forEach(b => b && (b.style.display = ""));
+    [recEditEl, recSendEl].forEach(b => b && (b.style.display = "none"));
+    if (recStopEl) recStopEl.textContent = "Stop";
     clearInterval(_recTimer);
     _recTimer = setInterval(() => { recTimeEl.textContent = _fmtDur(Date.now() - _recStartMs); }, 250);
+  }
+  // Batch step 2: transcription done → show the raw result + let the user pick Polish / Edit / Send.
+  function _showBatchResultBar(text) {
+    recBar.style.display = "flex"; recBar.classList.add("rec-live-on");
+    if (recWaveEl) recWaveEl.style.display = "none";
+    [recCancelEl, recStopEl, recEditEl, recSendEl].forEach(b => b && (b.style.display = ""));   // Cancel + Polish/Edit/Send
+    if (recStopEl) recStopEl.textContent = "Polish";
+    if (recLiveEl) { recLiveEl.style.display = ""; recLiveEl.textContent = text; }
+    clearInterval(_recTimer); _recTimer = null;
+    micBtn.classList.remove("busy"); micBtn.disabled = false;   // keep the popup up but re-enable the mic
   }
   function _recBarBusy(msg) {   // loading state in the popup (batch transcription / processing) — mic stays 🎤
     recBar.style.display = "flex"; recBar.classList.add("rec-live-on");
@@ -8101,7 +8115,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     clearInterval(_recTimer); _recTimer = null;
     recBar.style.display = "none";
   }
-  let _recCancelled = false, _batchMode = "polish";
+  let _recCancelled = false, _batchResult = null;   // _batchResult set = batch step 2 (result awaiting Polish/Edit/Send)
   recBar.addEventListener("click", (e) => {   // click bar background (not a button) → Polish (finish)
     if (e.target.closest("button")) return;
     if (_recording) _voiceStop("polish");
@@ -8119,13 +8133,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (state === "rec") _showRecBar(); else if (state === "idle") _hideRecBar();   // busy keeps the popup (loading view)
   }
 
-  async function _voiceStop(mode) {   // finish: mode = "polish" | "edit" | "send" (same for realtime & batch)
+  async function _voiceStop(mode) {   // mode = "polish" | "edit" | "send"
     mode = mode || "polish";
-    if (_rt) { _rtStop(mode); return; }
-    if (_mediaRec && _recording) { _batchMode = mode; _recording = false; _mediaRec.stop(); }
+    if (Voice.s) { Voice.stop(mode); return; }                                           // realtime finish
+    if (_batchResult) { const r = _batchResult; _batchResult = null; await Voice.apply(r.raw, r.before, mode); return; }   // batch step 2 → act on the result
+    if (_mediaRec && _recording) { _recording = false; _mediaRec.stop(); }               // batch step 1: Stop → transcribe
   }
-  async function _voiceCancel() {   // discard the recording — do NOT transcribe
-    if (_rt) { _rtCancel(); return; }
+  async function _voiceCancel() {   // discard
+    if (Voice.s) { Voice.cancel(); return; }
+    if (_batchResult) { const r = _batchResult; _batchResult = null; inputEl.value = r.before; inputEl.dispatchEvent(new Event("input")); _setMic("idle"); return; }   // discard the batch result (restore the box)
     if (_mediaRec && _recording) { _recCancelled = true; _recording = false; _mediaRec.stop(); }
   }
 
@@ -8142,194 +8158,190 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     for (let i = 0; i < f32.length; i++) { const s = Math.max(-1, Math.min(1, f32[i])); buf[i] = s < 0 ? s * 0x8000 : s * 0x7FFF; }
     return buf;
   }
-  function _rtRender() {
-    if (!_rt) return;
-    const full = (_rt.finalText + _rt.partial).trim();
-    // 1) live text INSIDE the recording bar (visible; the input box is behind the overlay)
-    if (recLiveEl) {
-      if (full) { recLiveEl.innerHTML = _escHtml(_rt.finalText) + "<span class='rec-live-partial'>" + _escHtml(_rt.partial) + "</span>"; recLiveEl.scrollTop = recLiveEl.scrollHeight; }
-      else { recLiveEl.textContent = "🎤 聆听中…"; }
-    }
-    // 2) also keep the input box in sync so Stop leaves the text ready to send
-    inputEl.value = _rt.before + full;
-    inputFromVoice = true;
-    inputEl.dispatchEvent(new Event("input"));
-  }
-  function _rtTeardown() {
-    if (!_rt) return;
-    try { _rt.sp && (_rt.sp.onaudioprocess = null, _rt.sp.disconnect()); } catch {}
-    try { _rt.src && _rt.src.disconnect(); } catch {}
-    try { _rt.mute && _rt.mute.disconnect(); } catch {}
-    try { _rt.ac && _rt.ac.close(); } catch {}
-    try { _rt.mr && _rt.mr.state !== "inactive" && _rt.mr.stop(); } catch {}   // stop local full-audio recorder
-    try { _rt.stream && _rt.stream.getTracks().forEach(t => t.stop()); } catch {}   // release the mic immediately
-    try { _rt.ws && _rt.ws.readyState <= 1 && _rt.ws.close(); } catch {}
-    clearTimeout(_rt._finTimer);
-  }
-  function _rtCancel() {   // discard — no transcription
-    if (!_rt) return;
-    _recording = false; _rtTeardown(); _rt = null; _setMic("idle");
-  }
-  // Unexpected upstream drop while still recording. We do NOT end the session:
-  // the local MediaRecorder keeps capturing the FULL audio, and on Stop we fall
-  // back to the non-streaming /api/asr on that recording. Just flag it + show it.
-  function _rtTeardownStream() {   // close ONLY the streaming WS + audio nodes (keep stream + MediaRecorder + _rt so we can reconnect)
-    if (!_rt) return;
-    try { _rt.sp && (_rt.sp.onaudioprocess = null, _rt.sp.disconnect()); } catch {}
-    try { _rt.src && _rt.src.disconnect(); } catch {}
-    try { _rt.mute && _rt.mute.disconnect(); } catch {}
-    try { _rt.ac && _rt.ac.close(); } catch {}
-    try { if (_rt.ws && _rt.ws.readyState <= 1) { _rt.ws.onclose = null; _rt.ws.close(); } } catch {}
-    _rt.ac = null; _rt.sp = null; _rt.src = null; _rt.mute = null; _rt.ws = null; _rt.opened = false;
-  }
-  function _rtStreamDrop(msg) {
-    if (!_rt || _rt.stopping) return;
-    // 开局早期(还没出任何字)→ 静默重连几次,而不是立刻 live error
-    if (!_rt.gotAny && (_rt.retries || 0) < 3) {
-      _rt.retries = (_rt.retries || 0) + 1;
-      console.warn("asr-rt early drop (" + (msg || "") + ") → retry #" + _rt.retries);
-      if (recLiveEl) recLiveEl.innerHTML = "<span class='rec-live-hint'><span class='rec-spin'></span>连接中…</span>";
-      _rtTeardownStream();
-      setTimeout(() => { if (_rt && !_rt.stopping) _rtOpenStream(); }, 400 * _rt.retries);
-      return;
-    }
-    // 已经出过字(中途断)或重连用尽 → 本地录音继续,Stop 时走 batch 兜底
-    if (_rt.mr && _rt.mr.state === "recording") {
-      _rt.dropped = true;
-      if (recLiveEl) recLiveEl.innerHTML = _escHtml((_rt.finalText + _rt.partial).trim())
-        + "<span class='rec-live-partial'>  ⚠ live error → batch on Stop</span>";
-      return;
-    }
-    if (_rt.finalText || _rt.partial) _rtFinalize(); else { if (msg) alert(msg); _rtCancel(); }
-  }
-  function _rtStop(mode) {   // ends the session. mode: "polish" (default) | "edit" (raw→box) | "send" (raw→submit)
-    if (!_rt || _rt.stopping) return;
-    _rt.stopping = true; _rt.mode = mode || "polish"; _recording = false; _setMic("busy");
-    try { _rt.sp && (_rt.sp.onaudioprocess = null); } catch {}   // stop appending audio to the stream
-    try { _rt.ws && _rt.ws.readyState === 1 && _rt.ws.send(JSON.stringify({ type: _rt.provider === "soniox" ? "finish" : "input_audio_buffer.commit" })); } catch {}
-    try { _rt.mr && _rt.mr.state !== "inactive" && _rt.mr.stop(); } catch {}   // finalize the full local recording
-    // dropped → no streaming 'finished' is coming, finalize fast (fallback path); clean → give tokens a moment
-    _rt._finTimer = setTimeout(() => _rtFinalize(), _rt.dropped ? 400 : 2500);
-  }
-  async function _rtPolish(raw, before) {   // shared polish step (same endpoint + gating as batch)
-    _setMic("busy");
-    lastAsrRaw = raw; lastAsrSec = null; lastPolishSec = null; lastPolished = "";
-    try {
-      const polT0 = Date.now();
-      const pr = await authedFetch("/api/polish", {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: raw, claude_session_id: attachedSid || "", mode: "asr" }), timeoutMs: 60000,
-      });
-      lastPolishSec = ((Date.now() - polT0) / 1000).toFixed(1);
-      if (pr.ok) { const d = await pr.json(); if (d && d.text) { lastPolished = d.text; if (inputEl.value === before + raw) { inputEl.value = before + d.text; inputEl.dispatchEvent(new Event("input")); } } }
-    } catch {}
-    _setMic("idle"); if (!isPhone()) inputEl.focus();
-  }
-  function _rtApply(raw, before, mode) {   // put text in box, then act by mode: send / edit / polish
-    if (!raw) { _setMic("idle"); return; }
-    inputEl.value = before + raw; inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
-    if (mode === "send") { _setMic("idle"); send(); return; }           // submit directly
-    if (mode === "edit") { _setMic("idle"); if (!isPhone()) inputEl.focus(); return; }   // raw → box, edit yourself
-    return _rtPolish(raw, before);                                       // default: polish
-  }
-  async function _rtFinalize() {
-    _recording = false;
-    if (!_rt || _rt._finalizing) return;
-    _rt._finalizing = true; clearTimeout(_rt._finTimer);
-    const rt = _rt, before = rt.before, mode = rt.mode || "polish";
-    let raw = (rt.finalText + rt.partial).trim();
-    if (rt.dropped && rt.mr) {
-      // streaming broke mid-way → recover the FULL text from the complete local recording (non-streaming ASR)
-      _setMic("busy");
-      if (recLiveEl) recLiveEl.innerHTML = "<span class='rec-live-hint'><span class='rec-spin'></span>整段识别中…</span>";
-      try { await rt.mrDone; } catch {}
-      const blob = new Blob(rt.chunks || [], { type: (rt.mr && rt.mr.mimeType) || "audio/webm" });
-      _rtTeardown(); _rt = null;
-      if (blob.size) {
-        try {
-          const qs = new URLSearchParams(); if (asrWhich) qs.set("which", asrWhich); if (attachedSid) qs.set("sid", attachedSid);
-          const ar = await authedFetch("/api/asr?" + qs.toString(), { method: "POST", headers: { "content-type": blob.type || "audio/webm" }, body: blob, timeoutMs: 60000 });
-          if (ar.ok) { const d = await ar.json(); if (d && d.text) raw = d.text.trim(); }
-        } catch {}
+  // Realtime streaming-voice module. State in Voice.s (null when idle / using the
+  // batch path); methods handle connect → live tokens → finalize. The batch path
+  // (MediaRecorder) shares Voice.apply() for the send/edit/polish finish step.
+  const Voice = {
+    s: null,
+    render() {
+      const s = Voice.s; if (!s) return;
+      const full = (s.finalText + s.partial).trim();
+      if (recLiveEl) {
+        if (full) { recLiveEl.innerHTML = _escHtml(s.finalText) + "<span class='rec-live-partial'>" + _escHtml(s.partial) + "</span>"; recLiveEl.scrollTop = recLiveEl.scrollHeight; }
+        else { recLiveEl.textContent = ""; }   // no transcript yet → the wave (row 1) shows we're listening
       }
-      await _rtApply(raw, before, mode); return;
-    }
-    // clean streaming path
-    _rtTeardown(); _rt = null;
-    await _rtApply(raw, before, mode);
-  }
-  function _rtOpenStream() {   // (re)open just the streaming WS + audio; re-callable for the early-drop retry
-    if (!_rt || _rt.stopping) return;
-    const stream = _rt.stream, provider = _rt.provider;
-    const qs = new URLSearchParams({ token: authToken, provider });
-    if (attachedSid) qs.set("sid", attachedSid);   // both engines bias on conversation context; real model stays server-side
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(proto + "://" + location.host + "/api/asr-stream?" + qs.toString());
-    ws.binaryType = "arraybuffer"; _rt.ws = ws; _rt.opened = false;
-    ws.onmessage = (e) => {
-      if (!_rt || _rt.ws !== ws) return;
-      let ev; try { ev = JSON.parse(e.data); } catch { return; }
-      if (_rt.provider === "soniox") {
-        if (ev.error_code || ev.error) { console.warn("soniox:", ev); _rtStreamDrop("error"); return; }
-        let nf = "", pt = "";   // Soniox: is_final tokens arrive once → accumulate; non-final = rolling tail
-        for (const tk of (ev.tokens || [])) { const tx = tk.text || ""; if (tx === "<fin>" || tx === "<end>") continue; if (tk.is_final) nf += tx; else pt += tx; }
-        if (nf || pt) _rt.gotAny = true;
-        if (nf) _rt.finalText += nf;
-        _rt.partial = pt; _rtRender();
-        if (ev.finished && _rt.stopping) { clearTimeout(_rt._finTimer); _rtFinalize(); }
+      inputEl.value = s.before + full; inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
+    },
+    teardown() {   // tear down everything incl. the mic stream + recorder
+      const s = Voice.s; if (!s) return;
+      try { s.sp && (s.sp.onaudioprocess = null, s.sp.disconnect()); } catch {}
+      try { s.src && s.src.disconnect(); } catch {}
+      try { s.mute && s.mute.disconnect(); } catch {}
+      try { s.ac && s.ac.close(); } catch {}
+      try { s.mr && s.mr.state !== "inactive" && s.mr.stop(); } catch {}   // stop local full-audio recorder
+      try { s.stream && s.stream.getTracks().forEach(t => t.stop()); } catch {}   // release the mic
+      try { s.ws && s.ws.readyState <= 1 && s.ws.close(); } catch {}
+      clearTimeout(s._finTimer);
+    },
+    teardownStream() {   // close ONLY the WS + audio nodes (keep stream + recorder + session, for reconnect)
+      const s = Voice.s; if (!s) return;
+      try { s.sp && (s.sp.onaudioprocess = null, s.sp.disconnect()); } catch {}
+      try { s.src && s.src.disconnect(); } catch {}
+      try { s.mute && s.mute.disconnect(); } catch {}
+      try { s.ac && s.ac.close(); } catch {}
+      try { if (s.ws && s.ws.readyState <= 1) { s.ws.onclose = null; s.ws.close(); } } catch {}
+      s.ac = null; s.sp = null; s.src = null; s.mute = null; s.ws = null; s.opened = false;
+    },
+    cancel() {   // discard — no transcription
+      if (!Voice.s) return;
+      _recording = false; Voice.teardown(); Voice.s = null; _setMic("idle");
+    },
+    // Unexpected drop. Early (no tokens yet) → silently reconnect a few times. Otherwise the
+    // local MediaRecorder keeps the full audio and Stop falls back to non-streaming /api/asr.
+    streamDrop(msg) {
+      const s = Voice.s; if (!s || s.stopping) return;
+      if (!s.gotAny && (s.retries || 0) < 3) {
+        s.retries = (s.retries || 0) + 1;
+        console.warn("asr-rt early drop (" + (msg || "") + ") → retry #" + s.retries);
+        if (recLiveEl) recLiveEl.innerHTML = "<span class='rec-live-hint'><span class='rec-spin'></span>连接中…</span>";
+        Voice.teardownStream();
+        setTimeout(() => { if (Voice.s && !Voice.s.stopping) Voice.openStream(); }, 400 * s.retries);
         return;
       }
-      const t = ev.type || "";   // OpenAI path
-      if (t.endsWith("transcription.delta")) { _rt.gotAny = true; _rt.partial += (ev.delta || ""); _rtRender(); }
-      else if (t.endsWith("transcription.completed")) { _rt.gotAny = true; _rt.finalText += (ev.transcript || ""); _rt.partial = ""; _rtRender(); if (_rt.stopping) { clearTimeout(_rt._finTimer); _rtFinalize(); } }
-      else if (t === "error") { console.warn("asr-stream:", ev.error || ev); }
-    };
-    ws.onerror = () => { if (_rt && _rt.ws === ws && !_rt.opened) _rtStreamDrop("connect error"); };
-    ws.onclose = () => { if (_rt && _rt.ws === ws) _rtStreamDrop("closed"); };
-    ws.onopen = () => {
+      if (s.mr && s.mr.state === "recording") {
+        s.dropped = true;
+        if (recLiveEl) recLiveEl.innerHTML = _escHtml((s.finalText + s.partial).trim())
+          + "<span class='rec-live-partial'>  ⚠ live error → batch on Stop</span>";
+        return;
+      }
+      if (s.finalText || s.partial) Voice.finalize(); else { if (msg) alert(msg); Voice.cancel(); }
+    },
+    stop(mode) {   // the finish action. mode: "polish" (default) | "edit" (raw→box) | "send" (raw→submit)
+      const s = Voice.s; if (!s || s.stopping) return;
+      s.stopping = true; s.mode = mode || "polish"; _recording = false; _setMic("busy");
+      try { s.sp && (s.sp.onaudioprocess = null); } catch {}   // stop appending audio
+      try { s.ws && s.ws.readyState === 1 && s.ws.send(JSON.stringify({ type: s.provider === "soniox" ? "finish" : "input_audio_buffer.commit" })); } catch {}
+      try { s.mr && s.mr.state !== "inactive" && s.mr.stop(); } catch {}   // finalize the full local recording
+      s._finTimer = setTimeout(() => Voice.finalize(), s.dropped ? 400 : 2500);
+    },
+    async polish(raw, before) {   // shared polish step (same endpoint + gating as batch)
+      _setMic("busy");
+      lastAsrRaw = raw; lastAsrSec = null; lastPolishSec = null; lastPolished = "";
       try {
-        const AC = window.AudioContext || window.webkitAudioContext;
-        const ac = new AC();   // hardware rate (iOS ignores/breaks a forced 24k) → downsample in JS
-        if (!_rt || _rt.ws !== ws) { try { ac.close(); } catch {} return; }   // stale (stopped or superseded by a retry)
-        _rt.opened = true; _rt.ac = ac;
-        if (!_rt.startMs) _rt.startMs = Date.now();   // 5-min cap from first successful open
-        try { ac.resume(); } catch {}   // iOS: context may start suspended
-        const src = ac.createMediaStreamSource(stream); _rt.src = src;
-        const sp = ac.createScriptProcessor(4096, 1, 1); _rt.sp = sp;
-        const mute = ac.createGain(); mute.gain.value = 0; _rt.mute = mute;   // silent sink → no mic feedback
-        const MAX_MS = 300000;   // only auto-stop = 5-min absolute safety cap (otherwise only Stop ends it)
-        sp.onaudioprocess = (ev) => {
-          if (!_rt || _rt.stopping) return;
-          if (Date.now() - _rt.startMs > MAX_MS) { console.log("asr-rt: 5min hard cap → auto-stop"); _rtStop(); return; }
-          if (ws.readyState !== 1) return;   // stream dropped → local MediaRecorder still captures; nothing to send here
-          try { ws.send(_f32ToPcm16(_downTo24k(ev.inputBuffer.getChannelData(0), ac.sampleRate)).buffer); } catch {}
-        };
-        src.connect(sp); sp.connect(mute); mute.connect(ac.destination);
-      } catch (err) { alert("音频采集失败: " + err); _rtCancel(); }
-    };
-  }
-  function _startRealtimeVoice(stream) {
-    const before = inputEl.value ? (inputEl.value.replace(/\s*$/, "") + " ") : "";
-    const provider = asrRtEngine || (sonioxAvail ? "soniox" : "openai");   // user-chosen realtime engine
-    _rt = { before, provider, opened: false, dropped: false, gotAny: false, retries: 0, finalText: "", partial: "",
-            stopping: false, stream, ac: null, sp: null, src: null, mute: null, ws: null, _finTimer: null,
-            mr: null, chunks: [], mrDone: null, startMs: 0 };
-    // Record the FULL audio locally in parallel → if streaming drops, recover via non-streaming /api/asr on Stop.
-    try {
-      _rt.mr = new MediaRecorder(stream);
-      _rt.mr.ondataavailable = e => { if (e.data && e.data.size && _rt) _rt.chunks.push(e.data); };
-      _rt.mrDone = new Promise(res => { _rt.mr.onstop = res; });
-      _rt.mr.start();
-    } catch (e) { _rt.mr = null; console.warn("no MediaRecorder → no batch fallback:", e); }
-    _recording = true; _setMic("rec"); inputFromVoice = true;
-    recBar.classList.add("rec-live-on");               // full-width transcript row, grow upward
-    if (recWaveEl) recWaveEl.style.display = "none";   // realtime → replace wave with live text
-    if (recLiveEl) { recLiveEl.style.display = ""; recLiveEl.textContent = "🎤 聆听中…"; }
-    if (recSendEl) recSendEl.style.display = "";       // ➤ Send (raw, submit) — realtime only
-    if (recEditEl) recEditEl.style.display = "";       // ✎ Edit (raw → input box, no polish/send)
-    if (recStopEl) recStopEl.textContent = "✨ Polish";  // streaming: Polish→finalize+polish
-    _rtOpenStream();
-  }
+        const polT0 = Date.now();
+        const pr = await authedFetch("/api/polish", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: raw, claude_session_id: attachedSid || "", mode: "asr" }), timeoutMs: 60000 });
+        lastPolishSec = ((Date.now() - polT0) / 1000).toFixed(1);
+        if (pr.ok) { const d = await pr.json(); if (d && d.text) { lastPolished = d.text; if (inputEl.value === before + raw) { inputEl.value = before + d.text; inputEl.dispatchEvent(new Event("input")); } } }
+      } catch {}
+      _setMic("idle"); if (!isPhone()) inputEl.focus();
+    },
+    apply(raw, before, mode) {   // put text in the box, then act by mode (shared by realtime + batch)
+      if (!raw) { _setMic("idle"); return; }
+      inputEl.value = before + raw; inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
+      if (mode === "send") { _setMic("idle"); send(); return; }
+      if (mode === "edit") { _setMic("idle"); if (!isPhone()) inputEl.focus(); return; }
+      return Voice.polish(raw, before);
+    },
+    async finalize() {
+      _recording = false;
+      const s = Voice.s; if (!s || s._finalizing) return;
+      s._finalizing = true; clearTimeout(s._finTimer);
+      const before = s.before, mode = s.mode || "polish";
+      let raw = (s.finalText + s.partial).trim();
+      if (s.dropped && s.mr) {   // stream broke mid-way → recover full text from the local recording (non-streaming ASR)
+        _setMic("busy");
+        if (recLiveEl) recLiveEl.innerHTML = "<span class='rec-live-hint'><span class='rec-spin'></span>整段识别中…</span>";
+        try { await s.mrDone; } catch {}
+        const blob = new Blob(s.chunks || [], { type: (s.mr && s.mr.mimeType) || "audio/webm" });
+        Voice.teardown(); Voice.s = null;
+        if (blob.size) {
+          try {
+            const qs = new URLSearchParams(); if (asrWhich) qs.set("which", asrWhich); if (attachedSid) qs.set("sid", attachedSid);
+            const ar = await authedFetch("/api/asr?" + qs.toString(), { method: "POST", headers: { "content-type": blob.type || "audio/webm" }, body: blob, timeoutMs: 60000 });
+            if (ar.ok) { const d = await ar.json(); if (d && d.text) raw = d.text.trim(); }
+          } catch {}
+        }
+        await Voice.apply(raw, before, mode); return;
+      }
+      Voice.teardown(); Voice.s = null;
+      await Voice.apply(raw, before, mode);
+    },
+    openStream() {   // (re)open just the streaming WS + audio; re-callable for the early-drop retry
+      const s0 = Voice.s; if (!s0 || s0.stopping) return;
+      const stream = s0.stream, provider = s0.provider;
+      const qs = new URLSearchParams({ token: authToken, provider });
+      if (attachedSid) qs.set("sid", attachedSid);   // both engines bias on conversation context; real model stays server-side
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const ws = new WebSocket(proto + "://" + location.host + "/api/asr-stream?" + qs.toString());
+      ws.binaryType = "arraybuffer"; s0.ws = ws; s0.opened = false;
+      ws.onmessage = (e) => {
+        const s = Voice.s; if (!s || s.ws !== ws) return;
+        let ev; try { ev = JSON.parse(e.data); } catch { return; }
+        if (s.provider === "soniox") {
+          if (ev.error_code || ev.error) { console.warn("soniox:", ev); Voice.streamDrop("error"); return; }
+          let nf = "", pt = "";   // Soniox: is_final tokens arrive once → accumulate; non-final = rolling tail
+          for (const tk of (ev.tokens || [])) { const tx = tk.text || ""; if (tx === "<fin>" || tx === "<end>") continue; if (tk.is_final) nf += tx; else pt += tx; }
+          if (nf || pt) s.gotAny = true;
+          if (nf) s.finalText += nf;
+          s.partial = pt; Voice.render();
+          if (ev.finished && s.stopping) { clearTimeout(s._finTimer); Voice.finalize(); }
+          return;
+        }
+        const t = ev.type || "";   // OpenAI path
+        if (t.endsWith("transcription.delta")) { s.gotAny = true; s.partial += (ev.delta || ""); Voice.render(); }
+        else if (t.endsWith("transcription.completed")) { s.gotAny = true; s.finalText += (ev.transcript || ""); s.partial = ""; Voice.render(); if (s.stopping) { clearTimeout(s._finTimer); Voice.finalize(); } }
+        else if (t === "error") { console.warn("asr-stream:", ev.error || ev); }
+      };
+      ws.onerror = () => { if (Voice.s && Voice.s.ws === ws && !Voice.s.opened) Voice.streamDrop("connect error"); };
+      ws.onclose = () => { if (Voice.s && Voice.s.ws === ws) Voice.streamDrop("closed"); };
+      ws.onopen = () => {
+        try {
+          const AC = window.AudioContext || window.webkitAudioContext;
+          const ac = new AC();   // hardware rate (iOS ignores/breaks a forced 24k) → downsample in JS
+          const s = Voice.s; if (!s || s.ws !== ws) { try { ac.close(); } catch {} return; }   // stale (stopped / superseded by a retry)
+          s.opened = true; s.ac = ac;
+          if (!s.startMs) s.startMs = Date.now();   // 5-min cap from first successful open
+          try { ac.resume(); } catch {}   // iOS: context may start suspended
+          const src = ac.createMediaStreamSource(stream); s.src = src;
+          const sp = ac.createScriptProcessor(4096, 1, 1); s.sp = sp;
+          const mute = ac.createGain(); mute.gain.value = 0; s.mute = mute;   // silent sink → no mic feedback
+          const MAX_MS = 300000;   // only auto-stop = 5-min absolute safety cap (otherwise only Stop ends it)
+          sp.onaudioprocess = (ev) => {
+            const s = Voice.s; if (!s || s.stopping) return;
+            if (Date.now() - s.startMs > MAX_MS) { console.log("asr-rt: 5min hard cap → auto-stop"); Voice.stop(); return; }
+            if (ws.readyState !== 1) return;   // stream dropped → local recorder still captures; nothing to send here
+            try { ws.send(_f32ToPcm16(_downTo24k(ev.inputBuffer.getChannelData(0), ac.sampleRate)).buffer); } catch {}
+          };
+          src.connect(sp); sp.connect(mute); mute.connect(ac.destination);
+          if (!s.gotAny) { if (recWaveEl) recWaveEl.style.display = ""; if (recLiveEl) recLiveEl.textContent = ""; }   // connected → the wave shows we're listening; no text label
+        } catch (err) { alert("音频采集失败: " + err); Voice.cancel(); }
+      };
+    },
+    start(stream) {
+      const before = inputEl.value ? (inputEl.value.replace(/\s*$/, "") + " ") : "";
+      const provider = asrRtEngine || (sonioxAvail ? "soniox" : "openai");   // user-chosen realtime engine
+      const s = { before, provider, opened: false, dropped: false, gotAny: false, retries: 0, finalText: "", partial: "",
+                  stopping: false, stream, ac: null, sp: null, src: null, mute: null, ws: null, _finTimer: null,
+                  mr: null, chunks: [], mrDone: null, startMs: 0 };
+      Voice.s = s;
+      // Record the FULL audio locally in parallel → if streaming drops, recover via non-streaming /api/asr on Stop.
+      try {
+        s.mr = new MediaRecorder(stream);
+        s.mr.ondataavailable = e => { if (e.data && e.data.size && Voice.s === s) s.chunks.push(e.data); };
+        s.mrDone = new Promise(res => { s.mr.onstop = res; });
+        s.mr.start();
+      } catch (e) { s.mr = null; console.warn("no MediaRecorder → no batch fallback:", e); }
+      _recording = true; _setMic("rec"); inputFromVoice = true;
+      recBar.classList.add("rec-live-on");               // full-width transcript row, grow upward
+      if (recWaveEl) recWaveEl.style.display = "none";   // hidden while connecting; shown once connected (= listening)
+      if (recLiveEl) { recLiveEl.style.display = ""; recLiveEl.innerHTML = "<span class='rec-live-hint'><span class='rec-spin'></span>连接中…</span>"; }
+      if (recSendEl) recSendEl.style.display = "";       // Send (raw, submit) — realtime only
+      if (recEditEl) recEditEl.style.display = "";       // Edit (raw → input box, no polish/send)
+      if (recStopEl) recStopEl.textContent = "Polish";
+      Voice.openStream();
+    },
+  };
   micBtn.addEventListener("click", async () => {
     if (_recording) { _voiceStop(); return; }
     let stream;
@@ -8339,15 +8351,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       alert("麦克风不可用: " + e.name + "。需通过 HTTPS 打开(getUserMedia 要 secure context)。");
       return;
     }
-    if (asrRt && asrRtAvail) { _startRealtimeVoice(stream); return; }   // streaming path (old batch path below)
+    if (asrRt && asrRtAvail) { Voice.start(stream); return; }   // streaming path (old batch path below)
     _mediaChunks = [];
     _mediaRec = new MediaRecorder(stream);
     _mediaRec.ondataavailable = e => _mediaChunks.push(e.data);
     _mediaRec.onstop = async () => {
       stream.getTracks().forEach(t => t.stop());   // release the mic immediately
       if (_recCancelled) { _recCancelled = false; _setMic("idle"); return; }   // discarded
-      const mode = _batchMode || "polish";
-      _setMic("busy"); _recBarBusy("整段识别中…");   // loading state in the popup (result comes all at once)
+      _setMic("busy"); _recBarBusy("整段识别中…");   // step 1 done → loading (result comes all at once)
       const blob = new Blob(_mediaChunks, { type: _mediaRec.mimeType });
       if (!blob.size) { _setMic("idle"); return; }
       const before = inputEl.value ? (inputEl.value.replace(/\s*$/, "") + " ") : "";
@@ -8364,7 +8375,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
       if (!asrText) { _setMic("idle"); return; }
       lastAsrRaw = asrText; lastAsrSec = null; lastPolishSec = null; lastPolished = "";
-      await _rtApply(asrText, before, mode);   // send / edit / polish — identical to realtime
+      // step 2: drop the raw text into the box and show Polish / Edit / Send to act on it
+      inputEl.value = before + asrText; inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
+      _batchResult = { raw: asrText, before };
+      _showBatchResultBar(asrText);
     };
     _recCancelled = false;
     _mediaRec.start(); _recording = true; _setMic("rec");

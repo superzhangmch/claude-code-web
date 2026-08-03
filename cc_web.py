@@ -6220,21 +6220,22 @@ async def get_asr_configs():
             "realtime_engines": rt_engines}
 
 
-def _asr_prompt(sid: str) -> str:
-    """Recent conversation text (last few real exchanges) → an ASR `prompt` that
-    biases transcription toward the session's vocabulary (tech terms, file names,
-    proper nouns). Empty if no session/context. Kept to the tail ~600 chars
-    (whisper caps the prompt ~224 tokens; gpt-4o-transcribe uses more)."""
+def _asr_terms(sid: str) -> list:
+    """Recent conversation → a LIST of distinctive biasing terms (file names, code
+    identifiers, acronyms, tech words, proper nouns, CJK keywords). We bias with a
+    term LIST, NOT prose sentences: prose gets echoed back verbatim on short/quiet
+    audio ("prompt echo"); a disjoint list still biases recognition without reading
+    back as speech. Used as-is for Soniox `context.terms`; joined for OpenAI `prompt`."""
     if not sid:
-        return ""
+        return []
     jsonl = find_jsonl_for_session(sid)
     if not jsonl:
-        return ""
+        return []
     try:
         ctx = extract_recent_context_ht(jsonl, n_exchanges=4,
                                         max_user_chars=200, max_response_chars=200)
     except Exception:
-        return ""
+        return []
     parts: list[str] = []
     for ex in ctx.get("exchanges", []):
         u = ((ex.get("user") or {}).get("text") or "").strip()
@@ -6243,7 +6244,62 @@ def _asr_prompt(sid: str) -> str:
             parts.append(u)
         if a:
             parts.append(a)
-    return " ".join(parts)[-600:]
+    return _vocab_terms(" ".join(parts))
+
+
+def _asr_prompt(sid: str) -> str:
+    """Space-joined term string for OpenAI-style `prompt` fields (whisper / gpt-4o-transcribe)."""
+    return " ".join(_asr_terms(sid))
+
+
+_COMMON_EN = frozenset("""
+the a an and or but if then else of to in on at by with from as is are was were be been
+being this that these those it its you your yours we our ours they them their he she his
+her him i me my mine not no yes can could would should will shall may might must do does
+did done have has had get gets got make makes made just like so than too very much many
+more most some any all each every into out up down off over under about after before
+again also only own same other others new old good bad how what when where why who whom
+which here there now still yet even because while during between both few such own only
+one two three ok okay okare okay let lets go going gone see saw seen use used using need
+needs want wants know knows think thing things way ways time times day today thanks thank
+please sorry hey hi yeah yep nope sure fine cool nice help really maybe kind sort right
+left back next last first work works working done fix fixed change changes changed add
+adds added show shows check please text mode button click point look looks looking
+""".split())
+
+
+def _vocab_terms(text: str, cap: int = 48) -> list:
+    """Distinctive terms only (file names, code identifiers, acronyms, uncommon
+    English words, CJK keywords) → a LIST for ASR biasing. Drops plain prose /
+    common words / pure numbers so it can't be echoed back as a sentence."""
+    text = text or ""
+    seen, terms = set(), []
+    def _add(t):
+        k = t.lower()
+        if len(t) >= 2 and k not in seen:
+            seen.add(k); terms.append(t)
+    # ASCII terms: identifiers / file names / acronyms / uncommon words (jargon).
+    # Keep short acronyms (PCM, RST, AI) and uncommon words (vad, asr, soniox);
+    # drop pure numbers and the common English words in _COMMON_EN.
+    for m in re.findall(r"[A-Za-z0-9][A-Za-z0-9_./\-]+", text):
+        t = m.strip("._-/"); tl = t.lower()
+        if len(t) < 2 or t.isdigit() or tl in _COMMON_EN:
+            continue
+        if (any(c in t for c in "_./-") or any(c.isdigit() for c in t)
+                or any(c.isupper() for c in t[1:])   # camelCase
+                or t.isupper()                        # acronym: PCM, RST, AI
+                or len(t) >= 3):                      # any other uncommon word: vad, asr, soniox
+            _add(t)
+    # Chinese distinctive keywords (jieba TF-IDF) → proper nouns / domain jargon.
+    # extract_tags surfaces words frequent HERE but rare in general = the terms worth biasing.
+    try:
+        import jieba.analyse as _ja
+        for kw in _ja.extract_tags(text, topK=24):
+            if re.search(r"[一-鿿]", kw):   # keep CJK keywords (ASCII already handled above)
+                _add(kw)
+    except Exception:
+        pass
+    return terms[:cap]
 
 
 @app.post("/api/asr", dependencies=[Depends(require_token)])
@@ -6260,10 +6316,10 @@ async def post_asr(request: Request, which: Optional[str] = None, sid: Optional[
     if not data:
         raise HTTPException(status_code=400, detail="empty audio")
     ext = _asr_ext_for(request.headers.get("content-type", ""))
+    prompt = _asr_prompt(sid)   # vocab-list bias toward the session's terms
 
     def _run():
         import tempfile
-        prompt = _asr_prompt(sid)   # bias toward the session's vocabulary
         p = tempfile.mktemp(suffix=ext)
         try:
             with open(p, "wb") as f:
@@ -6319,7 +6375,7 @@ async def _soniox_bridge(ws: WebSocket, q):
     # language_hints → needed for zh+en code-switching (Soniox default biases one lang);
     # gen-spark production defaults ["zh","en"]. Override via ?langs=zh,en,ja
     langs = [s.strip() for s in (q.get("langs") or "zh,en").split(",") if s.strip()]
-    ctx = _asr_prompt(q.get("sid") or "")   # recent conversation → domain vocab bias (like OpenAI prompt)
+    terms = _asr_terms(q.get("sid") or "")   # recent conversation → domain vocab (as Soniox context.terms)
     # ping_interval=None: don't let the ws lib's ping-timeout kill a valid long/paused
     # session (continuous audio keeps TCP alive). Retry the flaky handshake once.
     up = None
@@ -6336,14 +6392,16 @@ async def _soniox_bridge(ws: WebSocket, q):
         await ws.close(); return
     conf = {"api_key": sx["key"], "model": model, "audio_format": "pcm_s16le",
             "sample_rate": rate, "num_channels": 1, "language_hints": langs}
-    if ctx:
-        conf["context"] = ctx   # Soniox custom-vocabulary biasing (soniox.com/docs/stt/concepts/context)
+    if terms:
+        # Soniox context is a STRUCTURED object — terms[] is the domain-vocabulary slot
+        # (soniox.com/docs/stt/concepts/context). A plain string would be ignored.
+        conf["context"] = {"terms": terms}
     try:
         await up.send(json.dumps(conf))
         await up.send(b"\x00\x00" * int(rate))   # ~1s warmup silence (Soniox discards first ~700ms) → protects your first word
     except Exception as e:
         log.info("asr-stream[soniox]: config send failed: %s", e)
-    log.info("asr-stream[soniox]: connected model=%s rate=%d langs=%s ctx=%d", model, rate, langs, len(ctx or ""))
+    log.info("asr-stream[soniox]: connected model=%s rate=%d langs=%s terms=%d", model, rate, langs, len(terms))
     stat = {"in_bytes": 0, "in_frames": 0, "msgs": 0, "who": ""}
 
     async def up_to_client():   # Soniox token JSON → browser verbatim (client parses is_final)
