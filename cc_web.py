@@ -3624,27 +3624,29 @@ def _ps_detail(pids: list[int]) -> dict[int, dict]:
 
 
 def _session_background_shells(root_pids: list[int]) -> list[dict]:
-    """Claude-Code background shells under the given claude pid(s): each is a
-    `zsh/bash -c source …shell-snapshots…` process whose child is the ACTUAL
-    running command (sleep/tail/monitor/…). Reports that inner command with its
-    full argv + cpu% + elapsed + start time (falls back to the shell itself when
-    it has no child yet)."""
+    """Claude-Code background shells: the claude process's own shell children.
+    Each background command claude launches is a `zsh/bash -c …` wrapper spawned
+    directly under the claude pid, whose child is the ACTUAL running command
+    (sleep/tail/monitor/…). We just list claude's direct shell children and
+    report each one's inner command (its child), falling back to the wrapper
+    itself when it has no child yet — no need to pattern-match the wrapper's
+    argv (which is version-specific and comes in ≥2 shapes: `source
+    …shell-snapshots….sh` and `-l setopt NO_EXTENDED_GLOB …`). Non-shell
+    children (MCP servers, editors, …) are filtered out by comm."""
     table, kids = _proc_table()
-    seen: list[int] = []
-    stack = list(root_pids)
-    while stack:
-        x = stack.pop()
-        for k in kids.get(x, []):
-            if k not in seen:
-                seen.append(k); stack.append(k)
     shells: list[dict] = []
-    for d in seen:
-        ppid, comm, args = table.get(d, (0, "", ""))
-        base = os.path.basename(comm)
-        if base in ("zsh", "bash", "sh") and "shell-snapshots" in args:
+    seen_targets: set[int] = set()
+    for root in root_pids:
+        for d in kids.get(root, []):
+            comm = table.get(d, (0, "", ""))[1]
+            if os.path.basename(comm) not in ("zsh", "bash", "sh"):
+                continue
             child_pids = [k for k in kids.get(d, []) if k in table]
             target = child_pids[0] if child_pids else d
-            shells.append({"pid": target, "cmd": table.get(target, (0, "", args))[2]})
+            if target in seen_targets:
+                continue
+            seen_targets.add(target)
+            shells.append({"pid": target, "cmd": table.get(target, (0, "", ""))[2]})
     det = _ps_detail([s["pid"] for s in shells])
     for s in shells:
         d = det.get(s["pid"], {})
