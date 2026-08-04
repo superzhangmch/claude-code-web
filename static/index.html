@@ -8132,6 +8132,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     clearInterval(_recTimer); _recTimer = null;
     recBar.style.display = "none";
   }
+  // Done recording (Polish/Edit/Send/Stop → processing): stop counting seconds
+  // and stop the wave, but keep the popup up with the time frozen at its last
+  // value. Freezing (not hiding) the seconds is intentional — the popup is
+  // still on screen, so the elapsed time should stay visible, just static.
+  function _recFreeze() {
+    if (_recTimer) { recTimeEl.textContent = _fmtDur(Date.now() - _recStartMs); clearInterval(_recTimer); _recTimer = null; }
+    if (recWaveEl) recWaveEl.style.display = "none";
+  }
   let _recCancelled = false, _batchResult = null;   // _batchResult set = batch step 2 (result awaiting Polish/Edit/Send)
   recBar.addEventListener("click", (e) => {   // click bar background (not a button) → Polish (finish)
     if (e.target.closest("button")) return;
@@ -8147,7 +8155,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     micBtn.classList.toggle("busy", state === "busy");
     micBtn.textContent = "🎤";
     micBtn.disabled = state === "busy";
-    if (state === "rec") _showRecBar(); else if (state === "idle") _hideRecBar();   // busy keeps the popup (loading view)
+    if (state === "rec") _showRecBar(); else if (state === "idle") _hideRecBar(); else _recFreeze();   // busy: keep the popup, freeze seconds + stop the wave
   }
 
   async function _voiceStop(mode) {   // mode = "polish" | "edit" | "send"
