@@ -1670,6 +1670,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   padding: 7px; min-width: 178px; box-shadow: 0 8px 24px rgba(0,0,0,.45);
 }
 .scr-cfg-menu.show { display: block; }
+/* picker ⚙ lives in the header, which is overflow:hidden — an absolute child
+   dropdown gets clipped. Pin it fixed (like .switch-menu) so it escapes. */
+#picker-cfg-menu { position: fixed; top: 46px; right: 8px; z-index: 90; }
 .scr-cfg-row { display: flex; align-items: center; gap: 6px; padding: 4px 2px; font-size: 12px; color: var(--text); }
 .scr-cfg-row > span:first-child { flex: 1; color: var(--muted); white-space: nowrap; }
 .scr-cfg-row .btn { padding: 3px 9px; }
@@ -1941,6 +1944,24 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <button id="tabs-btn" class="btn icon" style="display:none" title="Show all iTerm2 tabs">&gt;_</button>
     <button id="files-btn" class="btn icon" style="display:none" title="Browse local files">📁</button>
     <button id="refresh-btn" class="btn icon" style="display:none" title="Refresh list">↻</button>
+    <span id="picker-cfg-group" style="position:relative;display:none">
+      <button id="picker-cfg" class="btn icon" title="List display options">⚙</button>
+      <div id="picker-cfg-menu" class="scr-cfg-menu">
+        <div class="scr-cfg-row"><span>提问显示</span>
+          <button id="picker-reqmode" class="btn" title="show user requests only / requests + responses">Q</button>
+        </div>
+        <div class="scr-cfg-row"><span>主题</span>
+          <button id="picker-mode" class="btn" title="toggle light / dark">◐</button>
+        </div>
+        <div class="scr-cfg-row"><span>列表字号</span>
+          <button id="picker-fontdown" class="btn" title="smaller list font">a −</button>
+          <button id="picker-fontup" class="btn" title="bigger list font">A +</button>
+        </div>
+        <div class="scr-cfg-row"><span>整页刷新</span>
+          <button id="picker-reload" class="btn" title="reload the whole page — pick up the latest UI after a deploy">↻ reload</button>
+        </div>
+      </div>
+    </span>
     <button id="back-btn" class="btn" style="display:none">←</button>
     <button id="new-btn" class="btn">+</button>
   </header>
@@ -1964,6 +1985,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     </div>
     <div class="menu-sec">Theme</div>
     <button class="sw-item" id="mm-theme">◐ theme</button>
+    <div class="menu-sec">输入自动翻译/批改 (send 后)</div>
+    <button class="sw-item" id="mm-autotranslate">自动翻译:关</button>
   </div>
 
   <div id="cpu-modal" class="modal">
@@ -2143,12 +2166,6 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div id="picker">
       <div id="picker-head">
         <h2 id="picker-title">Sessions</h2>
-        <span id="picker-font">
-          <button id="picker-reqmode" title="show user requests only / requests + responses">Q</button>
-          <button id="picker-mode" title="toggle light / dark">◐</button>
-          <button id="picker-fontup" title="bigger list font">A</button>
-          <button id="picker-fontdown" title="smaller list font">a</button>
-        </span>
       </div>
       <div id="picker-runaway" style="display:none"></div>
       <input id="picker-quickfilter" type="search" autocomplete="off"
@@ -2688,6 +2705,20 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   document.getElementById("picker-fontdown").addEventListener("click", () => { pickerScale -= 0.1; applyPickerScale(); });
   applyPickerScale();
 
+  // picker ⚙ dropdown: Q-mode / theme / font / reload all live here now (their
+  // own handlers stay wired by id — the buttons just moved inside this menu).
+  const pickerCfgBtn = document.getElementById("picker-cfg");
+  const pickerCfgMenu = document.getElementById("picker-cfg-menu");
+  pickerCfgBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    pickerCfgMenu.classList.toggle("show", !pickerCfgMenu.classList.contains("show"));
+  });
+  document.addEventListener("click", (e) => {
+    if (pickerCfgMenu.classList.contains("show") && !pickerCfgMenu.contains(e.target) && e.target !== pickerCfgBtn)
+      pickerCfgMenu.classList.remove("show");
+  });
+  document.getElementById("picker-reload").addEventListener("click", () => { location.reload(); });
+
   // Light / dark theme toggle (persisted). Light is the default.
   // Three themes, cycled by the button: dark → light → pure (e-ink white).
   const THEME_ORDER = ["dark", "light", "pure"];
@@ -2911,6 +2942,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   let lastEpoch = null;   // server window "epoch" — mismatch → one full resync
   let hasMoreHistory = false;
   let inputFromVoice = false;          // last input came from voice/ASR → skip grammar correction
+  let autoTranslate = localStorage.getItem("cc_web_auto_translate") === "1";   // opt-in: auto correct/translate sent input (default OFF)
   const grammarMap = new Map();        // normalized sent text → auto learning correction (see fireGrammar)
   const manualGrammarMap = new Map();  // ✎-button on-demand correction (aggressive idiomatic, separate cache)
   let claudeIdle = false;
@@ -3088,11 +3120,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     closeTabBtn.style.display = "none";
     remoteBtn.style.display = "";       // 🖥 remote shown on the picker
     modeGroup.style.display = "none";
+    document.getElementById("picker-cfg-group").style.display = "";   // list ⚙ only on the picker
     screenBtn.style.display = "none";
     switchBtn.style.display = "none"; hideSwitchMenu();
     startTabNamePoll();
     newBtn.style.display = "";
-    refreshBtn.style.display = "";
+    refreshBtn.style.display = "none";   // reload lives in the picker ⚙ dropdown now
     tabsBtn.style.display = "";
     filesBtn.style.display = "";
     setReady(null);
@@ -3121,6 +3154,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     closeTabBtn.style.display = "";
     remoteBtn.style.display = "none";   // hide 🖥 remote in the session detail view
     modeGroup.style.display = "";
+    document.getElementById("picker-cfg-group").style.display = "none";
     screenBtn.style.display = "";
     switchBtn.style.display = "";
     stopTabNamePoll();
@@ -3737,15 +3771,32 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (!snap || !(snap.sessions || []).length) { alert("没有已保存的 session 快照。"); return; }
     if (!confirm(`将按原顺序 resume ${snap.sessions.length} 个 session(已在运行的会自动跳过):\n\n${fmtSnap(snap.sessions)}\n\n保存于 ${snap.saved_at}\n\n继续?`)) return;
     snapBusy(true);
-    snapStatus.textContent = "resuming… (每个 tab 间隔约 1.2s,请稍候)";
+    snapStatus.textContent = "resuming… 0/" + snap.sessions.length;
     try {
       const r = await authedFetch("/api/sessions-snapshot/resume", { method: "POST" });
-      if (!r.ok) { snapStatus.textContent = "resume failed"; alert("Resume failed: " + await r.text()); return; }
-      const j = await r.json();
-      snapStatus.textContent = `resumed ${j.resumed}/${(j.results || []).length}`;
-      const rl = (j.results || []).map(x => `[${(x.sid || "").slice(0, 8)}] ${x.status}`).join("\n");
-      alert(`恢复完成(resumed ${j.resumed}):\n\n${rl}`);
-      loadItermTabs();
+      if (!r.ok) { snapStatus.textContent = "resume failed"; alert("Resume failed: " + await r.text()); snapBusy(false); return; }
+      // Resume runs in the background (1.2s per tab) — poll for live progress so
+      // the user sees "N/total · <current tab>" and tabs appearing as they come up.
+      let lastDone = -1;
+      await new Promise((resolve) => {
+        const poll = async () => {
+          let st = null;
+          try { st = await (await authedFetch("/api/sessions-snapshot/resume-status")).json(); } catch {}
+          if (st && st.ok) {
+            snapStatus.textContent = `resuming ${st.done}/${st.total}` + (st.current ? " · " + st.current : "");
+            if (st.done !== lastDone) { lastDone = st.done; loadItermTabs(); }   // refresh as each tab appears
+            if (!st.running) {
+              snapStatus.textContent = `resumed ${st.resumed}/${st.total}`;
+              const rl = (st.results || []).map(x => `[${(x.sid || "").slice(0, 8)}] ${x.name || ""} — ${x.status}`).join("\n");
+              alert(`恢复完成(resumed ${st.resumed}/${st.total}):\n\n${rl}`);
+              loadItermTabs();
+              resolve(); return;
+            }
+          }
+          setTimeout(poll, 900);
+        };
+        poll();
+      });
     } catch (e) { snapStatus.textContent = "error"; alert("Resume error: " + e); }
     finally { snapBusy(false); }
   });
@@ -7091,6 +7142,16 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   document.getElementById("mm-theme").addEventListener("click", (e) => {
     e.stopPropagation(); cycleTheme();
   });
+  // Toggle the existing auto correct/translate-on-send (fireGrammar). Default OFF.
+  const mmAutoTr = document.getElementById("mm-autotranslate");
+  function refreshAutoTr() { mmAutoTr.textContent = "自动翻译:" + (autoTranslate ? "开" : "关"); mmAutoTr.classList.toggle("current", autoTranslate); }
+  refreshAutoTr();
+  mmAutoTr.addEventListener("click", (e) => {
+    e.stopPropagation();
+    autoTranslate = !autoTranslate;
+    localStorage.setItem("cc_web_auto_translate", autoTranslate ? "1" : "0");
+    refreshAutoTr();
+  });
 
   // ---------- back / detach ----------
   backBtn.addEventListener("click", () => {
@@ -7808,7 +7869,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // English-learning correction: fire async on the text we just sent, so it
         // can be injected into that message's box when it renders. Skip voice-
         // originated (already model output), attachments, and trivially short.
-        if (!attachPrefix && !inputFromVoice && _shouldGrammarCheck(text)) fireGrammar(text);
+        if (autoTranslate && !attachPrefix && !inputFromVoice && _shouldGrammarCheck(text)) fireGrammar(text);
         inputFromVoice = false;
         inputEl.value = ""; inputEl.style.height = "auto";
         pendingUploads = []; renderUploadRow();
