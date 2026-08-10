@@ -6702,36 +6702,91 @@ async def get_snapshot():
         return {"ok": False, "saved_at": None, "sessions": []}
 
 
-@app.post("/api/sessions-snapshot/resume", dependencies=[Depends(require_token)])
-async def post_snapshot_resume():
-    """Re-open the saved sessions in their original order (claude --resume),
-    skipping any that are already running."""
-    try:
-        snap = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        raise HTTPException(status_code=404, detail="no saved snapshot")
+def _clean_tab_name(name: str) -> str:
+    """Strip iTerm's dynamic decorations off a saved tab title so it can be
+    reused as a resume label: trailing running-process suffix like " (claude)"
+    / " (ssh)", and a leading status glyph (claude's spinner ✳ ⠋ · …). Leaves
+    the real name (ASCII or CJK)."""
+    n = (name or "").strip()
+    n = re.sub(r"\s*\((?:claude|ssh|zsh|bash|sh|node|python[0-9.]*)\)\s*$", "", n)
+    n = re.sub(r"^[^\w一-鿿]+", "", n).strip()
+    return n
+
+
+# Live progress for the resume op so the web UI can poll "N/total · current".
+# Resume can take (1.2s × #tabs) — a dozen tabs is ~15s, too long to block on.
+_resume_progress: dict = {
+    "running": False, "total": 0, "done": 0, "current": "",
+    "results": [], "resumed": 0, "started_at": None, "finished_at": None,
+}
+
+
+async def _run_resume(sessions: list[dict]) -> None:
+    """Background worker: re-open saved sessions in order, restoring each tab's
+    saved name. Updates _resume_progress as it goes."""
+    import datetime as _dt
+    st = _resume_progress
     try:
         await _ensure_iterm2_running()
         await bridge.ensure_connected()
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
-    results = []
-    for e in snap.get("sessions", []):
+        st["results"].append({"sid": "", "name": "", "status": f"iterm error: {e}"})
+        st["running"] = False
+        st["finished_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+        return
+    for e in sessions:
         sid = e.get("sid")
         if not sid:
+            st["done"] += 1
             continue
+        name = _clean_tab_name(e.get("name") or "")
+        st["current"] = name or sid[:6]
         if _pids_for_session(sid):           # already running → don't duplicate
-            results.append({"sid": sid, "status": "already running"})
+            st["results"].append({"sid": sid, "name": name, "status": "already running"})
+            st["done"] += 1
             continue
+        label = name or f"resume_{sid[:6]}"   # restore the real name (fallback if none saved)
         try:
-            iterm_id = await bridge.open_resume_claude_tab(
-                e.get("cwd", ""), sid, f"resume_{sid[:6]}")
-            results.append({"sid": sid, "status": "resumed" if iterm_id else "failed"})
+            iterm_id = await bridge.open_resume_claude_tab(e.get("cwd", ""), sid, label)
+            status = "resumed" if iterm_id else "failed"
+            if iterm_id:
+                st["resumed"] += 1
         except Exception as ex:
-            results.append({"sid": sid, "status": f"failed: {ex}"})
+            status = f"failed: {ex}"
+        st["results"].append({"sid": sid, "name": name, "status": status})
+        st["done"] += 1
         await asyncio.sleep(1.2)             # let each tab spin up before the next
-    return {"ok": True, "results": results,
-            "resumed": sum(1 for r in results if r["status"] == "resumed")}
+    st["current"] = ""
+    st["running"] = False
+    st["finished_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+
+
+@app.post("/api/sessions-snapshot/resume", dependencies=[Depends(require_token)])
+async def post_snapshot_resume():
+    """Kick off resume in the background (restores tab names + original order,
+    skips already-running). Returns immediately; poll /resume-status for
+    progress."""
+    import datetime as _dt
+    if _resume_progress["running"]:
+        return {"ok": True, "already_running": True, **_resume_progress}
+    try:
+        snap = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        raise HTTPException(status_code=404, detail="no saved snapshot")
+    sessions = snap.get("sessions", [])
+    _resume_progress.update({
+        "running": True, "total": len(sessions), "done": 0, "current": "",
+        "results": [], "resumed": 0,
+        "started_at": _dt.datetime.now().isoformat(timespec="seconds"),
+        "finished_at": None,
+    })
+    asyncio.create_task(_run_resume(sessions))
+    return {"ok": True, "started": True, "total": len(sessions)}
+
+
+@app.get("/api/sessions-snapshot/resume-status", dependencies=[Depends(require_token)])
+async def get_resume_status():
+    return {"ok": True, **_resume_progress}
 
 
 @app.get("/api/cwds", dependencies=[Depends(require_token)])
