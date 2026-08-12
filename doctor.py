@@ -34,8 +34,11 @@ LOCK = HOME / ".claude" / "cc_web.lock"
 HERE = Path(__file__).resolve().parent
 IS_MAC = platform.system() == "Darwin"
 
-_fails = 0
-_warns = 0
+# Collected as we go so the run can finish EVERY check and still end with a
+# single actionable list — scrolling back through a long report to find what
+# actually broke is exactly the friction this script exists to remove.
+FAILS: list[tuple[str, str, str]] = []
+WARNS: list[tuple[str, str, str]] = []
 
 
 def ok(label, detail=""):
@@ -43,16 +46,14 @@ def ok(label, detail=""):
 
 
 def warn(label, detail="", fix=""):
-    global _warns
-    _warns += 1
+    WARNS.append((label, detail, fix))
     print(f"  \033[33mWARN\033[0m {label}" + (f" — {detail}" if detail else ""))
     if fix:
         print(f"       fix: {fix}")
 
 
 def fail(label, detail="", fix=""):
-    global _fails
-    _fails += 1
+    FAILS.append((label, detail, fix))
     print(f"  \033[31mFAIL\033[0m {label}" + (f" — {detail}" if detail else ""))
     if fix:
         print(f"       fix: {fix}")
@@ -114,14 +115,15 @@ def check_python():
 def check_conf():
     section(f"config ({CONF})")
     if not CONF.exists():
+        # Deliberately NOT returning: the checks below then report every value that
+        # is missing, so one run lists the whole gap instead of just "no file".
         fail("config file missing", str(CONF),
              f"mkdir -p ~/.claude && cp {HERE}/config.example/cc_web.conf {CONF} && chmod 600 {CONF}")
-        return
-    ok("config file exists")
-
-    mode = CONF.stat().st_mode & 0o777
-    if mode & 0o077:
-        warn("config is group/world readable", oct(mode), f"chmod 600 {CONF}")
+    else:
+        ok("config file exists")
+        mode = CONF.stat().st_mode & 0o777
+        if mode & 0o077:
+            warn("config is group/world readable", oct(mode), f"chmod 600 {CONF}")
 
     tok = [t for t in conf_get("token") if t]
     if os.environ.get("CC_WEB_TOKEN"):
@@ -319,10 +321,19 @@ def main():
     check_tls()
     check_static()
     check_instances()
-    print(f"\n{_fails} FAIL, {_warns} WARN")
-    if _fails:
-        print("FAIL means it will not work as intended. WARN means a feature is off or degraded.")
-    return 1 if _fails else 0
+    print(f"\n=== summary: {len(FAILS)} FAIL, {len(WARNS)} WARN ===")
+    for tag, colour, items in (("FAIL", "31", FAILS), ("WARN", "33", WARNS)):
+        for label, detail, fix in items:
+            print(f"  \033[{colour}m{tag}\033[0m {label}" + (f" — {detail}" if detail else ""))
+            if fix:
+                print(f"       → {fix}")
+    if not FAILS and not WARNS:
+        print("  everything ready")
+    elif FAILS:
+        print("\nFAIL = it will not work as intended. WARN = a feature is off or degraded.")
+    else:
+        print("\nWARN = a feature is off or degraded; nothing is broken.")
+    return 1 if FAILS else 0
 
 
 if __name__ == "__main__":
