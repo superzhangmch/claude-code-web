@@ -138,14 +138,31 @@ def _load_conf() -> dict:
 CONF = _load_conf()
 
 
+# True when the token below was invented at startup instead of read from config.
+# Surfaced on the login page (see /api/login): otherwise a missing `token=` looks
+# exactly like "I typed it wrong" — every attempt 401s and bounces back to the
+# login form, with the only clue a log line the user never sees, and the invented
+# token changing on every restart so even finding it in the log doesn't stick.
+AUTH_TOKEN_EPHEMERAL = False
+EPHEMERAL_TOKEN_HINT = (
+    "This server has no `token=` in ~/.claude/cc_web.conf, so it generated a random "
+    "one at startup (printed in its log, and different after every restart). "
+    "No token you type here can match. Set `token=` in that file and restart."
+)
+
+
 def _load_auth_token() -> str:
+    global AUTH_TOKEN_EPHEMERAL
     env = os.environ.get("CC_WEB_TOKEN")
     if env:
         return env
     if CONF["token"]:
         return CONF["token"]
     tok = secrets.token_urlsafe(24)
+    AUTH_TOKEN_EPHEMERAL = True
     log.warning("no token in %s — generated ephemeral token: %s", CONF_PATH, tok)
+    log.warning("set `token=` in %s and restart; otherwise every login attempt "
+                "will fail and this value changes on each restart", CONF_PATH)
     return tok
 
 
@@ -3426,12 +3443,27 @@ async def root():
     return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/auth-status")
+async def auth_status():
+    """Unauthenticated on purpose: the login page needs to know BEFORE anyone types
+    that this server invented its token, in which case no input can ever match and
+    the form should refuse rather than loop. Reveals only "am I misconfigured" —
+    never the token — and is reachable solely from wherever the server is bound
+    (a tailnet IP in the recommended setup)."""
+    return {"ephemeral": AUTH_TOKEN_EPHEMERAL,
+            "conf_path": str(CONF_PATH),
+            "hint": EPHEMERAL_TOKEN_HINT if AUTH_TOKEN_EPHEMERAL else ""}
+
+
 @app.post("/api/login")
 async def login(request: Request):
     body = await request.json()
     token = body.get("token", "")
     if not secrets.compare_digest(token, AUTH_TOKEN):
-        raise HTTPException(status_code=401, detail="invalid token")
+        # Tell the user WHY when the server is the misconfigured party — this is the
+        # one 401 a human actually reads.
+        raise HTTPException(status_code=401,
+                            detail=EPHEMERAL_TOKEN_HINT if AUTH_TOKEN_EPHEMERAL else "invalid token")
     return {"ok": True}
 
 
