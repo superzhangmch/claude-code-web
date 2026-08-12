@@ -11,6 +11,13 @@
   <meta name="theme-color" content="#fdf6e3" />
   <link rel="manifest" href="/static/manifest.webmanifest" />
   <link rel="apple-touch-icon" href="/static/icon-180.png" />
+  <!-- Browser-tab favicon. There was only an apple-touch-icon before, which iOS
+       uses for the home screen but desktop browsers ignore — so the tab showed a
+       blank default and cc-web was hard to pick out. SVG first (crisp at 16px,
+       all current browsers); the 180px PNG is the fallback for old Safari, which
+       ignores SVG favicons. -->
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="icon" type="image/png" sizes="180x180" href="/static/icon-180.png" />
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
 <style>
 :root {
@@ -148,6 +155,13 @@ header .dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; 
 header .dot.off { background: #888; }
 header .dot.err { background: #e04a4a; }
 header .mode-group { display: inline-flex; gap: 2px; }
+/* Same reason .mode-group is inline-flex: a wrapper left as `inline` still
+   becomes a blockified flex item of the header, and its line box is taller than
+   the button it holds — so the button, an inline-level box, lands on that line's
+   baseline about 2px BELOW every sibling that is a flex item of the header
+   itself. That's the ⚙ sitting lower than 📁 / + in the picker header.
+   inline-flex takes the baseline out of the equation. */
+header #picker-cfg-group { display: inline-flex; align-items: center; }
 /* In-transcript quick tab switcher dropdown. */
 .switch-menu {
   position: fixed; top: 46px; right: 8px; z-index: 80;
@@ -1138,12 +1152,28 @@ footer .rec-bar .rec-live {
   border-top: 1px solid var(--border);
 }
 footer .rec-bar .rec-live .rec-live-partial { color: var(--muted); }
+/* Why a recording stopped, shown IN the popup. The popup then stays put until the
+   user picks an action — a voice bar that vanishes on its own is indistinguishable
+   from a bug, and it silently throws away a half-finished transcript. */
+footer .rec-bar .rec-live .rec-live-err {
+  display: block; color: #e8833a; font-weight: 600; font-size: 13px; margin-bottom: 3px;
+}
 footer .rec-bar .rec-live .rec-live-hint { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 14px; }
-footer .rec-bar .rec-live .rec-spin {
+/* Scoped to the whole bar, not just .rec-live: the same spinner is reused in the
+   time slot while a polish round-trip is in flight. */
+footer .rec-bar .rec-spin {
   display: inline-block; width: 13px; height: 13px; flex-shrink: 0;
   border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%;
   animation: rec-spin .8s linear infinite;
 }
+/* Polish is an LLM round-trip (up to 60s). The only thing that changes is the
+   time slot: a spinner plus a live "Polish 1.4s" counter, so it's visibly working
+   rather than wedged. Nothing else moves — Cancel / Polish / Edit / Send all stay
+   put and stay usable while the request is out (see _voiceStop / _voiceCancel).
+   Declared after .rec-spin so the hidden-by-default wins on equal specificity. */
+footer .rec-bar .rec-spin-time { display: none; }
+footer .rec-bar.rec-polishing .rec-spin-time { display: inline-block; }
+footer .rec-bar.rec-polishing .rec-time { color: var(--accent); }
 @keyframes rec-spin { to { transform: rotate(360deg); } }
 @keyframes rec-wave { 0%,100% { height: 25%; } 50% { height: 90%; } }
 footer .rec-bar .rec-stop, footer .rec-bar .rec-cancel, footer .rec-bar .rec-send, footer .rec-bar .rec-edit {
@@ -1673,6 +1703,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 /* picker ⚙ lives in the header, which is overflow:hidden — an absolute child
    dropdown gets clipped. Pin it fixed (like .switch-menu) so it escapes. */
 #picker-cfg-menu { position: fixed; top: 46px; right: 8px; z-index: 90; }
+/* on-state for the menu's toggles, matching .switch-menu .sw-item.current */
+#picker-cfg-menu .btn.on { border-color: var(--accent); color: var(--accent); font-weight: 700; }
 .scr-cfg-row { display: flex; align-items: center; gap: 6px; padding: 4px 2px; font-size: 12px; color: var(--text); }
 .scr-cfg-row > span:first-child { flex: 1; color: var(--muted); white-space: nowrap; }
 .scr-cfg-row .btn { padding: 3px 9px; }
@@ -1701,6 +1733,57 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   width: 95vw; max-width: 1100px; height: 85vh;
   display: flex; flex-direction: column; gap: 8px;
 }
+/* Fullscreen — same pattern as #screen-modal.fs (class on the modal, ⛶ toggle,
+   remembered in localStorage). The card fills the viewport, inset at the top by
+   the safe area so the bar clears the notch; the bottom is given to the preview
+   (see below). */
+#files-modal.fs {
+  /* Top inset only. The bottom one is deliberately NOT reserved here: the
+     preview is the last thing in the card, and giving up ~34px to the home
+     indicator leaves a visible dead strip under the iframe. The top inset stays
+     because the bar up there has to clear the notch to be tappable. */
+  padding: env(safe-area-inset-top) 0 0;
+  align-items: flex-start; justify-content: flex-start;
+}
+#files-modal.fs .modal-card.files-card {
+  /* dvh, not vh: on mobile the browser toolbar makes 100vh taller than what you
+     can actually see. No bottom padding — the preview is the last child and is
+     meant to run to the edge. */
+  width: 100vw; max-width: none; max-height: none;
+  height: calc(100dvh - env(safe-area-inset-top));   /* bottom inset given to the preview */
+  border: 0;                    /* the card's own 1px frame is a 1px gutter here */
+  border-radius: 0; padding: 8px 8px 0; gap: 6px;
+}
+/* Fullscreen: the preview (an iframe, for html/pdf) runs flush to the left,
+   right and bottom edges — negative margin cancels the card's 8px side padding,
+   and the border/rounding go away on those three sides. Keep the top border: it
+   still has to read as separate from the bar above. Windowed mode deliberately
+   keeps the inset box, where a flush edge would just fight the card's rounding. */
+#files-modal.fs .files-preview {
+  margin: 0 -8px;                                  /* == the card's side padding */
+  border-left: 0; border-right: 0; border-bottom: 0; border-radius: 0;
+}
+/* Collapsed header: hide every browsing row and keep only the top bar (collapse
+   toggle + previewed file name + its ☆), which is the whole point — maximum room
+   for the preview on a phone. The rows below use inline style.display (set by
+   JS as they come and go), so these need !important to win. */
+#files-modal.hdr-collapsed .files-bar,
+#files-modal.hdr-collapsed .files-crumbs,
+#files-modal.hdr-collapsed .files-favs,
+#files-modal.hdr-collapsed .files-list,
+#files-modal.hdr-collapsed .files-pager { display: none !important; }
+#files-modal.hdr-collapsed .modal-row h3 { display: none; }
+#files-modal.hdr-collapsed #files-full { display: none; }   /* keep the bar minimal */
+/* The previewed file's name: only meaningful once the list is hidden. */
+#files-modal .files-cur-name {
+  display: none; flex: 1; min-width: 0;
+  font: 12px ui-monospace, Menlo, monospace; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#files-modal.hdr-collapsed .files-cur-name { display: block; }
+#files-modal #files-fav-cur { display: none; }
+#files-modal.hdr-collapsed #files-fav-cur.has-file { display: block; }
+#files-modal #files-fav-cur.on { color: #f5c451; border-color: #f5c451; }
 /* Dark-theme the bar/pager buttons (close, ↑, Go, 🔍 search, ✕, prev/next)
    — they'd otherwise render as white browser-default buttons. */
 #files-modal .btn {
@@ -1858,7 +1941,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 }
 #files-modal .files-preview .preview-bar .btn.active { background: var(--accent); color: var(--bg); }
 #files-modal .files-preview .preview-info { color: var(--muted); font-size: 11px; margin-left: auto; }
-#files-modal .files-preview iframe { width: 100%; height: 100%; border: 0; background: #fff; }
+/* display:block matters: as an inline element the iframe sits on a text baseline,
+   whose descender space makes the content 4px taller than the 100% height — enough
+   for .files-preview (overflow:auto) to grow a vertical scrollbar, which then eats
+   ~12px off the right edge of every html/pdf preview. */
+#files-modal .files-preview iframe { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
 #files-modal .files-preview .ph { color: var(--muted); padding: 14px; font-size: 13px; }
 /* Two tabs: Screen (scroll both axes, in a box) / Info (just a table,
    horizontal scroll only). One pane visible at a time. */
@@ -1957,6 +2044,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           <button id="picker-fontdown" class="btn" title="smaller list font">a −</button>
           <button id="picker-fontup" class="btn" title="bigger list font">A +</button>
         </div>
+        <div class="scr-cfg-row"><span>LaTeX 公式</span>
+          <button id="picker-latex" class="btn" title="公式渲染: 自动 / 手动点每条消息的 ∑">手动</button>
+        </div>
         <div class="scr-cfg-row"><span>整页刷新</span>
           <button id="picker-reload" class="btn" title="reload the whole page — pick up the latest UI after a deploy">↻ reload</button>
         </div>
@@ -1985,6 +2075,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     </div>
     <div class="menu-sec">Theme</div>
     <button class="sw-item" id="mm-theme">◐ theme</button>
+    <div class="menu-sec">LaTeX 公式</div>
+    <button class="sw-item" id="mm-latex">自动渲染:关</button>
     <div class="menu-sec">输入自动翻译/批改 (send 后)</div>
     <button class="sw-item" id="mm-autotranslate">自动翻译:关</button>
   </div>
@@ -2055,7 +2147,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   <div id="files-modal" class="modal">
     <div class="modal-card files-card">
       <div class="modal-row">
+        <button id="files-collapse" class="btn" title="Hide the browser rows — keep just this bar">▲</button>
         <h3>Files</h3>
+        <span id="files-cur-name" class="files-cur-name"></span>
+        <button id="files-fav-cur" class="btn" title="Favorite the previewed file">☆</button>
+        <button id="files-full" class="btn" title="fullscreen">⛶</button>
         <button id="files-close" class="btn" title="close">✕</button>
       </div>
       <div class="files-bar">
@@ -2247,6 +2343,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <button id="send" class="send" title="点击发送 · 长按更多" aria-label="Send">➤</button>
       <div id="rec-bar" class="rec-bar" style="display:none" title="Tap to stop">
         <span class="rec-dot"></span>
+        <span class="rec-spin rec-spin-time"></span>
         <span id="rec-time" class="rec-time">0:00</span>
         <div class="rec-wave"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
         <div id="rec-live" class="rec-live" style="display:none"></div>
@@ -2463,13 +2560,16 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     });
   }
   function loadKatex() {
-    if (_katexP) return _katexP;
+    if (_katexP) return _katexP;   // memoised → the lib is fetched at most once per page
     _katexP = (async () => {
       _loadCSS("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css");
       await _loadScript("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js");
       await _loadScript("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js");
       return window.renderMathInElement;
     })();
+    // Don't cache a failure forever (offline / CDN blocked): forget it so a later
+    // sighting — or a ∑ tap — can try again. Callers still see THIS rejection.
+    _katexP.catch(() => { _katexP = null; });
     return _katexP;
   }
   // Conservative: only fire on explicit display delimiters or paired $…$ that
@@ -2507,12 +2607,66 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     btn.textContent = "∑";
     btn.addEventListener("click", async (e) => {
       e.stopPropagation(); btn.disabled = true;
-      try { (await loadKatex())(mdEl, _katexOpts); } catch {}
+      try { (await loadKatex())(mdEl, _katexOpts); mdEl.dataset.mathDone = "1"; } catch {}
       _vvEnable();   // math rendered → enable the iOS keyboard viewport fix (gap fix)
       btn.remove();
     });
     return btn;
   }
+
+  // ----- auto-render mode (global switch, both ⚙ menus) -----
+  // OFF (default) = today's behaviour: a ∑ button per message, you decide when.
+  // ON = render as soon as math is spotted. KaTeX stays lazy either way: nothing is
+  // fetched until a message actually contains math, and loadKatex() memoises, so
+  // the ~300KB lib+CSS is pulled exactly once per page — never on a math-free
+  // session, never twice.
+  let latexAuto = localStorage.getItem("cc_web_latex_auto") === "1";
+  function autoRenderMath(mdEl, roleEl) {
+    if (mdEl.dataset.mathDone) return;
+    mdEl.dataset.mathDone = "1";          // per-element guard: re-renders won't double-render
+    loadKatex().then(fn => {
+      fn(mdEl, _katexOpts); _vvEnable();
+      // Drop a ∑ left over from manual mode ONLY once the render actually landed —
+      // removing it up front would strand you with neither math nor a retry button
+      // if the CDN is unreachable.
+      const blk = mdEl.closest(".msg");
+      const btn = blk && blk.querySelector(".math-btn");
+      if (btn) btn.remove();
+    }).catch(() => {                      // CDN unreachable → hand back the manual ∑
+      delete mdEl.dataset.mathDone;
+      if (roleEl && !roleEl.querySelector(".math-btn")) roleEl.appendChild(makeMathBtn(mdEl));
+    });
+  }
+  // Switching ON should also fix up what's already on screen, not just later blocks.
+  function autoRenderMathVisible() {
+    document.querySelectorAll(".msg .markdown").forEach(md => {
+      if (_mathRe.test(md.textContent || "")) autoRenderMath(md, null);
+    });
+  }
+  function applyLatexAuto() {
+    localStorage.setItem("cc_web_latex_auto", latexAuto ? "1" : "0");
+    const mm = document.getElementById("mm-latex");
+    if (mm) {
+      mm.textContent = "自动渲染:" + (latexAuto ? "开" : "关");
+      mm.classList.toggle("current", latexAuto);
+    }
+    const pk = document.getElementById("picker-latex");
+    if (pk) {
+      pk.textContent = latexAuto ? "自动" : "手动";
+      pk.classList.toggle("on", latexAuto);
+    }
+  }
+  function toggleLatexAuto(e) {
+    if (e) e.stopPropagation();
+    latexAuto = !latexAuto;
+    applyLatexAuto();
+    if (latexAuto) autoRenderMathVisible();   // OFF→ON: render the transcript in place
+    // ON→OFF leaves already-rendered math rendered (there's no un-render); new
+    // blocks from here on get the ∑ button back.
+  }
+  document.getElementById("mm-latex").addEventListener("click", toggleLatexAuto);
+  document.getElementById("picker-latex").addEventListener("click", toggleLatexAuto);
+  applyLatexAuto();
 
   const URL_RE = /(https?:\/\/[^\s<>"'）)\]]+)/g;
   function renderMarkdown(text) {
@@ -3857,6 +4011,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const filesUp = document.getElementById("files-up");
   const filesGo = document.getElementById("files-go");
   const filesClose = document.getElementById("files-close");
+  const filesFull = document.getElementById("files-full");
+  const filesCollapse = document.getElementById("files-collapse");
+  const filesCurNameEl = document.getElementById("files-cur-name");
+  const filesFavCur = document.getElementById("files-fav-cur");
   const filesPagerEl = document.getElementById("files-pager");
   const filesPrev = document.getElementById("files-prev");
   const filesNext = document.getElementById("files-next");
@@ -3864,6 +4022,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const filesFilterEl = document.getElementById("files-filter");
   const filesFilterClear = document.getElementById("files-filter-clear");
   let filesCurDir = "";
+  let filesCurFile = null;   // {path, kind, name} currently in the preview pane
   let filesObjUrl = null;
   let filesOffset = 0;
   let filesTotal = 0;
@@ -3941,7 +4100,49 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   function clearFilesPreview(msg) {
     if (filesObjUrl) { URL.revokeObjectURL(filesObjUrl); filesObjUrl = null; }
     filesPreviewEl.innerHTML = '<div class="ph">' + (msg || "Click a file to preview.") + '</div>';
+    setFilesCurFile(null);
   }
+
+  // ----- fullscreen / collapsed-header (the two view toggles on the top bar) -----
+  // persist=true only for a real ⛶ tap. Applying the per-device default on open
+  // must NOT write the key, or the first open would bake it in and "never chosen"
+  // (null) could never fall back to the default again.
+  function applyFilesFull(on, persist) {
+    filesModal.classList.toggle("fs", on);
+    if (persist) localStorage.setItem("cc_web_files_full", on ? "1" : "0");
+    filesFull.textContent = on ? "🗗" : "⛶";
+    filesFull.title = on ? "leave fullscreen" : "fullscreen";
+  }
+  function applyFilesCollapsed(on) {
+    filesModal.classList.toggle("hdr-collapsed", on);
+    filesCollapse.textContent = on ? "▼" : "▲";
+    filesCollapse.title = on ? "Show the browser rows again"
+                             : "Hide the browser rows — keep just this bar";
+  }
+  filesFull.addEventListener("click", () => applyFilesFull(!filesModal.classList.contains("fs"), true));
+  filesCollapse.addEventListener("click", () =>
+    applyFilesCollapsed(!filesModal.classList.contains("hdr-collapsed")));
+
+  // Name + ☆ of the previewed file. Only shown while collapsed — that's exactly
+  // when the list (and with it the per-row star) is hidden.
+  function setFilesCurFile(f) {
+    filesCurFile = f;
+    filesCurNameEl.textContent = f ? f.name : "";
+    filesCurNameEl.title = f ? f.path : "";
+    filesFavCur.classList.toggle("has-file", !!f);
+    refreshFilesCurFav();
+  }
+  function refreshFilesCurFav() {
+    const on = !!filesCurFile && isFav(filesCurFile.path);
+    filesFavCur.textContent = on ? "★" : "☆";
+    filesFavCur.classList.toggle("on", on);
+  }
+  filesFavCur.addEventListener("click", () => {
+    if (!filesCurFile) return;
+    toggleFav({ path: filesCurFile.path, is_dir: false,
+                kind: filesCurFile.kind, name: filesCurFile.name });
+    refreshFilesCurFav();
+  });
 
   // ----- favorites (localStorage, per-browser) -----
   const FAV_KEY = "cc_web_fav";
@@ -4100,6 +4301,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         const on = isFav(full);
         star.classList.toggle("on", on);
         star.textContent = on ? "★" : "☆";
+        refreshFilesCurFav();   // same file may be the previewed one → keep the bar ☆ in sync
       });
       row.appendChild(star);
       if (e.is_dir) {
@@ -4131,6 +4333,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // (fmtBytes is a hoisted fn declared below.)
   async function previewText(path, where) {
     clearFilesPreview("Loading…");
+    setFilesCurFile({ path, kind: "text", name: path.split("/").pop() });
     try {
       const resp = await authedFetch("/api/fs/preview?path=" + encodeURIComponent(path) + "&where=" + where);
       if (!resp.ok) { clearFilesPreview("Error: " + resp.status); return; }
@@ -4158,6 +4361,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
   async function previewFile(path, kind) {
     clearFilesPreview("Loading…");
+    setFilesCurFile({ path, kind, name: path.split("/").pop() });
     if (kind === "other") { clearFilesPreview("Not a previewable type."); return; }
     if (kind === "text") { return previewText(path, "head"); }   // default: head
     try {
@@ -4185,6 +4389,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 
   filesBtn.addEventListener("click", () => {
     filesModal.classList.add("show");
+    // Phone (portrait): fullscreen by DEFAULT — a 95vw/85vh card throws away too
+    // much of a small screen. Desktop: windowed. An explicit ⛶ choice is stored
+    // and wins over both (null = never chosen → fall back to the per-device default).
+    const savedFull = localStorage.getItem("cc_web_files_full");
+    applyFilesFull(savedFull === null ? isPhone() : savedFull === "1");
+    // Always open expanded: the preview starts empty, and a collapsed bar with
+    // nothing previewed and no browsing rows would be a dead end.
+    applyFilesCollapsed(false);
     clearFilesPreview();
     filesFilterEl.value = "";
     renderFavs();
@@ -6664,7 +6876,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (indieQueued) label.classList.add("queued-label");
       const md = document.createElement("div"); md.className = "markdown";
       md.innerHTML = renderMarkdown(b.text);
-      if (_mathRe.test(md.textContent || "")) role.appendChild(makeMathBtn(md));   // ∑ button in the action row
+      if (_mathRe.test(md.textContent || "")) {
+        if (latexAuto) autoRenderMath(md, role);            // auto mode: render now (∑ returns if KaTeX won't load)
+        else role.appendChild(makeMathBtn(md));             // manual: ∑ button in the action row
+      }
       role.appendChild(makeLinksBtn(() => rawTextFor(b)));
       if (extractCommands(rawTextFor(b)).length) role.appendChild(makeCmdsBtn(() => rawTextFor(b)));
       if (b.role === "user" && !b.system) role.appendChild(makeCorrectBtn(div, b.text));
@@ -6724,7 +6939,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       div.className = "msg thinking"; label.textContent = "Thinking";
       const md = document.createElement("div"); md.className = "markdown";
       md.innerHTML = renderMarkdown(b.text);
-      if (_mathRe.test(md.textContent || "")) role.appendChild(makeMathBtn(md));   // ∑ button in the action row
+      if (_mathRe.test(md.textContent || "")) {
+        if (latexAuto) autoRenderMath(md, role);            // auto mode: render now (∑ returns if KaTeX won't load)
+        else role.appendChild(makeMathBtn(md));             // manual: ∑ button in the action row
+      }
       role.appendChild(makeLinksBtn(() => rawTextFor(b)));
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
       div.appendChild(role); div.appendChild(md);
@@ -8151,6 +8369,39 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const recStopEl = document.getElementById("rec-stop");
   const recEditEl = document.getElementById("rec-edit");
   let _recTimer = null, _recStartMs = 0;
+  // Live feedback while a polish request is out (see .rec-polishing in the CSS).
+  // _polAbort non-null == "a polish is in flight": the bar's buttons check it so
+  // Cancel / Send / Edit keep working during the wait instead of being no-ops.
+  let _polTimer = null, _polSavedTime = "", _polAbort = null, _polCtx = null, _polSuperseded = false;
+  function _polishAbort() {   // true if a request was actually in flight
+    if (!_polAbort) return false;
+    _polSuperseded = true;    // the user acted → the reply must not touch the UI
+    try { _polAbort.abort(new DOMException("superseded", "AbortError")); } catch {}
+    _polAbort = null;
+    return true;
+  }
+  function _recPolishStart(label) {
+    // Only capture the frozen recording time on the FIRST entry — a second call
+    // without a stop in between would otherwise save "Polish 1.2s" as the value
+    // to restore later.
+    if (!_polTimer) _polSavedTime = recTimeEl.textContent;
+    recBar.classList.add("rec-polishing");
+    const t0 = Date.now();
+    // Tenths at 100ms: the number visibly moves, so a slow LLM reads as slow
+    // rather than as frozen. Tabular numerals keep it from jittering.
+    const tick = () => {
+      recTimeEl.textContent = (label || "Polish") + " "
+        + ((Date.now() - t0) / 1000).toFixed(1) + "s";
+    };
+    tick();
+    clearInterval(_polTimer);
+    _polTimer = setInterval(tick, 100);
+  }
+  function _recPolishStop() {
+    if (_polTimer) { clearInterval(_polTimer); _polTimer = null; }
+    recBar.classList.remove("rec-polishing");
+    if (_polSavedTime) { recTimeEl.textContent = _polSavedTime; _polSavedTime = ""; }
+  }
   function _fmtDur(ms) {
     const s = Math.floor(ms / 1000);
     return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
@@ -8158,6 +8409,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const recCancelEl = document.getElementById("rec-cancel");
   function _showRecBar() {
     _batchResult = null;   // starting a fresh recording → drop any pending step-2 result
+    _polishAbort();     // a fresh recording supersedes any polish still in flight
+    _recPolishStop();   // …and never inherits its spinner/counter state
     _recStartMs = Date.now();
     recTimeEl.textContent = "0:00";
     recBar.style.display = "flex";
@@ -8181,6 +8434,37 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (recLiveEl) { recLiveEl.style.display = ""; recLiveEl.textContent = text; }
     clearInterval(_recTimer); _recTimer = null;
     micBtn.classList.remove("busy"); micBtn.disabled = false;   // keep the popup up but re-enable the mic
+  }
+  // ----- "stopped, and here's why" state -----
+  // Every abnormal end funnels through here instead of hiding the popup. Rules:
+  //   1. the popup STAYS until the user acts — a bar that disappears by itself
+  //      reads as a bug and you can't tell it from a normal finish;
+  //   2. the reason is written where you're already looking;
+  //   3. whatever was transcribed so far is kept and offered — half a sentence is
+  //      still worth having. Polish / Edit / Send / Cancel all work on it via the
+  //      existing _batchResult path.
+  let _voiceParkReason = "";
+  function _showVoiceNotice(reason, raw) {
+    recBar.style.display = "flex"; recBar.classList.add("rec-live-on");
+    if (recWaveEl) recWaveEl.style.display = "none";
+    [recCancelEl, recStopEl, recEditEl, recSendEl].forEach(b => b && (b.style.display = ""));
+    if (recStopEl) recStopEl.textContent = "Polish";
+    if (recLiveEl) {
+      recLiveEl.style.display = "";
+      recLiveEl.innerHTML = "<span class='rec-live-err'>⚠ " + _escHtml(reason || "录音已结束") + "</span>"
+        + (raw ? _escHtml(raw)
+               : "<span class='rec-live-partial'>（没有可用文字 — 点 Cancel 关掉，或直接再录一次）</span>");
+    }
+    clearInterval(_recTimer); _recTimer = null;
+    _recPolishStop();                                            // no stale spinner/counter
+    // Mic back to idle look + tappable, without _setMic("idle") — that would hide
+    // the popup, which is the exact thing this state exists to prevent.
+    micBtn.classList.remove("busy", "recording"); micBtn.disabled = false;
+  }
+  // Park a (possibly partial) result together with the reason it stopped.
+  function _voiceParkResult(raw, before, reason) {
+    _batchResult = { raw: raw || "", before: before || "" };      // Polish/Edit/Send/Cancel act on this
+    _showVoiceNotice(reason, raw);
   }
   function _recBarBusy(msg) {   // loading state in the popup (batch transcription / processing) — mic stays 🎤
     recBar.style.display = "flex"; recBar.classList.add("rec-live-on");
@@ -8221,11 +8505,31 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 
   async function _voiceStop(mode) {   // mode = "polish" | "edit" | "send"
     mode = mode || "polish";
+    // A polish request is out. The buttons stay live: the raw transcript is already
+    // in the input box, so Send submits it as-is and Edit just hands it over — both
+    // abort the request first so a late reply can't overwrite the user's choice.
+    if (_polAbort) {
+      if (mode === "polish") return;              // repeat tap on Polish → keep waiting
+      _polishAbort(); _recPolishStop();
+      if (mode === "send") { _setMic("idle"); send(); return; }
+      _setMic("idle"); if (!isPhone()) inputEl.focus();
+      return;
+    }
     if (Voice.s) { Voice.stop(mode); return; }                                           // realtime finish
     if (_batchResult) { const r = _batchResult; _batchResult = null; await Voice.apply(r.raw, r.before, mode); return; }   // batch step 2 → act on the result
     if (_mediaRec && _recording) { _recording = false; _mediaRec.stop(); }               // batch step 1: Stop → transcribe
   }
   async function _voiceCancel() {   // discard
+    // Cancel during polish = discard, same as everywhere else: drop the request and
+    // restore the box to what was in it before dictation. Read _polCtx BEFORE the
+    // abort — polish()'s finally clears it.
+    if (_polAbort) {
+      const before = (_polCtx || {}).before;
+      _polishAbort(); _recPolishStop();
+      if (before != null) { inputEl.value = before; inputEl.dispatchEvent(new Event("input")); }
+      _setMic("idle");
+      return;
+    }
     if (Voice.s) { Voice.cancel(); return; }
     if (_batchResult) { const r = _batchResult; _batchResult = null; inputEl.value = r.before; inputEl.dispatchEvent(new Event("input")); _setMic("idle"); return; }   // discard the batch result (restore the box)
     if (_mediaRec && _recording) { _recCancelled = true; _recording = false; _mediaRec.stop(); }
@@ -8282,6 +8586,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (!Voice.s) return;
       _recording = false; Voice.teardown(); Voice.s = null; _setMic("idle");
     },
+    // Abnormal end (stream dead, audio capture blew up, mic taken away by the OS).
+    // Releases the hardware but does NOT hide the popup: it parks with the reason
+    // and whatever was transcribed, and waits for the user. Never call cancel()
+    // for a failure — that's the silent-vanish path.
+    fail(reason) {
+      const s = Voice.s; if (!s) return;
+      const before = s.before;
+      const raw = (s.finalText + s.partial).trim();
+      _recording = false;
+      Voice.teardown(); Voice.s = null;
+      _voiceParkResult(raw, before, reason);
+    },
     // Unexpected drop. Early (no tokens yet) → silently reconnect a few times. Otherwise the
     // local MediaRecorder keeps the full audio and Stop falls back to non-streaming /api/asr.
     streamDrop(msg) {
@@ -8300,7 +8616,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           + "<span class='rec-live-partial'>  ⚠ live error → batch on Stop</span>";
         return;
       }
-      if (s.finalText || s.partial) Voice.finalize(); else { if (msg) alert(msg); Voice.cancel(); }
+      // Nothing transcribed, retries spent, and no local recording to fall back on.
+      // Used to alert() + cancel() — i.e. the popup vanished and (on a phone) the
+      // alert was easy to miss. Park it instead.
+      if (s.finalText || s.partial) Voice.finalize();
+      else Voice.fail("语音连接中断" + (msg ? "（" + msg + "）" : "") + " — 没能识别到内容");
     },
     stop(mode) {   // the finish action. mode: "polish" (default) | "edit" (raw→box) | "send" (raw→submit)
       const s = Voice.s; if (!s || s.stopping) return;
@@ -8312,17 +8632,41 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     },
     async polish(raw, before) {   // shared polish step (same endpoint + gating as batch)
       _setMic("busy");
+      _recPolishStart();   // spinner + counting seconds in the time slot until this returns
       lastAsrRaw = raw; lastAsrSec = null; lastPolishSec = null; lastPolished = "";
+      // Own the abort so the bar's buttons can cut the wait short. authedFetch only
+      // applies its own timeoutMs when the caller passes no signal, so keep the 60s
+      // ceiling here.
+      const ctrl = new AbortController();
+      _polAbort = ctrl; _polCtx = { raw, before }; _polSuperseded = false;
+      const polTimeout = setTimeout(() => ctrl.abort(new DOMException("timeout", "AbortError")), 60000);
       try {
         const polT0 = Date.now();
         const pr = await authedFetch("/api/polish", { method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ text: raw, claude_session_id: attachedSid || "", mode: "asr" }), timeoutMs: 60000 });
+          body: JSON.stringify({ text: raw, claude_session_id: attachedSid || "", mode: "asr" }), signal: ctrl.signal });
         lastPolishSec = ((Date.now() - polT0) / 1000).toFixed(1);
         if (pr.ok) { const d = await pr.json(); if (d && d.text) { lastPolished = d.text; if (inputEl.value === before + raw) { inputEl.value = before + d.text; inputEl.dispatchEvent(new Event("input")); } } }
       } catch {}
+      finally {   // also on timeout/error — never leave the bar spinning
+        clearTimeout(polTimeout);
+        if (_polAbort === ctrl) _polAbort = null;
+        _polCtx = null;
+        _recPolishStop();
+      }
+      // Cancel/Send/Edit already finished the interaction — don't re-touch the UI.
+      if (_polSuperseded) { _polSuperseded = false; return; }
       _setMic("idle"); if (!isPhone()) inputEl.focus();
     },
     apply(raw, before, mode) {   // put text in the box, then act by mode (shared by realtime + batch)
+      // "park": an auto-stop (5-min cap) — don't decide for the user. Text goes in
+      // the box AND the popup stays open with the reason + Polish/Edit/Send/Cancel.
+      if (mode === "park") {
+        const reason = _voiceParkReason || "录音已自动停止";
+        _voiceParkReason = "";
+        if (raw) { inputEl.value = before + raw; inputFromVoice = true; inputEl.dispatchEvent(new Event("input")); }
+        _voiceParkResult(raw, before, reason);
+        return;
+      }
       if (!raw) { _setMic("idle"); return; }
       inputEl.value = before + raw; inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
       if (mode === "send") { _setMic("idle"); send(); return; }
@@ -8395,13 +8739,21 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           const MAX_MS = 300000;   // only auto-stop = 5-min absolute safety cap (otherwise only Stop ends it)
           sp.onaudioprocess = (ev) => {
             const s = Voice.s; if (!s || s.stopping) return;
-            if (Date.now() - s.startMs > MAX_MS) { console.log("asr-rt: 5min hard cap → auto-stop"); Voice.stop(); return; }
+            if (Date.now() - s.startMs > MAX_MS) {
+              // Used to stop dead silently (console only) — from the outside that
+              // looks exactly like a crash. Stop via "park" so the tail tokens are
+              // still collected, then hold the popup open saying why.
+              console.log("asr-rt: 5min hard cap → auto-stop");
+              _voiceParkReason = "已录满 5 分钟上限 — 已自动停止，下面是识别结果";
+              Voice.stop("park");
+              return;
+            }
             if (ws.readyState !== 1) return;   // stream dropped → local recorder still captures; nothing to send here
             try { ws.send(_f32ToPcm16(_downTo24k(ev.inputBuffer.getChannelData(0), ac.sampleRate)).buffer); } catch {}
           };
           src.connect(sp); sp.connect(mute); mute.connect(ac.destination);
           if (!s.gotAny) { if (recWaveEl) recWaveEl.style.display = ""; if (recLiveEl) recLiveEl.textContent = ""; }   // connected → the wave shows we're listening; no text label
-        } catch (err) { alert("音频采集失败: " + err); Voice.cancel(); }
+        } catch (err) { Voice.fail("音频采集失败: " + (err && err.name ? err.name : err)); }
       };
     },
     start(stream) {
@@ -8418,6 +8770,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         s.mrDone = new Promise(res => { s.mr.onstop = res; });
         s.mr.start();
       } catch (e) { s.mr = null; console.warn("no MediaRecorder → no batch fallback:", e); }
+      // The OS can take the mic away mid-recording: incoming call, Siri, another app
+      // grabbing audio, permission revoked. Nothing used to notice — the timer kept
+      // counting and the wave kept animating while only silence was captured, and you
+      // ended up with an empty transcript and no idea why. Note track.stop() does NOT
+      // fire "ended" (spec), so our own teardown can't trip this; _recording guards
+      // the rest.
+      try {
+        stream.getAudioTracks().forEach(t => t.addEventListener("ended", () => {
+          if (Voice.s === s && !s.stopping && _recording)
+            Voice.fail("麦克风被系统中断（来电 / 其他 App 占用 / 权限被撤销？）");
+        }));
+      } catch {}
       _recording = true; _setMic("rec"); inputFromVoice = true;
       recBar.classList.add("rec-live-on");               // full-width transcript row, grow upward
       if (recWaveEl) recWaveEl.style.display = "none";   // hidden while connecting; shown once connected (= listening)
@@ -8445,21 +8809,30 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       stream.getTracks().forEach(t => t.stop());   // release the mic immediately
       if (_recCancelled) { _recCancelled = false; _setMic("idle"); return; }   // discarded
       _setMic("busy"); _recBarBusy("整段识别中…");   // step 1 done → loading (result comes all at once)
-      const blob = new Blob(_mediaChunks, { type: _mediaRec.mimeType });
-      if (!blob.size) { _setMic("idle"); return; }
       const before = inputEl.value ? (inputEl.value.replace(/\s*$/, "") + " ") : "";
+      const blob = new Blob(_mediaChunks, { type: _mediaRec.mimeType });
+      // Every failure below used to end in `_setMic("idle")` — the popup just
+      // disappeared, twice of them without even an alert. Park with the reason
+      // instead; the popup waits for Cancel (or any other button).
+      if (!blob.size) { _voiceParkResult("", before, "没有录到音频（麦克风可能被系统中断）"); return; }
       let asrText = "";
       try {
         const qs = new URLSearchParams();
         if (asrWhich) qs.set("which", asrWhich);
         if (attachedSid) qs.set("sid", attachedSid);   // context → ASR prompt (bias domain vocab)
         const ar = await authedFetch("/api/asr?" + qs.toString(), { method: "POST", headers: { "content-type": blob.type || "audio/webm" }, body: blob, timeoutMs: 60000 });
-        if (!ar.ok) { alert("识别失败: " + await ar.text()); _setMic("idle"); return; }
+        if (!ar.ok) {
+          const body = await ar.text().catch(() => "");
+          _voiceParkResult("", before, "识别失败 (HTTP " + ar.status + ") " + body.slice(0, 120));
+          return;
+        }
         asrText = ((await ar.json()).text || "").trim();
       } catch (e) {
-        alert(e && e.name === "AbortError" ? "识别超时,请重试" : "识别失败: " + e); _setMic("idle"); return;
+        _voiceParkResult("", before,
+          e && e.name === "AbortError" ? "识别超时（60s）— 请重试" : "识别失败: " + e);
+        return;
       }
-      if (!asrText) { _setMic("idle"); return; }
+      if (!asrText) { _voiceParkResult("", before, "没有识别到内容（没说话，或声音太小）"); return; }
       lastAsrRaw = asrText; lastAsrSec = null; lastPolishSec = null; lastPolished = "";
       // step 2: drop the raw text into the box and show Polish / Edit / Send to act on it
       inputEl.value = before + asrText; inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));

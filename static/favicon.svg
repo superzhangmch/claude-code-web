@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Browser-tab icon: same design as icon-180.png (the iOS home-screen one), but
+       as SVG so it stays crisp at 16px, where a downscaled 180px PNG turns the C's
+       stroke to mush. Colours are the app's own: #15171f panel, #e08b4a accent.
+       Stroke is deliberately heavy (5.6 of a 32 viewBox) — at 16px a thin C loses
+       its counter and reads as a blob or an O. -->
+  <rect width="32" height="32" rx="7" fill="#15171f"/>
+  <path d="M22.36 9.64 A 9 9 0 1 0 22.36 22.36" fill="none"
+        stroke="#e08b4a" stroke-width="5.6" stroke-linecap="round"/>
+</svg>
