@@ -84,13 +84,30 @@ chmod 600 ~/.claude/cc_web.conf
 $EDITOR ~/.claude/cc_web.conf
 ```
 
-Four sections — `token` (auth, sent as `Authorization: Bearer …`);
-LLM keys (`api_base` / `api_key` / `model`, any OpenAI-compatible
-endpoint like LiteLLM/Ollama) used both for the attach tie-breaker
-**and** to polish voice-input dictation; one `cwd=` line per allowed
-working directory for the *New session* button; and optional `asr=`
-lines (one per speech-to-text backend) that enable the 🎤 voice-input
-button.
+Then check the whole setup in one shot — it verifies everything the
+[troubleshooting table](#troubleshooting--symptom--cause) covers and prints the
+exact fix for anything missing:
+
+```sh
+.venv/bin/python doctor.py
+```
+
+What's in there:
+
+- **`token`** — auth, sent as `Authorization: Bearer …`. Not optional in
+  practice: with no `token=` the server invents a random one at startup, and
+  then *no* token you type can log in (see the troubleshooting table).
+- **LLM keys** (`api_base` / `api_key` / `model`) — any OpenAI-compatible
+  endpoint (LiteLLM, Ollama, …). Used for the attach tie-breaker, to polish
+  voice dictation, and for the ✎ English correction. Unset = those features
+  report "no LLM configured" rather than pretending to work.
+- **`cwd=`** — one line per directory the *New session* button may spawn
+  `claude` in.
+- **`asr=`** — optional, one line per batch speech-to-text backend; enables the
+  🎤 button.
+- **`soniox=` / `openai_realtime=`** — optional streaming (realtime) voice, where
+  words appear while you talk. With none of the three voice keys set, the ⚙ menu
+  says "not configured yet" instead of hiding the feature silently.
 
 ## Run
 
@@ -146,6 +163,15 @@ not the `100.x` IP, otherwise the cert won't match and the warning comes
 back.
 
 Notes:
+- **`tailscale cert` needs root** (on Linux it fails with `Access denied: cert
+  access denied`). Grant it once and never again:
+  ```sh
+  sudo tailscale set --operator=$USER
+  ```
+  Watch out: `sudo` needs a real terminal — it cannot prompt for a password from
+  a non-interactive shell, so run this in an actual tty (or a tmux pane).
+  Without a cert there is no HTTPS, and without HTTPS the mic cannot record —
+  a three-steps-removed cause for "voice input is broken".
 - **Don't front it with `tailscale serve`.** Its HTTP/2 proxy answers
   `curl` fine but browsers reject it (`ERR_CONNECTION_CLOSED`). Terminate
   TLS in uvicorn directly, as above.
@@ -245,6 +271,81 @@ ways. All three are environment, not code:
    `launchctl kickstart -k …` (the agent), or — if the agent isn't set
    up yet — from inside an iTerm tab (which lends its own TCC grants).
 
-## Other languages
+### Auto-start on Linux (systemd user unit)
 
-- 中文: [README_zh.md](README_zh.md)
+There is no launchd on Linux; use a **user** unit (not a system one — it has to
+run as you, with your `~/.claude` and your tmux):
+
+```ini
+# ~/.config/systemd/user/cc-web-https.service    — see linux_helpers/
+[Service]
+ExecStart=%h/claude-code-web/cc-web-https-start.sh
+Restart=always
+RestartSec=15
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now cc-web-https.service
+journalctl --user -u cc-web-https -f          # logs
+loginctl enable-linger $USER                  # keep running with no login session
+```
+
+**Every failure path in a start script must sleep before exiting.**
+`Restart=always` (and launchd's `KeepAlive`) restart instantly, so a hopeless
+respin — port already taken, tailscale down, no cert — spins forever: one such
+loop ran 5 days at ~10s per attempt and wrote a 36 MB log. The scripts under
+`macos_helpers/` and `linux_helpers/` sleep 60s on every failure and pre-check
+for an already-running instance.
+
+## Only one instance per machine
+
+`cc_web.py` takes an exclusive `flock` on `~/.claude/cc_web.lock` at startup, so a
+second instance exits immediately:
+
+```
+ERROR ccweb: another cc_web is already running (pid=… argv=…) — refusing to start
+ERROR:    Application startup failed. Exiting.        # exit code 3
+```
+
+That is deliberate. Two instances (say an HTTP one on 8765 beside an HTTPS one on
+8443) don't clash over ports, but they share everything stateful under
+`~/.claude`: both run the session-summary worker (double the LLM spend — and each
+save rewrites the whole map from its own startup snapshot, so they delete each
+other's summaries), both persist their own binding table (one's reaper wipes the
+other's bindings), both auto-continue the same API-erroring session, and both
+write the same fixed `*.tmp` paths. `CC_WEB_ALLOW_MULTI=1` opts out if you really
+want two.
+
+If a restart complains, the old process simply hasn't exited yet: restart through
+the supervisor (`launchctl kickstart -k …` / `systemctl --user restart …`), which
+stops the old pid and waits for it before starting the new one. Don't `pkill` —
+the supervisor races you and respawns mid-start.
+
+## Extras: the grammar hook
+
+`hooks/grammar/` is a **separate**, optional Claude Code `UserPromptSubmit` hook
+(macOS only — the bar is a small Swift app): it polishes the English of the prompt
+you just typed and shows a native-sounding rewrite in a floating bar, while your
+prompt is still submitted exactly as typed. Unrelated to the web UI's own ✎ button
+(that one calls `/api/grammar`). See `hooks/grammar/README.md`.
+
+## Troubleshooting — symptom → cause
+
+Run **`.venv/bin/python doctor.py`** first: it checks every row below and prints
+the fix. The theme is that the symptom shows up far from the cause.
+
+| Symptom | Cause |
+|---|---|
+| Typed the token, bounced straight back to the login page | No `token=` in `~/.claude/cc_web.conf`, so the server invented a random one at startup — nothing you type can match, and it changes on every restart. The login page now says so and disables the form. |
+| Session picker is empty | macOS: iTerm2's Python API is off, or that first "Allow this script to control iTerm?" dialog was never accepted. Linux: `claude` is not running **inside tmux** — the bridge only sees tmux panes. |
+| No 🎤 button; ⚙ says "not configured yet" | No `asr=` / `soniox=` / `openai_realtime=` in the conf. |
+| 🎤 is there but recording never starts | Not a secure context. `getUserMedia` needs `https://` (or `localhost`) — see the HTTPS section. |
+| "not polished — no LLM configured" after dictating | No `api_base` / `model`; `/api/polish` returns 503. It used to swallow that and hand back the raw dictation, which looked like a successful no-op. |
+| ✎ says "no LLM configured" | Same missing `api_base` / `model`. It used to answer "looks natural — no changes" for unconfigured *and* failed calls — a pass mark on text nobody checked. |
+| Messages render as raw `**markdown**` | `static/vendor/marked.min.js` didn't load. It's vendored deliberately (no CDN), so this means an incomplete deploy; a banner now says so. |
+| ∑ turns into `∑!` | KaTeX couldn't be fetched — it is still CDN-loaded (its webfonts are ~1MB). Offline/blocked network; tap to retry. |
+| Startup fails with exit code 3 | Another cc_web holds the lock — see above. |
+| Browser cert warning | You opened the `100.x` IP instead of the `*.ts.net` name the cert was issued for. |
+| `tailscale cert` → "Access denied" | It needs root: run `sudo tailscale set --operator=$USER` **once**. Note `sudo` needs a real terminal — it cannot prompt from a non-interactive shell. |
+| launchd-started server: screenshot 500s, clicks do nothing, attach 401 | TCC permissions, or a `nohup`-detached process. See the launchd gotchas above. |

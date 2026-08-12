@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  HTTPS agent (port 8443, trusted tailscale cert) — the one you actually want,
+  since voice input needs a secure context. Install:
+
+    cp macos_helpers/cc-web-https-start.sh ~/bin/          # edit CERT_NAME inside
+    cp macos_helpers/com.zmc.cc-web-https.plist ~/Library/LaunchAgents/
+    # replace YOUR_USERNAME below, then:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zmc.cc-web-https.plist
+
+  Restart after a code change:   launchctl kickstart -k gui/$(id -u)/com.zmc.cc-web-https
+  Restart after editing THIS file: bootout + bootstrap (kickstart does not re-read it).
+
+  ThrottleInterval is 30 (not the default 10) and the start script sleeps 60s on
+  every failure path. KeepAlive restarts the job the instant it exits, so without
+  both of those a hopeless respin — port already taken, no cert, tailscale down —
+  spins forever: that happened here for 5 days and wrote a 36 MB log.
+
+  Run ONLY this one, not this plus the plain-HTTP agent: cc_web refuses to start a
+  second instance (flock on ~/.claude/cc_web.lock, exit code 3) because two of them
+  share and corrupt everything under ~/.claude.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.zmc.cc-web-https</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOUR_USERNAME/bin/cc-web-https-start.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/YOUR_USERNAME/cc_https/https.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOUR_USERNAME/cc_https/https.log</string>
+</dict>
+</plist>

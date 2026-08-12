@@ -6196,16 +6196,24 @@ async def post_grammar(payload: GrammarPayload):
     rewrite — it only flags REAL mistakes (grammar, spelling, word choice, clear
     translationese) so the user can learn from them. If the English is already
     correct and natural, it returns an EMPTY correction (the caller shows nothing).
-    Reuses the same LLM as /api/polish. Best-effort: any failure returns empty."""
+    Reuses the same LLM as /api/polish.
+
+    ALWAYS returns a `status`, because an empty `correction` used to mean three
+    very different things and the UI showed all of them as "looks natural":
+    the LLM said it was fine, OR the LLM was never configured, OR the call blew
+    up. That reads as a pass mark on text nobody checked."""
     text = (payload.text or "").strip()
     if not text:
-        return {"correction": ""}
+        return {"status": "empty", "correction": ""}
     cfg = _load_llm_conf()
     api_base = (cfg.get("api_base") or "").rstrip("/")
     api_key = cfg.get("api_key") or ""
     model = cfg.get("model") or ""
     if not api_base or not model:
-        return {"correction": ""}   # not configured → silently disabled, never blocks the user
+        # Not configured. Still a 200 (this is a background learning aid and must
+        # never block sending), but SAY so — silently answering "" here is what
+        # made the UI congratulate people on text that was never looked at.
+        return {"status": "disabled", "correction": ""}
     _trunc_rule = (
         "The message may contain a truncation marker like [..123 chars skipped..] (a long paste was cut to its "
         "head and tail). Keep the marker VERBATIM in place; check the fragment BEFORE it and the fragment AFTER it "
@@ -6275,25 +6283,27 @@ async def post_grammar(payload: GrammarPayload):
     try:
         data = json.loads(await asyncio.to_thread(_llm_http_post, url, headers, body, 30.0))
         out = (data["choices"][0]["message"]["content"] or "").strip()
-    except Exception:
-        return {"correction": ""}   # best-effort learning aid: never surface an error to the user
+    except Exception as e:
+        # Best-effort: don't fail the request, but don't pretend the text passed.
+        # Only the exception TYPE — the message can carry the endpoint/key.
+        return {"status": "error", "error": type(e).__name__, "correction": ""}
     if manual_cjk:
         # translate-only: the whole output is the English translation (native).
-        return {"correction": "", "native": out}
+        return {"status": "ok", "correction": "", "native": out}
     if payload.manual:
         # Two-version output: parse "CORRECTION: … NATIVE: …". Correction "OK" → empty.
         m = re.search(r"CORRECTION:\s*(.*?)\s*NATIVE:\s*(.*)", out, re.S | re.I)
         if not m:
-            return {"correction": out, "native": ""}
+            return {"status": "ok", "correction": out, "native": ""}
         corr = m.group(1).strip()
         native = m.group(2).strip()
         if corr.rstrip(".").upper() == "OK" or corr == llm_text:
             corr = ""
-        return {"correction": corr, "native": native}
+        return {"status": "ok", "correction": corr, "native": native}
     # "OK" sentinel, or the model echoed the input unchanged → nothing to learn
     if out.strip().rstrip(".") == "OK" or out == llm_text:
         out = ""
-    return {"correction": out}
+    return {"status": "ok", "correction": out}
 
 
 def _asr_configs() -> list[dict]:

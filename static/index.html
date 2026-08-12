@@ -18,7 +18,13 @@
        ignores SVG favicons. -->
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <link rel="icon" type="image/png" sizes="180x180" href="/static/icon-180.png" />
-  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+  <!-- Vendored, NOT from a CDN. renderMarkdown() falls back to the raw source if
+       marked is missing, so a blocked/offline jsdelivr silently turned every
+       message into `**asterisks**` and `## hashes` with no hint why. Same origin =
+       works offline, no third-party request, and the exact build that was tested.
+       (KaTeX is still lazy-loaded from a CDN — its webfonts are ~1MB — but that
+       only affects math, and a failure there now shows on the ∑ button.) -->
+  <script src="/static/vendor/marked.min.js"></script>
 <style>
 :root {
   --bg: #000;
@@ -2647,7 +2653,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     btn.textContent = "∑";
     btn.addEventListener("click", async (e) => {
       e.stopPropagation(); btn.disabled = true;
-      try { (await loadKatex())(mdEl, _katexOpts); mdEl.dataset.mathDone = "1"; } catch {}
+      try {
+        (await loadKatex())(mdEl, _katexOpts); mdEl.dataset.mathDone = "1";
+      } catch {
+        // KaTeX comes from a CDN (its webfonts are ~1MB). Offline or blocked, the
+        // click used to do nothing at all — keep the button and say why instead.
+        btn.disabled = false; btn.textContent = "∑!";
+        btn.title = "KaTeX could not be loaded (offline / CDN blocked) — tap to retry";
+        return;
+      }
       _vvEnable();   // math rendered → enable the iOS keyboard viewport fix (gap fix)
       btn.remove();
     });
@@ -2709,6 +2723,22 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   applyLatexAuto();
 
   const URL_RE = /(https?:\/\/[^\s<>"'）)\]]+)/g;
+  // One-time, visible complaint when the markdown renderer is absent. A missing
+  // vendored file is a deploy bug, and the old behaviour (render the source text)
+  // made it look like the server was sending garbage.
+  let _noMarkedWarned = false;
+  function _warnNoMarked() {
+    if (_noMarkedWarned) return;
+    _noMarkedWarned = true;
+    console.error("marked missing: /static/vendor/marked.min.js did not load");
+    const d = document.createElement("div");
+    d.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:9999;padding:6px 10px;"
+      + "background:#8a2f10;color:#fff;font:12px ui-monospace,Menlo,monospace;text-align:center";
+    d.textContent = "markdown renderer not loaded (/static/vendor/marked.min.js) "
+      + "— messages are shown as plain text";
+    d.addEventListener("click", () => d.remove());
+    (document.body || document.documentElement).appendChild(d);
+  }
   function renderMarkdown(text) {
     // Collapse newlines INSIDE display math $$…$$ before markdown: with
     // breaks:true, marked turns those newlines into <br>, splitting the $$…$$
@@ -2717,7 +2747,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // safe. Inline $…$ is single-line by construction, unaffected.
     let src = (text || "").replace(/\$\$[\s\S]*?\$\$/g, m => m.replace(/\s*\n\s*/g, " "));
     let html = "";
-    try { html = marked.parse(src); } catch { html = src; }
+    if (typeof marked === "undefined" || !marked || typeof marked.parse !== "function") {
+      // The renderer itself never loaded — i.e. static/vendor/marked.min.js is
+      // missing from this deploy. Say so ONCE and show the text escaped, instead
+      // of quietly serving raw markdown that looks like a broken app.
+      _warnNoMarked();
+      html = "<pre class='md-raw'>" + _escHtml(src) + "</pre>";
+    } else {
+      try { html = marked.parse(src); } catch { html = _escHtml(src); }
+    }
     const tmp = document.createElement("div");
     tmp.innerHTML = html;
     // Sanitize: marked passes raw HTML through, and transcript / peer-relayed
@@ -7162,9 +7200,24 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       r.appendChild(m); r.appendChild(l); r.appendChild(document.createTextNode(text));
       box.appendChild(r);
     };
-    if (res.correction) row("✎", "批改 ", res.correction);   // teacher's correction (lenient; English only)
-    if (res.native) row("🗣", "地道 ", res.native);           // native version (or the translation for Chinese)
-    if (!res.correction && !res.native) row("✓", "", "looks natural — no changes");
+    if (res.correction) row("✎", "fix ", res.correction);     // teacher's correction (lenient; English only)
+    if (res.native) row("🗣", "native ", res.native);          // native version (or the translation for Chinese)
+    if (!res.correction && !res.native) {
+      // NEVER imply a pass mark unless the LLM actually looked. An empty result
+      // used to render as "looks natural — no changes" whether the model approved
+      // the text, was never configured, or the call blew up — so a server with no
+      // api_base/model told you every sentence you wrote was perfect.
+      const st = res.status || "";
+      if (st === "disabled") {
+        row("⚠", "", "no LLM configured");
+      } else if (st === "error") {
+        row("⚠", "", "LLM call failed" + (res.error ? " (" + res.error + ")" : ""));
+      } else if (st === "ok") {
+        row("✓", "", "no mistakes found");                     // the model did look and found nothing
+      } else {
+        row("?", "", "no result");
+      }
+    }
     div.appendChild(box);
   }
   function makeCorrectBtn(div, text) {
@@ -7181,8 +7234,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ text: key, manual: true }), timeoutMs: 30000,
         });
-        let res = { correction: "", native: "" };
-        if (r.ok) { const j = await r.json(); res = { correction: (j.correction || "").trim(), native: (j.native || "").trim() }; }
+        // Carry `status` through — it's the only thing that says whether the text
+        // was actually checked. This whitelist used to drop it, so every result
+        // rendered as "? no result"; and an HTTP-level failure produced an empty
+        // object that looked identical to "nothing to fix".
+        let res;
+        if (r.ok) {
+          const j = await r.json();
+          res = { status: j.status || "", error: j.error || "",
+                  correction: (j.correction || "").trim(), native: (j.native || "").trim() };
+        } else {
+          res = { status: "error", error: "HTTP " + r.status, correction: "", native: "" };
+        }
         manualGrammarMap.set(key, res);
         _showManualCorrection(div, res);
       } catch {} finally { btn.textContent = prev; btn.disabled = false; }
@@ -8710,13 +8773,25 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const ctrl = new AbortController();
       _polAbort = ctrl; _polCtx = { raw, before }; _polSuperseded = false;
       const polTimeout = setTimeout(() => ctrl.abort(new DOMException("timeout", "AbortError")), 60000);
+      // A failed polish must NOT look like "the LLM decided your text was fine".
+      // /api/polish 503s when api_base/model are unset, and this used to swallow
+      // that (plus every other error) with `if (pr.ok)` + `catch {}`: the bar just
+      // closed leaving the raw dictation, indistinguishable from a successful
+      // no-op. Same lie the ✎ correction used to tell.
+      let failReason = "";
       try {
         const polT0 = Date.now();
         const pr = await authedFetch("/api/polish", { method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ text: raw, claude_session_id: attachedSid || "", mode: "asr" }), signal: ctrl.signal });
         lastPolishSec = ((Date.now() - polT0) / 1000).toFixed(1);
         if (pr.ok) { const d = await pr.json(); if (d && d.text) { lastPolished = d.text; if (inputEl.value === before + raw) { inputEl.value = before + d.text; inputEl.dispatchEvent(new Event("input")); } } }
-      } catch {}
+        else if (pr.status === 503) failReason = "not polished — no LLM configured";
+        else failReason = "not polished — HTTP " + pr.status;
+      } catch (e) {
+        // A user-initiated abort (Send/Edit/Cancel mid-flight) is handled below via
+        // _polSuperseded, so this is a real failure: our own 60s cap, or the network.
+        failReason = "not polished — " + (e && e.name === "AbortError" ? "timed out (60s)" : "request failed");
+      }
       finally {   // also on timeout/error — never leave the bar spinning
         clearTimeout(polTimeout);
         if (_polAbort === ctrl) _polAbort = null;
@@ -8725,6 +8800,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
       // Cancel/Send/Edit already finished the interaction — don't re-touch the UI.
       if (_polSuperseded) { _polSuperseded = false; return; }
+      // Park (don't hide): reason on screen, dictated text still there to Send/Edit.
+      if (failReason) { _voiceParkResult(raw, before, failReason); return; }
       _setMic("idle"); if (!isPhone()) inputEl.focus();
     },
     apply(raw, before, mode) {   // put text in the box, then act by mode (shared by realtime + batch)

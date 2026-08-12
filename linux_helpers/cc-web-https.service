@@ -1,0 +1,16 @@
+[Unit]
+Description=claude-code-web HTTPS (tmux bridge, TLS via tailscale cert)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/claude-code-web/cc-web-https-start.sh
+Restart=always
+# 15s, plus the script's own 60s sleep on every failure path. Between them a
+# hopeless respin (port taken, tailscale down, no cert) costs ~1 line/75s in the
+# journal instead of hammering.
+RestartSec=15
+
+[Install]
+WantedBy=default.target

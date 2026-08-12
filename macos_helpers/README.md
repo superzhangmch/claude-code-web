@@ -3,6 +3,30 @@
 Optional launchd glue for running `cc_web` on a Mac you walk away from
 (close the lid, leave home, browse from your phone).
 
+## Auto-starting cc_web itself
+
+| Files | Role |
+|---|---|
+| `cc-web-https-start.sh` + `com.zmc.cc-web-https.plist` | **Start here.** HTTPS on 8443 with a trusted tailscale cert, refreshed on every start. Voice input needs HTTPS. Edit `CERT_NAME` in the script. |
+| `cc-web-start.sh` + `com.zmc.cc-web.plist` | Plain HTTP on 8765. Fine for reading and typing, but the mic cannot record over `http://`. |
+
+**Install one, not both** — `cc_web` refuses to start a second instance (flock on
+`~/.claude/cc_web.lock`, exit code 3), because two of them share every stateful
+file under `~/.claude` and overwrite each other's summaries and bindings.
+
+Both scripts sleep 60s on every failure path and pre-check for an already-running
+instance, and the HTTPS plist sets `ThrottleInterval 30`. That is not
+belt-and-braces: `KeepAlive` restarts the job the instant it exits, so a hopeless
+respin (port taken, no cert, tailscale down) spins forever — it ran 5 days here
+once and wrote a 36 MB log. Restart with
+`launchctl kickstart -k gui/$(id -u)/<label>`; never `pkill` (the supervisor races
+you and respawns mid-start), and after editing a plist use `bootout` +
+`bootstrap` — `kickstart` does not re-read it.
+
+Linux equivalents: `../linux_helpers/`.
+
+## Keeping the Mac awake (the two jobs below)
+
 These are **not required** for claude-code-web to work — they just
 solve two macOS-specific annoyances when you want a headless Mac.
 

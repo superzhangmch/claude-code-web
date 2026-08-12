@@ -1,0 +1,88 @@
+#!/bin/bash
+# TEMPLATE — copy to deploy.sh (gitignored) and fill in your own hosts/paths.
+# Local deploy script — gitignored. Captures the actual hosts, paths,
+# and restart commands for THIS deployment so future code changes can
+# be pushed in one step: ./deploy.sh
+#
+# Edit this file when the bind IPs / project paths / SSH user change.
+
+set -e
+
+# --- hosts ---
+LOCAL_HOST=YOUR.LOCAL.TAILSCALE.IP                                # this Mac (Tailscale)
+LOCAL_PROJECT_DIR=/Users/YOUR_USERNAME/Desktop/my_code/claude-code-web
+
+REMOTE_SSH=YOUR_USERNAME@YOUR.REMOTE.TAILSCALE.IP               # the other Mac
+REMOTE_HOST=YOUR.REMOTE.TAILSCALE.IP
+REMOTE_PROJECT_DIR=/Users/YOUR_USERNAME/claude-code-web
+
+# Both Macs run HTTPS-only, under launchd. Keep it that way: a second cc_web on
+# one machine shares every file under ~/.claude and clobbers the first one's
+# bindings/summaries, so cc_web.py now refuses to start a second instance.
+REMOTE_SERVICE=com.zmc.cc-web-https
+REMOTE_PORT=8443
+REMOTE_URL=https://REMOTE-HOST.YOUR-TAILNET.ts.net:8443/
+
+# This Mac: the LaunchAgent serves $LOCAL_SERVED_DIR, which is NOT this git
+# checkout. They used to drift apart — the agent ran the served copy while this
+# script killed it and nohup'd an unmanaged uvicorn out of the checkout, on a
+# different port and with different code. Sync across, then let launchd own it.
+LOCAL_SERVED_DIR=/Users/YOUR_USERNAME/claude-code-web
+LOCAL_SERVICE=com.zmc.cc-web-https
+LOCAL_PORT=8443
+LOCAL_URL=https://LOCAL-HOST.YOUR-TAILNET.ts.net:8443/
+
+# Files that affect server behavior. Static assets included so PWA
+# installs see the new HTML on next reload.
+CODE_FILES=(
+  cc_web.py
+  iterm_bridge.py
+  jsonl_tail.py
+  static/index.html
+  static/manifest.webmanifest
+  static/icon-180.png
+  static/favicon.svg
+)
+
+# --- sync code to remote ---
+echo "[1/3] sync to $REMOTE_SSH ..."
+for f in "${CODE_FILES[@]}"; do
+  scp -q -o StrictHostKeyChecking=no "$LOCAL_PROJECT_DIR/$f" "$REMOTE_SSH:$REMOTE_PROJECT_DIR/$f"
+done
+
+# --- restart remote ---
+# Restart the launchd SERVICE, don't pkill + nohup a replacement. The old way
+# killed the managed process, launchd's KeepAlive respawned it anyway, and the
+# nohup'd one was left squatting a second port — two cc_web instances fighting
+# over ~/.claude, plus (when the port was already taken) a launchd respawn loop
+# that once ran 5 days and wrote a 36 MB log. `kickstart -k` also waits for the
+# old pid to exit before starting the new one, which cc_web's instance lock needs.
+echo "[2/3] restart remote (launchd $REMOTE_SERVICE) ..."
+# Verify by listening socket, not by pgrep: a `pgrep -f "uvicorn cc_web:app"`
+# sent over ssh matches the ssh command line itself and always "succeeds".
+ssh -o StrictHostKeyChecking=no "$REMOTE_SSH" \
+  "launchctl kickstart -k gui/\$(id -u)/$REMOTE_SERVICE || exit 1; \
+   for i in \$(seq 1 25); do \
+     lsof -nP -iTCP:$REMOTE_PORT -sTCP:LISTEN && exit 0; \
+     sleep 1; \
+   done; \
+   echo 'remote cc_web did not come up on $REMOTE_PORT' >&2; exit 1"
+
+# --- sync to the local SERVED copy, then restart the local service ---
+echo "[3/3] sync + restart local (launchd $LOCAL_SERVICE) ..."
+if [ "$LOCAL_SERVED_DIR" != "$LOCAL_PROJECT_DIR" ]; then
+  for f in "${CODE_FILES[@]}"; do
+    cp -p "$LOCAL_PROJECT_DIR/$f" "$LOCAL_SERVED_DIR/$f"
+  done
+fi
+# kickstart -k waits for the old pid to exit before starting the new one, which is
+# what cc_web's instance flock needs (a replacement started too early just refuses).
+launchctl kickstart -k "gui/$(id -u)/$LOCAL_SERVICE"
+for i in $(seq 1 25); do
+  if lsof -nP -iTCP:$LOCAL_PORT -sTCP:LISTEN >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+lsof -nP -iTCP:$LOCAL_PORT -sTCP:LISTEN \
+  || { echo "local cc_web did not come up on $LOCAL_PORT" >&2; exit 1; }
+
+echo "done. local: $LOCAL_URL   remote: $REMOTE_URL"
