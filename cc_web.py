@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import fcntl
 import hashlib
 import json
 import logging
@@ -26,6 +27,7 @@ import secrets
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time as _time
 import urllib.error
@@ -3250,8 +3252,61 @@ async def _api_error_watcher(interval_sec: float = 180.0) -> None:
                           b.claude_session_id[:8], e)
 
 
+# ---------- single-instance guard ----------
+# Two cc_web processes on one machine (say an HTTP one on 8765 next to an HTTPS
+# one on 8443) look harmless — different ports, no bind conflict — but they are
+# NOT independent: everything stateful lives in ~/.claude, so they fight over it.
+# Both run _summary_worker (double the LLM+embedding spend on the same sessions,
+# and since _summaries is loaded once at startup and saved as a FULL overwrite,
+# each save silently drops whatever the other one generated). Both persist their
+# own BindingTable to cc_web_bindings.json, so one's reaper wipes the other's
+# bindings and attached tabs revert to "Attach". Both auto-continue the same
+# API-erroring session. And both write the same fixed *.tmp paths, which really
+# does collide — seen in the wild as
+#   save summaries failed: [Errno 2] ... cc_web_summaries.json.tmp -> ...json
+# (one process's replace() consumed the tmp the other was about to rename).
+# So: one instance per machine, enforced here rather than by convention. flock is
+# the right primitive — the kernel releases it when the holder dies, so there is
+# no stale-pidfile case to reason about or clean up.
+INSTANCE_LOCK_FILE = Path.home() / ".claude" / "cc_web.lock"
+_instance_lock_fh = None      # module-global: closing the fd would release the lock
+
+
+def _acquire_instance_lock() -> None:
+    """Raise unless we're the only cc_web on this machine (uvicorn turns the
+    raise into 'Application startup failed' + a non-zero exit).
+
+    Set CC_WEB_ALLOW_MULTI=1 to opt out if you ever really want two — you then
+    own the state-clobbering described above.
+    """
+    global _instance_lock_fh
+    if os.environ.get("CC_WEB_ALLOW_MULTI") == "1":
+        log.warning("CC_WEB_ALLOW_MULTI=1 — single-instance guard disabled")
+        return
+    INSTANCE_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)   # first run on a fresh box
+    fh = open(INSTANCE_LOCK_FILE, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.seek(0)
+        holder = fh.read().strip() or "unknown"
+        fh.close()
+        log.error("another cc_web is already running (%s) — refusing to start a "
+                  "second instance; it would fight over ~/.claude/cc_web_*.json. "
+                  "Override with CC_WEB_ALLOW_MULTI=1.", holder)
+        raise RuntimeError(f"cc_web already running: {holder}")
+    fh.seek(0)
+    fh.truncate()
+    fh.write(f"pid={os.getpid()} argv={' '.join(sys.argv)}\n")
+    fh.flush()
+    _instance_lock_fh = fh        # deliberately never closed
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Before anything else: make sure we're the only instance. Doing this in
+    # lifespan (not at import) keeps `import cc_web` usable for tests/tooling.
+    _acquire_instance_lock()
     # Restore bindings saved before the last shutdown, keeping only those whose
     # claude pid is still alive (so an attached tab keeps showing "Enter" across
     # a cc_web restart instead of reverting to "Attach"). Filesystem-only, safe
