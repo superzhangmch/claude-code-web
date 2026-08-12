@@ -1228,6 +1228,11 @@ footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
 .asr-raw-box .asr-repolish { margin-top: 14px; }
 .asr-raw-box .asr-repolish h4 { color: var(--accent); }
 #mm-asr-sec .asr-opt .asr-model { color: var(--muted); font-size: 11px; }
+/* "not configured" note in place of the engine list — an unconfigured feature
+   should explain itself, not disappear. */
+#mm-asr-sec .asr-unset { color: var(--accent); font-size: 12px; padding: 3px 2px; line-height: 1.5; }
+#mm-asr-sec .asr-unset span { display: block; color: var(--muted); font-size: 11px; }
+#mm-asr-sec .asr-unset code { font-size: 11px; word-break: break-all; }
 footer.hidden { display: none; }
 /* mirror of Claude's bottom status bar — one line under the input, scrolls
    horizontally if too long; "N shell(s)/monitor(s)" tokens are clickable. */
@@ -2434,11 +2439,40 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const loginTokenInput = document.getElementById("login-token");
   const loginErr = document.getElementById("login-err");
 
-  function showLogin(err) {
+  function showLogin(err, why) {
     loginEl.classList.add("show");
+    // `why` is the server's 401 detail (shown instead of the generic "Invalid
+    // token" when the server itself is the misconfigured party).
+    loginErr.textContent = why || "Invalid token";
     loginErr.classList.toggle("show", !!err);
     loginTokenInput.value = "";
     setTimeout(() => loginTokenInput.focus(), 50);
+    _checkAuthConfigured();
+  }
+  // Ask up front — before anyone types — whether the server even has a usable
+  // token. With no `token=` in the conf it invents a random one at startup, so no
+  // input can EVER match: letting the user keep guessing is the login loop that
+  // wastes an afternoon. Refuse the form outright and name the file to edit.
+  let _authCfgChecked = false;
+  async function _checkAuthConfigured() {
+    if (_authCfgChecked) return;
+    _authCfgChecked = true;
+    try {
+      const r = await fetch("/api/auth-status", { cache: "no-store" });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (!d.ephemeral) return;
+      loginErr.textContent = d.hint || "server has no token configured";
+      loginErr.classList.add("show");
+      loginTokenInput.disabled = true;
+      loginTokenInput.placeholder = "login disabled — server has no token=";
+      const btn = loginForm.querySelector('button[type="submit"]');
+      if (btn) { btn.disabled = true; btn.textContent = "Fix the config first"; }
+      // "Paste the token printed by the server" contradicts this state — there is
+      // nothing worth pasting until the conf is fixed.
+      const p = loginForm.querySelector("p");
+      if (p) p.style.display = "none";
+    } catch {}
   }
   function hideLogin() { loginEl.classList.remove("show"); }
 
@@ -2455,20 +2489,26 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         signal: ctrl.signal,
       });
       clearTimeout(timer);
-      return resp.ok;
-    } catch { return false; }
+      // Keep the server's reason, not just ok/fail — showLogin() displays it. The
+      // one that matters: "server has no token= configured, nothing can match".
+      if (resp.ok) return { ok: true };
+      let why = "";
+      try { why = (await resp.json()).detail || ""; } catch {}
+      return { ok: false, why };
+    } catch { return { ok: false, why: "" }; }
   }
 
   loginForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const tok = loginTokenInput.value.trim();
     if (!tok) return;
-    if (await tryLogin(tok)) {
+    const res = await tryLogin(tok);
+    if (res.ok) {
       authToken = tok;
       localStorage.setItem(TOKEN_KEY, tok);
       hideLogin();
       start();
-    } else showLogin(true);
+    } else showLogin(true, res.why);
   });
 
   let traffic = { in_bytes: 0, out_bytes: 0 };
@@ -5580,16 +5620,31 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // tight; the chip already shows the tab-name). Desktop: "sid [tab-name]
   // session-name" (tab-name highlighted), overflow ellipsised. Click COPIES the
   // full session id either way.
+  // One source for "what is this session called", used by both the label and the
+  // click-to-copy line below, so the two can't drift apart.
+  function metaBits() {
+    const m = tabMeta.get(attachedSid) || {};
+    const ot = openTabs.find(t => t.sid === attachedSid) || {};
+    return { tn: stripTab(m.tabName || ot.tabName || ""),
+             sn: (m.sessName || ot.sessName || "").trim() };
+  }
+  // What the click copies. Shaped to be pasted straight into ANOTHER claude-code
+  // session (or the ask-peer skill): it carries the full id plus the host:port
+  // that session is reachable on — the id alone is useless to a peer that doesn't
+  // know which machine to look on.
+  function metaCopyText() {
+    const { tn } = metaBits();
+    return "session=" + attachedSid + " at " + location.host
+         + (tn ? ", with tab_name=" + tn : "");
+  }
   function setMeta() {
-    metaEl.title = attachedSid;        // full id always on hover
+    // Hover shows exactly what a click will put on the clipboard.
+    metaEl.title = attachedSid ? metaCopyText() + "\n(click to copy)" : "";
     const mob = window.matchMedia("(orientation: portrait)").matches
              || window.matchMedia("(max-width: 640px)").matches;
     if (!attachedSid) { metaEl.textContent = attachedShort || ""; return; }
     if (mob) { metaEl.textContent = attachedShort; return; }
-    const m = tabMeta.get(attachedSid) || {};
-    const ot = openTabs.find(t => t.sid === attachedSid) || {};
-    const tn = stripTab(m.tabName || ot.tabName || "");
-    const sn = (m.sessName || ot.sessName || "").trim();
+    const { tn, sn } = metaBits();
     metaEl.innerHTML = "";
     metaEl.appendChild(document.createTextNode(attachedShort));
     if (tn) { const e = document.createElement("span"); e.className = "mt-tab"; e.textContent = " [" + tn + "]"; metaEl.appendChild(e); }
@@ -5598,11 +5653,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   metaEl.style.cursor = "pointer";
   metaEl.addEventListener("click", async () => {
     if (!attachedSid) return;
+    const txt = metaCopyText();
     try {
-      await navigator.clipboard.writeText(attachedSid);
+      await navigator.clipboard.writeText(txt);
     } catch {
       const ta = document.createElement("textarea");   // http / no-clipboard-API fallback
-      ta.value = attachedSid; ta.style.position = "fixed"; ta.style.opacity = "0";
+      ta.value = txt; ta.style.position = "fixed"; ta.style.opacity = "0";
       document.body.appendChild(ta); ta.select();
       try { document.execCommand("copy"); } catch {}
       ta.remove();
@@ -8313,6 +8369,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (!sec) return;
     lab.style.display = "";
     sec.innerHTML = "";
+    // Nothing configured: say so. The mic button is hidden in that case, and
+    // silently hiding BOTH it and this section left no way to find out that voice
+    // input exists at all, let alone what to set. Name the exact keys + file.
+    if (!asrConfigs.length && !asrRtAvail) {
+      const p = document.createElement("div");
+      p.className = "asr-unset";
+      p.innerHTML = "not configured yet · 未配置<span>在 <code>~/.claude/cc_web.conf</code> 里加 "
+        + "<code>asr=</code>(批量) 或 <code>soniox=</code> / <code>openai_realtime=</code>(实时)，"
+        + "重启服务生效。录音还需要通过 HTTPS 打开本页(getUserMedia 要 secure context)。</span>";
+      sec.appendChild(p);
+      return;
+    }
     // 1) mode selector (only shown when a realtime engine exists)
     if (asrRtAvail) {
       const row = document.createElement("div"); row.className = "menu-row";
@@ -8355,7 +8423,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       realtimeEngines = cfgJson.realtime_engines || [];
       asrRtAvail = realtimeEngines.length > 0;
       if (!realtimeEngines.some(e => e.id === asrRtEngine)) asrRtEngine = (realtimeEngines[0] || {}).id || "";
-      if (!asrConfigs.length && !asrRtAvail) { micBtn.style.display = "none"; return; }
+      // No backend at all → the mic can't work, so keep it hidden, but still render
+      // the menu section so it explains itself instead of vanishing without trace.
+      if (!asrConfigs.length && !asrRtAvail) { micBtn.style.display = "none"; renderAsrMenu(); return; }
       if (asrConfigs.length && !asrConfigs.some(c => c.label === asrWhich)) asrWhich = asrConfigs[0].label;
       renderAsrMenu();
     } catch {}
