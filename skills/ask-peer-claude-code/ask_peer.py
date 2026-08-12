@@ -77,16 +77,72 @@ def _conf_name():
     return v
 
 
+def _ts_cli():
+    """The tailscale CLI. Includes the Linux locations — it used to look only in
+    the two Homebrew/macOS paths, so on Linux _local_ip() silently fell through to
+    127.0.0.1 and every lookup went to a host cc-web isn't even bound to."""
+    import shutil
+    p = shutil.which("tailscale")
+    if p:
+        return p
+    for c in ("/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale",
+              "/usr/bin/tailscale", "/usr/sbin/tailscale",
+              "/Applications/Tailscale.app/Contents/MacOS/Tailscale"):
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def _ts_status():
+    ts = _ts_cli()
+    if not ts:
+        return {}
+    try:
+        import subprocess
+        out = subprocess.run([ts, "status", "--json"], capture_output=True,
+                             text=True, timeout=6).stdout
+        return json.loads(out) if out else {}
+    except Exception:
+        return {}
+
+
 def _local_ip():
-    for ts in ("/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"):
-        if os.path.exists(ts):
-            try:
-                import subprocess
-                return subprocess.run([ts, "ip", "-4"], capture_output=True,
-                                      text=True, timeout=4).stdout.split()[0]
-            except Exception:
-                pass
+    ts = _ts_cli()
+    if ts:
+        try:
+            import subprocess
+            return subprocess.run([ts, "ip", "-4"], capture_output=True,
+                                  text=True, timeout=4).stdout.split()[0]
+        except Exception:
+            pass
     return "127.0.0.1"
+
+
+_IPISH = re.compile(r"^[\d.]+$|^[0-9a-fA-F:]+$")
+
+
+def _ts_name_for(ip):
+    """tailnet DNS name of a tailscale IP, or None. Needed because the TLS cert is
+    issued for the *.ts.net NAME — https://<ip>:8443 fails hostname verification."""
+    st = _ts_status()
+    nodes = [st.get("Self") or {}] + list((st.get("Peer") or {}).values())
+    for n in nodes:
+        if ip in (n.get("TailscaleIPs") or []):
+            return (n.get("DNSName") or "").rstrip(".") or None
+    return None
+
+
+def _bases(host):
+    """Base URLs to try for a host, best first. cc-web is HTTPS-only now (browser
+    mic capture needs a secure context), so :8443 comes first; plain :8765 is kept
+    as a fallback for any instance still on HTTP. For the https candidate a bare IP
+    is swapped for its tailnet DNS name so the cert validates."""
+    out = []
+    name = _ts_name_for(host) if _IPISH.match(host or "") else host
+    if name:
+        out.append(f"https://{name}:8443")
+    out.append(f"http://{host}:8765")
+    return out
 
 
 def _req(method, url, token, body=None, timeout=30):
@@ -112,15 +168,19 @@ _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
 def _resolve_to(base, token, to):
     """Expand a short/prefix/substring --to into the full session id by matching
     against the target host's LIVE claude tabs. Returns (full_id, note). If `to`
-    is already a full UUID, use it as-is. Unique substring match → resolve; zero
-    or multiple matches → (None, reason). cc-web needs the exact full id."""
-    if _UUID.match(to):
-        return to, None
+    is already a full UUID, verify it lives on THIS host. Unique substring match →
+    resolve; zero or multiple matches → (None, reason). cc-web needs the exact id."""
     try:
         tabs = _req("GET", f"{base}/api/tabs", token, timeout=20).get("tabs", [])
     except Exception as e:
         return None, f"could not list tabs to resolve '{to}': {e}"
     sids = [t.get("sid", "") for t in tabs if t.get("sid")]
+    if _UUID.match(to):
+        # A full id used to be accepted WITHOUT checking this host — so with
+        # auto-search the first candidate (local) always won and every later call
+        # came back 409 "session not bound" even when the session was on another
+        # machine. Verify, so the search can move on to the next host.
+        return (to, None) if to in sids else (None, f"session {to[:8]} not live on this host")
     hits = [s for s in sids if s.startswith(to)]   # prefer prefix (safer than substring)
     if not hits:
         hits = [s for s in sids if to in s]        # fall back to substring
@@ -281,21 +341,23 @@ def main():
     else:
         local = _local_ip()
         candidates = [local] + [h for h in _known_hosts() if h != local]
-    host = full = None
+    host = full = base = None
     tried = []
     for h in candidates:
-        f_id, rnote = _resolve_to(f"http://{h}:8765", token, a.to)
-        if f_id:
-            host, full = h, f_id
+        for b in _bases(h):           # https://<name>:8443 first, then http://<h>:8765
+            f_id, rnote = _resolve_to(b, token, a.to)
+            if f_id:
+                host, full, base = h, f_id, b
+                break
+            tried.append(f"{b}: {rnote}")
+        if full:
             break
-        tried.append(f"{h}: {rnote}")
     if full is None:
         print(json.dumps({"status": "error",
                           "note": "session not found on any known host — " + " | ".join(tried)},
                          ensure_ascii=False))
         return
     a.to = full
-    base = f"http://{host}:8765"
 
     # --screen: current TUI screen snapshot (read-only, non-intrusive). refresh=false
     # so we never send Ctrl+L to the peer's tab; delta defaults off so concurrent
