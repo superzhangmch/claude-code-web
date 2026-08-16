@@ -6498,33 +6498,123 @@ async def _soniox_bridge(ws: WebSocket, q):
     # gen-spark production defaults ["zh","en"]. Override via ?langs=zh,en,ja
     langs = [s.strip() for s in (q.get("langs") or "zh,en").split(",") if s.strip()]
     terms = _asr_terms(q.get("sid") or "")   # recent conversation → domain vocab (as Soniox context.terms)
-    # ping_interval=None: don't let the ws lib's ping-timeout kill a valid long/paused
-    # session (continuous audio keeps TCP alive). Retry the flaky handshake once.
+    stat = {"in_bytes": 0, "in_frames": 0, "msgs": 0, "who": ""}
+
+    # ---- read the browser from its FIRST frame, before the upstream exists ------
+    # This used to be the other way round: connect upstream (4 attempts ×
+    # open_timeout=20 + backoff ≈ 80s worst case), and only then start reading the
+    # browser — closing the browser socket if the handshake never succeeded. The
+    # client then rebuilt the socket up to 3 more times, paying that cost again each
+    # round: minutes of "connecting…" during which the phone captured nothing.
+    # Now one reader runs for the whole session and buffers while we connect, so the
+    # browser socket stays OPEN, the audio survives, and it is all flushed in order
+    # the moment Soniox answers. ping_interval=None so the lib's ping timeout can't
+    # kill a valid long/paused session (continuous audio keeps TCP alive).
     up = None
-    for _attempt in range(4):   # Soniox occasionally RSTs the handshake (shared dev key throttling) → ride it out
+    up_lock = asyncio.Lock()            # serialise config/warmup/flush against live frames
+    pre: list[bytes] = []               # audio captured before the upstream was ready
+    pre_bytes = 0
+    PRE_MAX = 90 * 24000 * 2            # ~90s of 24kHz PCM16 — same cap the browser uses
+    finish_pending = False              # user pressed stop while we were still connecting
+    client_gone = asyncio.Event()
+
+    async def _flush_pre():             # caller holds up_lock
+        nonlocal pre, pre_bytes
+        if not pre:
+            return
+        n = pre_bytes
+        for b in pre:
+            await up.send(b)
+        pre = []; pre_bytes = 0
+        log.info("asr-stream[soniox]: flushed %dB captured while connecting", n)
+
+    async def client_reader():
+        nonlocal pre_bytes, finish_pending
         try:
-            up = await _wslib.connect(sx["base"], max_size=None, ping_interval=None, open_timeout=20)
-            break
+            while True:
+                data = await ws.receive()
+                if data.get("type") == "websocket.disconnect":
+                    stat["who"] = stat["who"] or "client-disconnect"
+                    client_gone.set(); return
+                b = data.get("bytes")
+                if b is not None:
+                    stat["in_bytes"] += len(b); stat["in_frames"] += 1
+                    if up is None:
+                        if pre_bytes + len(b) <= PRE_MAX:
+                            pre.append(b); pre_bytes += len(b)
+                        elif not stat.get("pre_full"):
+                            stat["pre_full"] = True
+                            log.info("asr-stream[soniox]: pre-connect buffer full at %dB — dropping "
+                                     "further audio (the browser keeps the full local recording "
+                                     "and falls back to batch)", pre_bytes)
+                        continue
+                    async with up_lock:
+                        await _flush_pre()
+                        await up.send(b)
+                elif data.get("text"):      # any text frame = FINISH
+                    if up is None:
+                        finish_pending = True
+                        continue
+                    async with up_lock:
+                        await _flush_pre()
+                        await up.send("")
         except Exception as e:
-            _last = e; log.info("asr-stream[soniox]: connect attempt %d failed: %s", _attempt + 1, repr(e)[:150])
-            await asyncio.sleep(0.4 * (_attempt + 1))   # small backoff between attempts
+            stat["who"] = stat["who"] or ("client:" + type(e).__name__)
+            client_gone.set()
+
+    reader = asyncio.create_task(client_reader())
+
+    # Short per-attempt timeout, more attempts, bounded total: a stuck handshake now
+    # costs seconds instead of 20s each. The browser is TOLD what is happening
+    # (it ignores message types it doesn't know) rather than being disconnected.
+    _last = None
+    _deadline = _time.monotonic() + 30.0
+    attempt = 0
+    while up is None and not client_gone.is_set() and _time.monotonic() < _deadline:
+        attempt += 1
+        try:
+            up = await _wslib.connect(sx["base"], max_size=None, ping_interval=None, open_timeout=8)
+        except Exception as e:
+            _last = e
+            log.info("asr-stream[soniox]: connect attempt %d failed: %s", attempt, repr(e)[:150])
+            try:
+                await ws.send_text(json.dumps({"type": "status", "state": "upstream-connecting",
+                                               "attempt": attempt, "buffered_bytes": pre_bytes}))
+            except Exception:
+                pass
+            await asyncio.sleep(min(1.5, 0.3 * attempt))
     if up is None:
-        try: await ws.send_text(json.dumps({"type": "error", "error": "soniox: " + str(_last)[:200]}))
+        reader.cancel()
+        why = "client gone" if client_gone.is_set() else (str(_last)[:200] if _last else "timeout")
+        try: await ws.send_text(json.dumps({"type": "error", "error": "soniox: " + why}))
         except Exception: pass
         await ws.close(); return
+
     conf = {"api_key": sx["key"], "model": model, "audio_format": "pcm_s16le",
             "sample_rate": rate, "num_channels": 1, "language_hints": langs}
     if terms:
         # Soniox context is a STRUCTURED object — terms[] is the domain-vocabulary slot
         # (soniox.com/docs/stt/concepts/context). A plain string would be ignored.
         conf["context"] = {"terms": terms}
+    _buffered = pre_bytes
     try:
-        await up.send(json.dumps(conf))
-        await up.send(b"\x00\x00" * int(rate))   # ~1s warmup silence (Soniox discards first ~700ms) → protects your first word
+        async with up_lock:
+            await up.send(json.dumps(conf))
+            await up.send(b"\x00\x00" * int(rate))   # ~1s warmup silence (Soniox discards first ~700ms) → protects your first word
+            await _flush_pre()                        # then everything said while connecting, in order
+            if finish_pending:
+                await up.send("")                     # they already pressed stop
     except Exception as e:
         log.info("asr-stream[soniox]: config send failed: %s", e)
-    log.info("asr-stream[soniox]: connected model=%s rate=%d langs=%s terms=%d", model, rate, langs, len(terms))
-    stat = {"in_bytes": 0, "in_frames": 0, "msgs": 0, "who": ""}
+    log.info("asr-stream[soniox]: connected model=%s rate=%d langs=%s terms=%d attempts=%d buffered=%dB",
+                model, rate, langs, len(terms), attempt, _buffered)
+    # Tell the browser the upstream is live, so its status line can move from
+    # "connecting…" to "listening…" instead of sitting on a stale message until the
+    # first token happens to arrive.
+    try:
+        await ws.send_text(json.dumps({"type": "status", "state": "upstream-ready"}))
+    except Exception:
+        pass
 
     async def up_to_client():   # Soniox token JSON → browser verbatim (client parses is_final)
         try:
@@ -6542,27 +6632,13 @@ async def _soniox_bridge(ws: WebSocket, q):
         log.info("asr-stream[soniox]: upstream ended: %s (msgs=%d in=%dB/%dframes)",
                     stat["who"] or "clean", stat["msgs"], stat["in_bytes"], stat["in_frames"])
 
-    async def client_to_up():   # browser RAW PCM binary → Soniox as-is; any text frame = FINISH
-        try:
-            while True:
-                data = await ws.receive()
-                if data.get("type") == "websocket.disconnect":
-                    stat["who"] = stat["who"] or "client-disconnect"; break
-                b = data.get("bytes")
-                if b is not None:
-                    stat["in_bytes"] += len(b); stat["in_frames"] += 1
-                    await up.send(b)
-                elif data.get("text"):
-                    await up.send("")   # empty frame = FINISH → Soniox drains + sends finished
-        except Exception as e:
-            stat["who"] = stat["who"] or ("client:" + type(e).__name__)
-
+    # (the browser→Soniox direction is client_reader above — it has been running
+    # since before the upstream connected, which is the whole point.)
     t1 = asyncio.create_task(up_to_client())
-    t2 = asyncio.create_task(client_to_up())
     try:
-        await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait({t1, reader}, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        for t in (t1, t2):
+        for t in (t1, reader):
             t.cancel()
         try: await up.close()
         except Exception: pass
@@ -6610,10 +6686,13 @@ async def asr_stream(ws: WebSocket):
     base = rt["base"]
     url = base + ("&" if "?" in base else "?") + "intent=transcription"
     up = None
-    for _attempt in range(2):   # OpenAI WS connect is occasionally flaky → one quick retry
+    # 8s, not 20s: a stuck handshake should cost seconds. (The soniox path above also
+    # keeps the browser socket open and buffers audio meanwhile; this one still closes
+    # on failure, and the client then falls back to the batch engine.)
+    for _attempt in range(3):   # OpenAI WS connect is occasionally flaky → quick retries
         try:
             up = await _wslib.connect(url, additional_headers={"Authorization": "Bearer " + rt["key"]},
-                                      max_size=None, ping_interval=None, open_timeout=20)
+                                      max_size=None, ping_interval=None, open_timeout=8)
             break
         except Exception as e:
             _last = e; log.info("asr-stream: upstream connect attempt %d failed: %s", _attempt + 1, repr(e)[:150])
