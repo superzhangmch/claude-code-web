@@ -1182,7 +1182,14 @@ footer .rec-bar.rec-polishing .rec-spin-time { display: inline-block; }
 footer .rec-bar.rec-polishing .rec-time { color: var(--accent); }
 @keyframes rec-spin { to { transform: rotate(360deg); } }
 @keyframes rec-wave { 0%,100% { height: 25%; } 50% { height: 90%; } }
-footer .rec-bar .rec-stop, footer .rec-bar .rec-cancel, footer .rec-bar .rec-send, footer .rec-bar .rec-edit {
+/* Send is disabled until there is something to send (see Voice.start / render). */
+footer .rec-bar .rec-send:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
+/* Icon-only controls: square-ish and narrow so five buttons fit one phone row. */
+footer .rec-bar .rec-ico { min-width: 30px; padding: 4px 6px; font-size: 14px; line-height: 1; }
+/* Paused: the blinking red dot means "capturing", so make it plainly not that. */
+footer .rec-bar.rec-paused .rec-dot { background: #8a8a8a; animation: none; }
+footer .rec-bar.rec-paused .rec-time { color: var(--muted); }
+footer .rec-bar .rec-stop, footer .rec-bar .rec-cancel, footer .rec-bar .rec-pause, footer .rec-bar .rec-send, footer .rec-bar .rec-edit {
   flex-shrink: 0; background: var(--panel); color: var(--text);
   border: 1px solid var(--border); border-radius: 7px;
   font-size: 12px; padding: 4px 9px; cursor: pointer;
@@ -2358,7 +2365,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <span id="rec-time" class="rec-time">0:00</span>
         <div class="rec-wave"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
         <div id="rec-live" class="rec-live" style="display:none"></div>
-        <button id="rec-cancel" class="rec-cancel">Cancel</button>
+        <!-- Cancel + pause are icons so all five controls still fit ONE row on a
+             phone (~308px of usable width there); Polish/Edit/Send keep words
+             because those are the decisions worth reading. title= for desktop. -->
+        <button id="rec-cancel" class="rec-cancel rec-ico" title="Cancel — discard" aria-label="Cancel">✕</button>
+        <button id="rec-pause" class="rec-pause rec-ico" style="display:none" title="Stop recording (keep the result)" aria-label="Stop recording">⏸</button>
         <button id="rec-stop" class="rec-stop">Polish</button>
         <button id="rec-edit" class="rec-edit" style="display:none">Edit</button>
         <button id="rec-send" class="rec-send" style="display:none">Send</button>
@@ -8540,6 +8551,36 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
   }
   const recCancelEl = document.getElementById("rec-cancel");
+  const recPauseEl = document.getElementById("rec-pause");
+  // The transcript area doubles as a STATUS line until real text arrives. It used to
+  // be blanked by ws.onopen (which fires in milliseconds, long before the upstream
+  // ASR is up) and by every token-less message, so the whole connect window showed
+  // nothing at all and then text appeared out of nowhere.
+  let _recStatusHtml = "";
+  function _recLiveStatus(msg) {
+    _recStatusHtml = "<span class='rec-live-hint'><span class='rec-spin'></span>" + _escHtml(msg) + "</span>";
+    if (recLiveEl) { recLiveEl.style.display = ""; recLiveEl.innerHTML = _recStatusHtml; }
+  }
+  function _recClearStatus() { _recStatusHtml = ""; }
+
+  // Pause/resume for a realtime recording: stop capturing without ENDING the
+  // session, so you can catch your breath, or read what came back before choosing
+  // between Polish / Edit / Send. Everything else on the bar keeps working.
+  function _syncPauseBtn() {
+    const on = !!(Voice.s && Voice.s.paused);
+    recBar.classList.toggle("rec-paused", on);
+    if (!recPauseEl) return;
+    recPauseEl.textContent = on ? "▶" : "⏸";
+    recPauseEl.title = on ? "Resume recording" : "Stop recording (keep the result)";
+    recPauseEl.setAttribute("aria-label", on ? "Resume recording" : "Stop recording");
+  }
+  function _recTimerPause() { if (_recTimer) { clearInterval(_recTimer); _recTimer = null; } }
+  function _recTimerResume(gapMs) {
+    // Shift the origin so the elapsed display counts CAPTURED time, not wall time.
+    _recStartMs += gapMs;
+    clearInterval(_recTimer);
+    _recTimer = setInterval(() => { recTimeEl.textContent = _fmtDur(Date.now() - _recStartMs); }, 250);
+  }
   function _showRecBar() {
     _batchResult = null;   // starting a fresh recording → drop any pending step-2 result
     _polishAbort();     // a fresh recording supersedes any polish still in flight
@@ -8553,7 +8594,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // Batch phase 1 = just Cancel + Stop (record blind → transcribe → then choose an action).
     // Realtime (Voice.start) overrides this to show Polish / Edit / Send with the live transcript.
     [recCancelEl, recStopEl].forEach(b => b && (b.style.display = ""));
-    [recEditEl, recSendEl].forEach(b => b && (b.style.display = "none"));
+    [recEditEl, recSendEl, recPauseEl].forEach(b => b && (b.style.display = "none"));
+    recBar.classList.remove("rec-paused");   // a fresh recording never inherits ⏸
     if (recStopEl) recStopEl.textContent = "Stop";
     clearInterval(_recTimer);
     _recTimer = setInterval(() => { recTimeEl.textContent = _fmtDur(Date.now() - _recStartMs); }, 250);
@@ -8563,7 +8605,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     recBar.style.display = "flex"; recBar.classList.add("rec-live-on");
     if (recWaveEl) recWaveEl.style.display = "none";
     [recCancelEl, recStopEl, recEditEl, recSendEl].forEach(b => b && (b.style.display = ""));   // Cancel + Polish/Edit/Send
+    if (recPauseEl) recPauseEl.style.display = "none";   // recording is over — nothing to pause
+    recBar.classList.remove("rec-paused");
+    _recClearStatus();
     if (recStopEl) recStopEl.textContent = "Polish";
+    // A batch result IS a transcript, so Send is meaningful again (it is disabled
+    // while a realtime recording has produced nothing yet).
+    if (recSendEl) { recSendEl.disabled = !text; recSendEl.title = text ? "submit this text as-is (no polish)" : "nothing to send"; }
     if (recLiveEl) { recLiveEl.style.display = ""; recLiveEl.textContent = text; }
     clearInterval(_recTimer); _recTimer = null;
     micBtn.classList.remove("busy"); micBtn.disabled = false;   // keep the popup up but re-enable the mic
@@ -8581,7 +8629,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     recBar.style.display = "flex"; recBar.classList.add("rec-live-on");
     if (recWaveEl) recWaveEl.style.display = "none";
     [recCancelEl, recStopEl, recEditEl, recSendEl].forEach(b => b && (b.style.display = ""));
+    if (recPauseEl) recPauseEl.style.display = "none";   // recording is over — nothing to pause
+    recBar.classList.remove("rec-paused");
+    _recClearStatus();
     if (recStopEl) recStopEl.textContent = "Polish";
+    // Send was disabled during recording (nothing to submit yet) — re-enable it here
+    // only if this state actually carries text.
+    if (recSendEl) { recSendEl.disabled = !raw; recSendEl.title = raw ? "submit this text as-is (no polish)" : "nothing to send"; }
     if (recLiveEl) {
       recLiveEl.style.display = "";
       recLiveEl.innerHTML = "<span class='rec-live-err'>⚠ " + _escHtml(reason || "录音已结束") + "</span>"
@@ -8602,12 +8656,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   function _recBarBusy(msg) {   // loading state in the popup (batch transcription / processing) — mic stays 🎤
     recBar.style.display = "flex"; recBar.classList.add("rec-live-on");
     if (recWaveEl) recWaveEl.style.display = "none";
-    [recCancelEl, recStopEl, recEditEl, recSendEl].forEach(b => b && (b.style.display = "none"));
+    [recCancelEl, recStopEl, recEditEl, recSendEl, recPauseEl].forEach(b => b && (b.style.display = "none"));
     if (recLiveEl) { recLiveEl.style.display = ""; recLiveEl.innerHTML = "<span class='rec-live-hint'><span class='rec-spin'></span>" + msg + "</span>"; }
     clearInterval(_recTimer); _recTimer = null;
   }
   function _hideRecBar() {
     clearInterval(_recTimer); _recTimer = null;
+    _recPolishStop();          // the "finishing"/"Polish" counter must not outlive the bar
+    _recClearStatus();
     recBar.style.display = "none";
   }
   // Done recording (Polish/Edit/Send/Stop → processing): stop counting seconds
@@ -8627,6 +8683,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   recEditEl.addEventListener("click", (e) => { e.stopPropagation(); _voiceStop("edit"); });   // raw → input box (edit yourself)
   recSendEl.addEventListener("click", (e) => { e.stopPropagation(); _voiceStop("send"); });   // submit directly (no polish)
   recCancelEl.addEventListener("click", (e) => { e.stopPropagation(); _voiceCancel(); });
+  if (recPauseEl) recPauseEl.addEventListener("click", (e) => { e.stopPropagation(); Voice.togglePause(); });
 
   function _setMic(state) {   // "idle" | "rec" | "busy" — mic icon stays 🎤; all state shows in the rec-bar popup
     micBtn.classList.toggle("recording", state === "rec");
@@ -8689,9 +8746,21 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     render() {
       const s = Voice.s; if (!s) return;
       const full = (s.finalText + s.partial).trim();
+      // First actual transcript → Send becomes meaningful (see start()).
+      if (recSendEl && full && recSendEl.disabled) {
+        recSendEl.disabled = false;
+        recSendEl.title = "submit this text as-is (no polish)";
+      }
       if (recLiveEl) {
-        if (full) { recLiveEl.innerHTML = _escHtml(s.finalText) + "<span class='rec-live-partial'>" + _escHtml(s.partial) + "</span>"; recLiveEl.scrollTop = recLiveEl.scrollHeight; }
-        else { recLiveEl.textContent = ""; }   // no transcript yet → the wave (row 1) shows we're listening
+        if (full) {
+          _recStatusHtml = "";   // real text wins from here on
+          recLiveEl.innerHTML = _escHtml(s.finalText) + "<span class='rec-live-partial'>" + _escHtml(s.partial) + "</span>";
+          recLiveEl.scrollTop = recLiveEl.scrollHeight;
+        } else if (_recStatusHtml) {
+          recLiveEl.innerHTML = _recStatusHtml;   // keep the status; a token-less frame must not blank it
+        } else {
+          recLiveEl.textContent = "";
+        }
       }
       inputEl.value = s.before + full; inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
     },
@@ -8706,18 +8775,117 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       try { s.ws && s.ws.readyState <= 1 && s.ws.close(); } catch {}
       clearTimeout(s._finTimer);
     },
-    teardownStream() {   // close ONLY the WS + audio nodes (keep stream + recorder + session, for reconnect)
+    teardownStream() {   // close ONLY the WS — capture keeps running and buffering
+      // The audio graph used to be torn down here too, because it was BUILT inside
+      // ws.onopen. It now outlives every reconnect: a retry must not stop the mic,
+      // or whatever you say during the retry is lost for good.
       const s = Voice.s; if (!s) return;
-      try { s.sp && (s.sp.onaudioprocess = null, s.sp.disconnect()); } catch {}
-      try { s.src && s.src.disconnect(); } catch {}
-      try { s.mute && s.mute.disconnect(); } catch {}
-      try { s.ac && s.ac.close(); } catch {}
       try { if (s.ws && s.ws.readyState <= 1) { s.ws.onclose = null; s.ws.close(); } } catch {}
-      s.ac = null; s.sp = null; s.src = null; s.mute = null; s.ws = null; s.opened = false;
+      s.ws = null; s.opened = false;
+    },
+    // Mic → PCM16, running from the moment you tap 🎤, independent of the ASR
+    // connection. Anything captured before the WS is up goes into s.pending and is
+    // flushed, in order, the instant it opens.
+    //
+    // Why: this graph used to be created in ws.onopen, so NOTHING was captured until
+    // the socket was up. The server accepts instantly but then connects UPSTREAM with
+    // open_timeout=20 × 2 attempts and closes us on failure, which triggers up to 3
+    // client retries — so "connecting…" can last minutes with the mic not even
+    // running. The local MediaRecorder did have the audio, but it is only consulted
+    // when a stream DROPS, never when the first connect is slow, so that speech
+    // silently never reached the transcript.
+    startCapture() {
+      const s = Voice.s; if (!s || s.ac) return;
+      const PEND_MAX_BYTES = 90 * 24000 * 2;   // ~90s of 24kHz mono PCM16 (~4.3MB)
+      const MAX_MS = 300000;                   // 5-min absolute safety cap (the only auto-stop)
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        const ac = new AC();   // hardware rate (iOS ignores/breaks a forced 24k) → downsample in JS
+        s.ac = ac;
+        s.startMs = Date.now();              // cap measured from real capture start
+        try { ac.resume(); } catch {}        // iOS: context may start suspended
+        const src = ac.createMediaStreamSource(s.stream); s.src = src;
+        const sp = ac.createScriptProcessor(4096, 1, 1); s.sp = sp;
+        const mute = ac.createGain(); mute.gain.value = 0; s.mute = mute;   // silent sink → no mic feedback
+        sp.onaudioprocess = (ev) => {
+          const st = Voice.s; if (!st || st.stopping) return;
+          if (st.paused) return;   // ⏸ — drop the frame entirely: don't send, don't buffer
+          if (Date.now() - st.startMs > MAX_MS) {
+            console.log("asr-rt: 5min hard cap → auto-stop");
+            _voiceParkReason = "已录满 5 分钟上限 — 已自动停止，下面是识别结果";
+            Voice.stop("park");
+            return;
+          }
+          let buf;
+          try { buf = _f32ToPcm16(_downTo24k(ev.inputBuffer.getChannelData(0), ac.sampleRate)).buffer; }
+          catch { return; }
+          const w = st.ws;
+          if (w && w.readyState === 1) { Voice.flushPending(w); try { w.send(buf); } catch {} return; }
+          st.pendBytes = (st.pendBytes || 0) + buf.byteLength;
+          if (st.pendBytes <= PEND_MAX_BYTES) { st.pending.push(buf); return; }
+          // Past the cap: stop growing, and mark the session so Stop recovers the FULL
+          // audio via the batch /api/asr path instead of shipping a holed transcript.
+          if (!st.dropped) {
+            st.dropped = true;
+            console.warn("asr-rt: >90s buffered with no connection → batch fallback on stop");
+            if (recLiveEl) recLiveEl.innerHTML = "<span class='rec-live-hint'><span class='rec-spin'></span>"
+              + "recording — ASR unreachable, will transcribe the whole clip on stop</span>";
+          }
+        };
+        src.connect(sp); sp.connect(mute); mute.connect(ac.destination);
+      } catch (err) {
+        Voice.fail("音频采集失败: " + (err && err.name ? err.name : err));
+      }
+    },
+    // Pause = stop feeding the ASR, keep the session. The WS stays open so resuming
+    // is instant; the local recorder is paused too, so the batch fallback transcribes
+    // only what you actually said (no long silent gap). If a long pause makes the
+    // upstream time out, streamDrop marks the session and Stop recovers via batch.
+    togglePause() {
+      const s = Voice.s; if (!s || s.stopping) return;
+      s.paused = !s.paused;
+      if (s.paused) {
+        s.pausedAt = Date.now();
+        // Deliberately does NOT send anything more (no silence padding, no keepalive):
+        // pausing means "stop feeding it audio". Making the already-received words show
+        // up in full is handled by the sticky-partial rule in onmessage instead.
+        try { if (s.ws && s.ws.readyState === 1) Voice.flushPending(s.ws); } catch {}
+        try { if (s.mr && s.mr.state === "recording") s.mr.pause(); } catch {}
+        if (recWaveEl) recWaveEl.style.display = "none";   // the wave means "listening"
+        _recTimerPause();
+      } else {
+        const gap = Date.now() - (s.pausedAt || Date.now());
+        s.startMs += gap;        // the 5-min cap measures captured audio, not wall clock
+        s.pausedAt = 0;
+        try { if (s.mr && s.mr.state === "paused") s.mr.resume(); } catch {}
+        if (recWaveEl) recWaveEl.style.display = "";
+        _recTimerResume(gap);
+      }
+      _syncPauseBtn();
+    },
+    // Called on every message that carries new text while we're stopping: push the
+    // finalize a bit further out, but never past _finDeadline.
+    bumpFinalize() {
+      const s = Voice.s; if (!s || !s.stopping) return;
+      if (!s._finDeadline) s._finDeadline = Date.now() + 8000;
+      const left = s._finDeadline - Date.now();
+      clearTimeout(s._finTimer);
+      if (left <= 0) { Voice.finalize(); return; }
+      s._finTimer = setTimeout(() => Voice.finalize(), Math.min(1200, left));
+    },
+    flushPending(w) {
+      const s = Voice.s; if (!s || !s.pending || !s.pending.length) return;
+      for (const b of s.pending) { try { w.send(b); } catch {} }
+      s.pending = []; s.pendBytes = 0;
     },
     cancel() {   // discard — no transcription
-      if (!Voice.s) return;
-      _recording = false; Voice.teardown(); Voice.s = null; _setMic("idle");
+      const s = Voice.s; if (!s) return;
+      // render() has been writing the live transcript straight into the input box, so
+      // "discard" has to put the box back the way it was — the batch path already did
+      // this, the realtime path silently kept the text.
+      _recording = false; Voice.teardown(); Voice.s = null;
+      inputEl.value = s.before; inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
+      _setMic("idle");
     },
     // Abnormal end (stream dead, audio capture blew up, mic taken away by the OS).
     // Releases the hardware but does NOT hide the popup: it parks with the reason
@@ -8738,7 +8906,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (!s.gotAny && (s.retries || 0) < 3) {
         s.retries = (s.retries || 0) + 1;
         console.warn("asr-rt early drop (" + (msg || "") + ") → retry #" + s.retries);
-        if (recLiveEl) recLiveEl.innerHTML = "<span class='rec-live-hint'><span class='rec-spin'></span>连接中…</span>";
+        // Say that recording continues — it does now, and the audio captured during
+        // these retries is buffered and sent once a connection sticks.
+        _recLiveStatus("recording — reconnecting ASR (" + s.retries + "/3)…");
         Voice.teardownStream();
         setTimeout(() => { if (Voice.s && !Voice.s.stopping) Voice.openStream(); }, 400 * s.retries);
         return;
@@ -8746,7 +8916,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (s.mr && s.mr.state === "recording") {
         s.dropped = true;
         if (recLiveEl) recLiveEl.innerHTML = _escHtml((s.finalText + s.partial).trim())
-          + "<span class='rec-live-partial'>  ⚠ live error → batch on Stop</span>";
+          + "<span class='rec-live-partial'>  ⚠ realtime ASR dropped — still recording; "
+          + "the whole clip gets transcribed when you stop</span>";
         return;
       }
       // Nothing transcribed, retries spent, and no local recording to fall back on.
@@ -8758,9 +8929,25 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     stop(mode) {   // the finish action. mode: "polish" (default) | "edit" (raw→box) | "send" (raw→submit)
       const s = Voice.s; if (!s || s.stopping) return;
       s.stopping = true; s.mode = mode || "polish"; _recording = false; _setMic("busy");
+      s.paused = false; recBar.classList.remove("rec-paused");
+      // Immediate, visible acknowledgement of the tap. Draining the provider's tail
+      // can take a few seconds (see _finDeadline), and with the wave hidden and the
+      // clock frozen there was NOTHING on screen saying the click had registered.
+      // Reuses the polish spinner in the time slot, so the transcript below keeps
+      // streaming in undisturbed.
+      _recPolishStart("finishing");
+      // Ship anything still buffered BEFORE telling the provider we're finished,
+      // or the tail of what you said would be dropped on the floor.
+      try { if (s.ws && s.ws.readyState === 1) Voice.flushPending(s.ws); } catch {}
       try { s.sp && (s.sp.onaudioprocess = null); } catch {}   // stop appending audio
       try { s.ws && s.ws.readyState === 1 && s.ws.send(JSON.stringify({ type: s.provider === "soniox" ? "finish" : "input_audio_buffer.commit" })); } catch {}
       try { s.mr && s.mr.state !== "inactive" && s.mr.stop(); } catch {}   // finalize the full local recording
+      // Streaming text lags the audio, so the provider is still draining the tail of
+      // your last sentence when you press Polish/Edit/Send. A FIXED 2.5s timer used to
+      // fire mid-drain: finalize() nulls Voice.s, every later token was dropped by
+      // onmessage, and the box got a HALF sentence. Now the wait extends as long as
+      // text keeps arriving (bumpFinalize), bounded by an absolute deadline.
+      s._finDeadline = Date.now() + 8000;
       s._finTimer = setTimeout(() => Voice.finalize(), s.dropped ? 400 : 2500);
     },
     async polish(raw, before) {   // shared polish step (same endpoint + gating as batch)
@@ -8826,19 +9013,37 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       s._finalizing = true; clearTimeout(s._finTimer);
       const before = s.before, mode = s.mode || "polish";
       let raw = (s.finalText + s.partial).trim();
-      if (s.dropped && s.mr) {   // stream broke mid-way → recover full text from the local recording (non-streaming ASR)
+      // Fall back to the batch engine whenever the realtime path produced nothing —
+      // not just when it DROPPED. Stopping during the connect/retry cycle used to
+      // land here with raw === "" and dropped === false, so apply("") closed the bar
+      // and the local recording (which has every word) was thrown away. The batch
+      // call honours the ⚙-selected batch model via ?which=, so picking a different
+      // one there changes what this fallback uses.
+      if (!raw && s.mr) s.dropped = true;
+      if (s.dropped && s.mr) {
         _setMic("busy");
-        if (recLiveEl) recLiveEl.innerHTML = "<span class='rec-live-hint'><span class='rec-spin'></span>整段识别中…</span>";
+        // Say what is happening AND why: this step can take a few seconds, and an
+        // unexplained pause here reads as "it broke" or "everything I said is lost".
+        const _eng = asrWhich ? " with " + asrWhich : "";
+        _recLiveStatus((raw ? "realtime stream dropped — re-transcribing the whole clip"
+                            : "no realtime result — transcribing the whole recording")
+                       + _eng + "…");
         try { await s.mrDone; } catch {}
         const blob = new Blob(s.chunks || [], { type: (s.mr && s.mr.mimeType) || "audio/webm" });
         Voice.teardown(); Voice.s = null;
+        let why = "";
         if (blob.size) {
           try {
             const qs = new URLSearchParams(); if (asrWhich) qs.set("which", asrWhich); if (attachedSid) qs.set("sid", attachedSid);
             const ar = await authedFetch("/api/asr?" + qs.toString(), { method: "POST", headers: { "content-type": blob.type || "audio/webm" }, body: blob, timeoutMs: 60000 });
             if (ar.ok) { const d = await ar.json(); if (d && d.text) raw = d.text.trim(); }
-          } catch {}
-        }
+            else why = "batch transcription failed — HTTP " + ar.status;
+          } catch (e) {
+            why = "batch transcription failed — " + (e && e.name === "AbortError" ? "timed out (60s)" : "request failed");
+          }
+        } else why = "nothing was recorded";
+        // Don't close on empty: park with the reason, like every other dead end.
+        if (!raw) { _voiceParkResult("", before, why || "no speech recognised"); return; }
         await Voice.apply(raw, before, mode); return;
       }
       Voice.teardown(); Voice.s = null;
@@ -8855,52 +9060,61 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       ws.onmessage = (e) => {
         const s = Voice.s; if (!s || s.ws !== ws) return;
         let ev; try { ev = JSON.parse(e.data); } catch { return; }
+        // Server-side progress about ITS upstream connection. Surfaced as the status
+        // line so a slow provider handshake is visible instead of looking frozen.
+        // Deliberately handled before the provider branches: it carries no tokens, so
+        // falling through to render() would blank the status line.
+        if (ev.type === "status") {
+          if (!s.gotAny) {
+            if (ev.state === "upstream-ready") _recLiveStatus("listening — say something…");
+            else _recLiveStatus("recording — connecting ASR" + (ev.attempt > 1 ? " (attempt " + ev.attempt + ")" : "") + "…");
+          }
+          return;
+        }
         if (s.provider === "soniox") {
           if (ev.error_code || ev.error) { console.warn("soniox:", ev); Voice.streamDrop("error"); return; }
           let nf = "", pt = "";   // Soniox: is_final tokens arrive once → accumulate; non-final = rolling tail
           for (const tk of (ev.tokens || [])) { const tx = tk.text || ""; if (tx === "<fin>" || tx === "<end>") continue; if (tk.is_final) nf += tx; else pt += tx; }
           if (nf || pt) s.gotAny = true;
           if (nf) s.finalText += nf;
-          s.partial = pt; Voice.render();
-          if (ev.finished && s.stopping) { clearTimeout(s._finTimer); Voice.finalize(); }
+          // Soniox's non-final tokens are a ROLLING tail, so blanking them mid-speech is
+          // normal. But once you've pressed Stop/Pause it stops feeding on audio, and a
+          // frame that finalises nothing and carries no tail would erase words that were
+          // already on screen — the "half sentence" you saw. Keep them: finalize() reads
+          // finalText + partial, so they also survive into the box.
+          if (pt || nf || !(s.stopping || s.paused)) s.partial = pt;
+          Voice.render();
+          // Still producing text after Stop → keep waiting for the tail.
+          if ((nf || pt) && s.stopping) Voice.bumpFinalize();
+          // Don't finalize on the spot: if the provider ever emits `finished` before (or
+          // separately from) its last tokens, doing so would drop them — the exact
+          // "pressed stop and the rest never showed" symptom. Give it a short grace;
+          // any token arriving inside it pushes the deadline out again (bumpFinalize).
+          if (ev.finished && s.stopping) {
+            clearTimeout(s._finTimer);
+            s._finTimer = setTimeout(() => Voice.finalize(), 400);
+          }
           return;
         }
         const t = ev.type || "";   // OpenAI path
-        if (t.endsWith("transcription.delta")) { s.gotAny = true; s.partial += (ev.delta || ""); Voice.render(); }
+        if (t.endsWith("transcription.delta")) { s.gotAny = true; s.partial += (ev.delta || ""); Voice.render(); if (s.stopping) Voice.bumpFinalize(); }
         else if (t.endsWith("transcription.completed")) { s.gotAny = true; s.finalText += (ev.transcript || ""); s.partial = ""; Voice.render(); if (s.stopping) { clearTimeout(s._finTimer); Voice.finalize(); } }
         else if (t === "error") { console.warn("asr-stream:", ev.error || ev); }
       };
       ws.onerror = () => { if (Voice.s && Voice.s.ws === ws && !Voice.s.opened) Voice.streamDrop("connect error"); };
       ws.onclose = () => { if (Voice.s && Voice.s.ws === ws) Voice.streamDrop("closed"); };
       ws.onopen = () => {
-        try {
-          const AC = window.AudioContext || window.webkitAudioContext;
-          const ac = new AC();   // hardware rate (iOS ignores/breaks a forced 24k) → downsample in JS
-          const s = Voice.s; if (!s || s.ws !== ws) { try { ac.close(); } catch {} return; }   // stale (stopped / superseded by a retry)
-          s.opened = true; s.ac = ac;
-          if (!s.startMs) s.startMs = Date.now();   // 5-min cap from first successful open
-          try { ac.resume(); } catch {}   // iOS: context may start suspended
-          const src = ac.createMediaStreamSource(stream); s.src = src;
-          const sp = ac.createScriptProcessor(4096, 1, 1); s.sp = sp;
-          const mute = ac.createGain(); mute.gain.value = 0; s.mute = mute;   // silent sink → no mic feedback
-          const MAX_MS = 300000;   // only auto-stop = 5-min absolute safety cap (otherwise only Stop ends it)
-          sp.onaudioprocess = (ev) => {
-            const s = Voice.s; if (!s || s.stopping) return;
-            if (Date.now() - s.startMs > MAX_MS) {
-              // Used to stop dead silently (console only) — from the outside that
-              // looks exactly like a crash. Stop via "park" so the tail tokens are
-              // still collected, then hold the popup open saying why.
-              console.log("asr-rt: 5min hard cap → auto-stop");
-              _voiceParkReason = "已录满 5 分钟上限 — 已自动停止，下面是识别结果";
-              Voice.stop("park");
-              return;
-            }
-            if (ws.readyState !== 1) return;   // stream dropped → local recorder still captures; nothing to send here
-            try { ws.send(_f32ToPcm16(_downTo24k(ev.inputBuffer.getChannelData(0), ac.sampleRate)).buffer); } catch {}
-          };
-          src.connect(sp); sp.connect(mute); mute.connect(ac.destination);
-          if (!s.gotAny) { if (recWaveEl) recWaveEl.style.display = ""; if (recLiveEl) recLiveEl.textContent = ""; }   // connected → the wave shows we're listening; no text label
-        } catch (err) { Voice.fail("音频采集失败: " + (err && err.name ? err.name : err)); }
+        const s = Voice.s;
+        if (!s || s.ws !== ws) return;          // stale (stopped / superseded by a retry)
+        s.opened = true;
+        // Capture is already running (Voice.startCapture, called on tap). All this
+        // does is hand over whatever was buffered while we were connecting — in
+        // order, before any live frame — and drop the "connecting" label.
+        Voice.flushPending(ws);
+        // Do NOT blank the area here: this only means the browser→server hop is up;
+        // the server may still be connecting to the ASR provider (it reports that
+        // with {"type":"status"} below). The first real token clears the status.
+        if (!s.gotAny && !s.dropped) _recLiveStatus("recording — connecting ASR…");
       };
     },
     start(stream) {
@@ -8908,7 +9122,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const provider = asrRtEngine || (sonioxAvail ? "soniox" : "openai");   // user-chosen realtime engine
       const s = { before, provider, opened: false, dropped: false, gotAny: false, retries: 0, finalText: "", partial: "",
                   stopping: false, stream, ac: null, sp: null, src: null, mute: null, ws: null, _finTimer: null,
-                  mr: null, chunks: [], mrDone: null, startMs: 0 };
+                  mr: null, chunks: [], mrDone: null, startMs: 0,
+                  pending: [], pendBytes: 0,     // PCM captured before/between connections
+                  paused: false, pausedAt: 0 };   // ⏸ (realtime only)
       Voice.s = s;
       // Record the FULL audio locally in parallel → if streaming drops, recover via non-streaming /api/asr on Stop.
       try {
@@ -8931,9 +9147,27 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       } catch {}
       _recording = true; _setMic("rec"); inputFromVoice = true;
       recBar.classList.add("rec-live-on");               // full-width transcript row, grow upward
-      if (recWaveEl) recWaveEl.style.display = "none";   // hidden while connecting; shown once connected (= listening)
-      if (recLiveEl) { recLiveEl.style.display = ""; recLiveEl.innerHTML = "<span class='rec-live-hint'><span class='rec-spin'></span>连接中…</span>"; }
-      if (recSendEl) recSendEl.style.display = "";       // Send (raw, submit) — realtime only
+      // Capture FIRST, connect after. We are genuinely listening from this instant,
+      // so the wave shows straight away — it used to stay hidden until the socket was
+      // up, which was an honest signal that nothing was being recorded. That was the
+      // bug. Bonus: the AudioContext is now created inside the tap's user gesture
+      // instead of in a socket callback seconds later, which iOS prefers.
+      Voice.startCapture();
+      if (recWaveEl) recWaveEl.style.display = "";
+      if (recLiveEl) recLiveEl.style.display = "";
+      _recLiveStatus("recording — connecting ASR…");
+      // Send submits immediately, so it stays DISABLED until the realtime engine has
+      // actually returned something (Voice.render enables it on the first token).
+      // Before that there is no transcript to submit — it would have quietly sent
+      // nothing. Polish / Edit stay live: they stop the recording and, if realtime
+      // produced nothing, recover the whole clip through the batch engine.
+      if (recPauseEl) { recPauseEl.style.display = ""; }   // ⏸ pause/resume — realtime only
+      _syncPauseBtn();
+      if (recSendEl) {
+        recSendEl.style.display = "";                    // Send (raw, submit) — realtime only
+        recSendEl.disabled = true;
+        recSendEl.title = "waiting for the first realtime result — use Polish/Edit to stop and transcribe the whole clip";
+      }
       if (recEditEl) recEditEl.style.display = "";       // Edit (raw → input box, no polish/send)
       if (recStopEl) recStopEl.textContent = "Polish";
       Voice.openStream();
@@ -8955,7 +9189,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     _mediaRec.onstop = async () => {
       stream.getTracks().forEach(t => t.stop());   // release the mic immediately
       if (_recCancelled) { _recCancelled = false; _setMic("idle"); return; }   // discarded
-      _setMic("busy"); _recBarBusy("整段识别中…");   // step 1 done → loading (result comes all at once)
+      _setMic("busy"); _recBarBusy("transcribing the recording…");   // step 1 done → result comes all at once
       const before = inputEl.value ? (inputEl.value.replace(/\s*$/, "") + " ") : "";
       const blob = new Blob(_mediaChunks, { type: _mediaRec.mimeType });
       // Every failure below used to end in `_setMic("idle")` — the popup just
