@@ -2044,18 +2044,20 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <span id="ready" class="ready" style="display:none"></span>
     <span id="traffic" class="traffic"></span>
     <span id="battery" class="battery" style="display:none" title="Click for CPU history"></span>
-    <a id="remote-btn" class="battery" href="/remote/" title="Remote control" style="text-decoration:none">🖥</a>
+    <!-- Header button order is ⚙ >_ ⇆ 📁 on BOTH pages. Each page shows its own ⚙ and
+         its own >_ (mode/screen in a session, list-options/tabs on the picker), and
+         the hidden ones don't affect the visible order. 🖥 remote moved into the ⚙
+         dropdown below — it's a rarely-used jump, not a per-session control. -->
     <span id="mode-group" class="mode-group" style="display:none">
       <button id="mode-btn" class="btn icon" title="Display detail: brief / medium / all">⚙</button>
     </span>
     <button id="screen-btn" class="btn icon" style="display:none" title="iTerm screen + session info">&gt;_</button>
-    <button id="switch-btn" class="btn icon" style="display:none" title="切换到其它 tab">⇆</button>
-    <button id="tabs-btn" class="btn icon" style="display:none" title="Show all iTerm2 tabs">&gt;_</button>
-    <button id="files-btn" class="btn icon" style="display:none" title="Browse local files">📁</button>
-    <button id="refresh-btn" class="btn icon" style="display:none" title="Refresh list">↻</button>
     <span id="picker-cfg-group" style="position:relative;display:none">
-      <button id="picker-cfg" class="btn icon" title="List display options">⚙</button>
+      <button id="picker-cfg" class="btn icon" title="List options / remote">⚙</button>
       <div id="picker-cfg-menu" class="scr-cfg-menu">
+        <div class="scr-cfg-row"><span>远程控制</span>
+          <a id="remote-btn" class="btn" href="/remote/" title="Remote control" style="text-decoration:none">🖥 remote</a>
+        </div>
         <div class="scr-cfg-row"><span>提问显示</span>
           <button id="picker-reqmode" class="btn" title="show user requests only / requests + responses">Q</button>
         </div>
@@ -2074,6 +2076,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         </div>
       </div>
     </span>
+    <button id="tabs-btn" class="btn icon" style="display:none" title="Show all iTerm2 tabs">&gt;_</button>
+    <button id="switch-btn" class="btn icon" style="display:none" title="切换到其它 tab">⇆</button>
+    <button id="files-btn" class="btn icon" style="display:none" title="Browse local files">📁</button>
+    <button id="refresh-btn" class="btn icon" style="display:none" title="Refresh list">↻</button>
     <button id="back-btn" class="btn" style="display:none">←</button>
     <button id="new-btn" class="btn">+</button>
   </header>
@@ -3370,7 +3376,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     modeGroup.style.display = "none";
     document.getElementById("picker-cfg-group").style.display = "";   // list ⚙ only on the picker
     screenBtn.style.display = "none";
-    switchBtn.style.display = "none"; hideSwitchMenu();
+    // ⇆ belongs here too: openSwitchMenu() fetches /api/tabs itself and its entries
+    // call enterTranscript(), so on this page it simply means "jump straight into one
+    // of the running tabs" instead of hunting for its card. attachedSid is empty here,
+    // so nothing gets marked as the current tab.
+    switchBtn.style.display = ""; hideSwitchMenu();
     startTabNamePoll();
     newBtn.style.display = "";
     refreshBtn.style.display = "none";   // reload lives in the picker ⚙ dropdown now
