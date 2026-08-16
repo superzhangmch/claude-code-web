@@ -3928,8 +3928,9 @@ async def get_sessions(card: str = "both"):
 @app.get("/api/tabs", dependencies=[Depends(require_token)])
 async def get_tabs():
     """Lightweight list of live claude tabs for the in-transcript quick switcher:
-    [{sid, window_index, tab_index, name}] sorted by window/tab. `name` prefers
-    the user-set name, then the LLM title, then the iTerm tab name."""
+    [{sid, window_index, tab_index, name, cwd}] sorted by window/tab. `name` prefers
+    the user-set name, then the LLM title, then the iTerm tab name. `cwd` is what the
+    Files popup's "prj" shortcut jumps to — the bridge already resolves it per tab."""
     out: list[dict] = []
     try:
         # No ensure_connected() here — list_claude_tabs() builds its own fresh
@@ -3947,6 +3948,7 @@ async def get_tabs():
                 "tab_name": t.name or "",                       # raw terminal tab name
                 "session_name": _user_name_of(sid) or title or "",  # user override / LLM title (no tab fallback)
                 "name": _user_name_of(sid) or title or (t.name or ""),  # legacy combined
+                "cwd": t.cwd or "",                             # the dir this claude runs in
             })
     except Exception:
         pass
@@ -6551,7 +6553,12 @@ async def _soniox_bridge(ws: WebSocket, q):
                     async with up_lock:
                         await _flush_pre()
                         await up.send(b)
-                elif data.get("text"):      # any text frame = FINISH
+                # `is not None`, not truthiness: an EMPTY text frame is the documented
+                # FINISH signal and "" is falsy, so it fell through BOTH branches and
+                # vanished — a client following the docs would press stop and the upstream
+                # would never drain, with nothing logged. Also applies while up is None,
+                # where an empty frame likewise failed to set finish_pending.
+                elif data.get("text") is not None:      # any text frame = FINISH
                     if up is None:
                         finish_pending = True
                         continue
@@ -6747,7 +6754,7 @@ async def asr_stream(ws: WebSocket):
                     stat["in_bytes"] += len(b); stat["in_frames"] += 1
                     await up.send(json.dumps({"type": "input_audio_buffer.append",
                                               "audio": base64.b64encode(b).decode()}))
-                elif data.get("text"):
+                elif data.get("text") is not None:   # empty text frame = FINISH too (see above)
                     await up.send(data["text"])
         except Exception as e:
             stat["who"] = stat["who"] or ("client:" + type(e).__name__)

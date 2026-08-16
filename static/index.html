@@ -2176,6 +2176,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <button id="files-back" class="btn" title="Back (dir history)">◀</button>
         <button id="files-fwd" class="btn" title="Forward (dir history)">▶</button>
         <button id="files-up" class="btn" title="Parent directory">↑</button>
+        <button id="files-prj" class="btn" title="Go to this session's project dir">prj</button>
         <span class="files-input-wrap">
           <textarea id="files-path" class="files-path" rows="1" placeholder="/path/to/dir — Enter to go"></textarea>
           <button id="files-path-clear" class="files-clear" title="Clear the path box">✕</button>
@@ -4098,6 +4099,22 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     autoGrowPath();   // multi-line textarea → grow to show the whole path
   }
   const filesUp = document.getElementById("files-up");
+  const filesPrj = document.getElementById("files-prj");
+  // One tap from the file browser to the directory the attached claude is running in
+  // — otherwise you retype a long path every time. The cwd comes from the same
+  // /api/tabs data the header label uses (see updateTabMeta).
+  function _sessionCwd() {
+    const m = tabMeta.get(attachedSid) || {};
+    const ot = openTabs.find(t => t.sid === attachedSid) || {};
+    return ((m.cwd || ot.cwd || "") + "").trim();
+  }
+  function refreshFilesPrjBtn() {
+    if (!filesPrj) return;
+    const c = _sessionCwd();
+    filesPrj.disabled = !c;
+    filesPrj.title = c ? "Go to this session's project dir:\n" + c
+                       : "This session's working dir isn't known yet";
+  }
   const filesGo = document.getElementById("files-go");
   const filesClose = document.getElementById("files-close");
   const filesFull = document.getElementById("files-full");
@@ -4486,6 +4503,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // Always open expanded: the preview starts empty, and a collapsed bar with
     // nothing previewed and no browsing rows would be a dead end.
     applyFilesCollapsed(false);
+    refreshFilesPrjBtn();
     clearFilesPreview();
     filesFilterEl.value = "";
     renderFavs();
@@ -4518,6 +4536,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (ent) previewFile(dir.replace(/\/$/, "") + "/" + base, ent.kind);
   }
   filesGo.addEventListener("click", filesGoSubmit);
+  if (filesPrj) filesPrj.addEventListener("click", () => {
+    const c = _sessionCwd(); if (!c) return;
+    filesFilterEl.value = "";
+    loadFilesDir(c, 0, "");
+  });
   filesBack.addEventListener("click", () => {
     if (filesHistIdx > 0) { filesHistIdx--; filesFilterEl.value = ""; loadFilesDir(filesHist[filesHistIdx], 0, "", { noHist: true }); }
   });
@@ -5857,6 +5880,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         sessName: (sessName != null) ? sessName : (prev.sessName || ""),
         wi: (it.window_index != null) ? it.window_index : prev.wi,
         ti: (it.tab_index    != null) ? it.tab_index    : prev.ti,
+        // The working dir was already in /api/tabs and the picker items, just thrown
+        // away here — the Files popup's "prj" shortcut needs it.
+        cwd: (it.cwd != null && it.cwd !== "") ? it.cwd : (prev.cwd || ""),
       };
       tabMeta.set(sid, next);
       const ot = openTabs.find(t => t.sid === sid);   // mirror into the open-tab entry
@@ -7257,7 +7283,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         } else {
           res = { status: "error", error: "HTTP " + r.status, correction: "", native: "" };
         }
-        manualGrammarMap.set(key, res);
+        // Cache only results the model actually produced. Caching a failure made one
+        // flaky call (502 / timeout / litellm restarting) permanent: the cache-hit
+        // branch above short-circuits every later ✎ tap, so the message stayed on
+        // "⚠ LLM call failed" until a full page reload. status:"ok" with no correction
+        // IS a real result ("looked, found nothing") and is worth caching so a re-tap
+        // doesn't pay for the same call again.
+        if (res.correction || res.native || res.status === "ok") manualGrammarMap.set(key, res);
         _showManualCorrection(div, res);
       } catch {} finally { btn.textContent = prev; btn.disabled = false; }
     });
