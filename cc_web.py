@@ -6516,7 +6516,9 @@ async def _soniox_bridge(ws: WebSocket, q):
     up_lock = asyncio.Lock()            # serialise config/warmup/flush against live frames
     pre: list[bytes] = []               # audio captured before the upstream was ready
     pre_bytes = 0
-    PRE_MAX = 90 * 24000 * 2            # ~90s of 24kHz PCM16 — same cap the browser uses
+    PRE_MAX = 90 * rate * 2             # ~90s of PCM16 at the NEGOTIATED rate (?rate= is a
+                                        # query param, so hardcoding 24000 made the cap wrong
+                                        # — too small or too large — at any other rate)
     finish_pending = False              # user pressed stop while we were still connecting
     client_gone = asyncio.Event()
 

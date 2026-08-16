@@ -9,6 +9,10 @@ No pytest needed:  python3 tests/test_review_fixes.py   (exit 0 = all pass)
 import importlib.util, os, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# cc_web imports its terminal bridge by name (tmux_bridge on Linux, iterm_bridge on
+# macOS). _load() below only pre-registers iterm_bridge, so on Linux the cc_web
+# import died with ModuleNotFoundError — the suite simply never ran there.
+sys.path.insert(0, ROOT)
 
 
 def _load(name):
