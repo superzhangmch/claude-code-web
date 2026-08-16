@@ -94,6 +94,7 @@ def _load_conf() -> dict:
         "cwds": [],
         "asr": [],     # list of {label, api_base, key, model} — voice-input ASR backends
         "claude_config": "",   # path to claude's .claude.json (per-project trust); default ~/.claude.json
+        "icon": "",                # override the per-host tab icon: pro|air|linux|win
         "openai_realtime": None,   # {base, key} — realtime (streaming) ASR WS; url in conf, not code
         "soniox": None,            # {base, key} — Soniox true per-token streaming ASR WS
     }
@@ -3441,6 +3442,30 @@ class UploadPayload(BaseModel):
 @app.get("/")
 async def root():
     return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
+
+
+def _favicon_slug() -> str:
+    """Which tab icon to serve: whatever `icon=` says in cc_web.conf, or nothing.
+
+    Config-only ON PURPOSE — no hostname sniffing. Every machine ships the same files
+    and shows the generic C by default; you opt a box into a labelled icon with one
+    line (`icon=pro` / `air` / `linux` / `win`). Read per request, so the change needs
+    no restart.
+    """
+    want = (_load_conf().get("icon") or "").strip().lower()
+    return want if want in ("pro", "air", "linux", "win") else ""
+
+
+@app.get("/favicon.svg")
+async def favicon_svg():
+    """Unauthenticated, like everything else under /static. With `icon=` unset this is
+    byte-identical to the old /static/favicon.svg, so nothing changes until you ask."""
+    slug = _favicon_slug()
+    p = (STATIC_DIR / f"favicon-{slug}.svg") if slug else (STATIC_DIR / "favicon.svg")
+    if not p.exists():
+        p = STATIC_DIR / "favicon.svg"          # unset or a typo → the generic C
+    return FileResponse(p, media_type="image/svg+xml",
+                        headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/auth-status")

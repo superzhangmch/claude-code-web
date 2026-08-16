@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Per-machine tab icon, chosen by `icon=` in cc_web.conf (unset → the plain C in
+       favicon.svg). Label AND colour differ: at the 16px a standard-DPI Chrome tab
+       uses, the words are too small to read, so the hue is what actually tells the
+       tabs apart (and the two cues together survive colour-blindness). The bar is
+       there to give the hue more area than the glyph alone. textLength normalises
+       Pr/Air/Lx/Wn to one width so Lx isn't sparse and Air isn't cramped. -->
+  <rect width="32" height="32" rx="7" fill="#15171f"/>
+  <text x="16" y="14.5" fill="#4ab4e0" font-family="Helvetica,Arial,sans-serif"
+        font-size="15" font-weight="700" text-anchor="middle" dominant-baseline="central"
+        textLength="25" lengthAdjust="spacingAndGlyphs">Air</text>
+  <rect x="3" y="24" width="26" height="5" rx="2.5" fill="#4ab4e0"/>
+</svg>
