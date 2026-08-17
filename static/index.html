@@ -8622,7 +8622,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     recBar.classList.toggle("rec-paused", on);
     if (!recPauseEl) return;
     recPauseEl.textContent = on ? "▶" : "⏸";
-    recPauseEl.title = on ? "Resume recording" : "Stop recording (keep the result)";
+    // In batch mode ⏸ is also the transcribe trigger, so say that rather than "stop".
+    recPauseEl.title = on ? "Resume recording"
+      : (Voice.s && Voice.s.batchOnly) ? "Pause and transcribe what you have said so far"
+                                       : "Stop recording (keep the result)";
     recPauseEl.setAttribute("aria-label", on ? "Resume recording" : "Stop recording");
   }
   function _recTimerPause() { if (_recTimer) { clearInterval(_recTimer); _recTimer = null; } }
@@ -8833,19 +8836,95 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     //                 keep whatever it did manage to return (half a sentence is still
     //                 worth having).
     // Either way, "no words appearing" must never read as a freeze.
-    paintBatchOnly(why) {
+    paintBatchOnly(why, warn) {
       const s = Voice.s; if (!s || !recLiveEl) return;
       const what = s.paused ? "paused — tap ▶ to record more" : "recording";
       const then = "; transcribed in one go when you stop";
       const note = why
         ? "<span class='rec-live-partial'>  ⚠ " + _escHtml(why) + " — " + what + " (batch)" + then + "</span>"
-        : "<span class='rec-live-partial'>batch mode" + (asrWhich ? " · " + _escHtml(asrWhich) : "")
-          + " — " + what + then + "</span>";
+        : "<span class='rec-live-partial'>batch mode" + (asrWhich ? " · " + _escHtml(asrWhich) : "") + " — " + what
+          + (s.paused ? ", or Polish / Edit / Send" : "; tap ⏸ to transcribe what you have said so far") + "</span>"
+          + (warn ? "<span class='rec-live-err'>  ⚠ " + _escHtml(warn) + "</span>" : "");
       const txt = (s.finalText + s.partial).trim();
       recLiveEl.style.display = "";
       // With no transcript this note IS the status line, so render() must not blank it.
       _recStatusHtml = txt ? "" : note;
       recLiveEl.innerHTML = (txt ? _escHtml(txt) : "") + note;
+    },
+    // ---- batch mode records in SEGMENTS -------------------------------------------
+    // One MediaRecorder per segment, so every ▶…⏸ stretch is a self-contained clip that
+    // ⏸ can push through /api/asr right away. That is what makes batch feel like
+    // realtime: the words are already on screen when you reach for Polish/Edit/Send,
+    // instead of the whole recording waiting for the final Stop.
+    // Realtime uses exactly one segment (the parallel full-clip recording it falls back on).
+    mrStart() {
+      const s = Voice.s; if (!s) return;
+      // The bucket belongs to THIS recorder, not to the session. stop() delivers the final
+      // dataavailable (with start() and no timeslice that is the WHOLE segment) after the
+      // call returns, so a handler pushing into `s.chunks` would drop it into whatever
+      // array cutSegment had just swapped in — i.e. into the NEXT segment, leaving this one
+      // empty. Closing over the array makes that impossible.
+      const chunks = [];
+      s.chunks = chunks;
+      try {
+        const mr = new MediaRecorder(s.stream);
+        mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+        s.mrDone = new Promise(res => { mr.onstop = res; });
+        s.mr = mr;
+        mr.start();
+      } catch (e) { s.mr = null; console.warn("no MediaRecorder → no batch fallback:", e); }
+    },
+    // Close the open clip NOW (synchronously, so nothing leaks into the next segment) and
+    // queue its transcription. Each segment keeps its own slot, so the text stays in the
+    // order it was spoken and a failed upload leaves a hole we can retry instead of a
+    // silently dropped sentence.
+    cutSegment() {
+      const s = Voice.s; if (!s || !s.mr) return;
+      const mr = s.mr, done = s.mrDone, chunks = s.chunks, idx = s.segN++;
+      s.mr = null; s.mrDone = null; s.chunks = [];
+      try { if (mr.state !== "inactive") mr.stop(); } catch {}
+      // Serialised, not parallel: two ⏸ in quick succession must not interleave.
+      s.segP = (s.segP || Promise.resolve()).then(() => Voice._segRun(s, idx, mr, done, chunks)).catch(() => {});
+    },
+    async _segRun(s, idx, mr, done, chunks) {
+      if (Voice.s !== s) return;                       // cancelled while we waited
+      try { await done; } catch {}
+      if (Voice.s !== s) return;
+      const blob = new Blob(chunks || [], { type: (mr && mr.mimeType) || "audio/webm" });
+      if (!blob.size) { s.segTexts[idx] = ""; return; }
+      // Spinner in the TIME slot, not the transcript row — the words already there must
+      // stay readable while this runs. finalize() shows its own line, so skip it then.
+      if (!s.stopping) _recPolishStart("asr");
+      const r = await Voice.transcribeClip(blob);
+      if (!s.stopping) _recPolishStop();
+      if (Voice.s !== s) return;
+      if (r.text) { s.segTexts[idx] = r.text; s.segFail[idx] = null; }
+      else { s.segTexts[idx] = ""; if (r.why) s.segFail[idx] = blob; }   // keep the audio for a retry
+      Voice.segSync();
+      if (s.paused && !s.stopping) Voice.paintBatchOnly("", r.why || "");
+    },
+    // Rebuild the transcript from the per-segment slots (order preserved) and show it the
+    // same way realtime shows tokens — including dropping it into the input box.
+    segSync() {
+      const s = Voice.s; if (!s) return;
+      s.finalText = (s.segTexts || []).filter(t => t).join(" ");
+      if (s.finalText) s.gotAny = true;
+      Voice.render();
+    },
+    // POST one clip to the batch engine. Never throws: returns {text} or {why}.
+    async transcribeClip(blob) {
+      try {
+        const qs = new URLSearchParams();
+        if (asrWhich) qs.set("which", asrWhich);
+        if (attachedSid) qs.set("sid", attachedSid);   // context → ASR prompt (bias domain vocab)
+        const ar = await authedFetch("/api/asr?" + qs.toString(), { method: "POST",
+          headers: { "content-type": blob.type || "audio/webm" }, body: blob, timeoutMs: 60000 });
+        if (!ar.ok) return { why: "batch transcription failed — HTTP " + ar.status };
+        const d = await ar.json();
+        return { text: ((d && d.text) || "").trim() };
+      } catch (e) {
+        return { why: "batch transcription failed — " + (e && e.name === "AbortError" ? "timed out (60s)" : "request failed") };
+      }
     },
     // Mic → PCM16, running from the moment you tap 🎤, independent of the ASR
     // connection. Anything captured before the WS is up goes into s.pending and is
@@ -8914,6 +8993,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // pausing means "stop feeding it audio". Making the already-received words show
         // up in full is handled by the sticky-partial rule in onmessage instead.
         try { if (s.ws && s.ws.readyState === 1) Voice.flushPending(s.ws); } catch {}
+        // Batch: ⏸ is also the "transcribe what I have said so far" button — it closes the
+        // clip and sends it, so the text is on screen before you choose Polish/Edit/Send.
+        if (s.batchOnly) Voice.cutSegment();
         try { if (s.mr && s.mr.state === "recording") s.mr.pause(); } catch {}
         if (recWaveEl) recWaveEl.style.display = "none";   // the wave means "listening"
         // Same contradiction as stop: a "recording — connecting…" line must not survive
@@ -8925,7 +9007,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         const gap = Date.now() - (s.pausedAt || Date.now());
         s.startMs += gap;        // the 5-min cap measures captured audio, not wall clock
         s.pausedAt = 0;
-        try { if (s.mr && s.mr.state === "paused") s.mr.resume(); } catch {}
+        if (s.batchOnly) Voice.mrStart();      // a fresh clip for the next segment
+        else { try { if (s.mr && s.mr.state === "paused") s.mr.resume(); } catch {} }
         if (recWaveEl) recWaveEl.style.display = "";
         // A batch session (by choice, or one that already fell back) must NOT resume
         // claiming to connect an ASR. A fallback stays batch until this recording ends;
@@ -9120,6 +9203,28 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       s._finalizing = true; clearTimeout(s._finTimer);
       const before = s.before, mode = s.mode || "polish";
       let raw = (s.finalText + s.partial).trim();
+      // ---- batch: finish the open clip, then make sure every segment landed ----
+      if (s.batchOnly) {
+        _setMic("busy");
+        const _eng = asrWhich ? " with " + asrWhich : "";
+        _recLiveStatus("transcribing the recording" + _eng + "…");
+        Voice.cutSegment();                           // whatever is still open
+        try { await s.segP; } catch {}                // …plus every ⏸ segment still in flight
+        // Retry the clips whose upload failed, in their own slots. Dropping them would be
+        // the one unforgivable outcome: the user said those words.
+        for (let i = 0; i < s.segFail.length; i++) {
+          const b = s.segFail[i]; if (!b) continue;
+          const r = await Voice.transcribeClip(b);
+          if (r.text) { s.segTexts[i] = r.text; s.segFail[i] = null; }
+        }
+        const lost = s.segFail.filter(Boolean).length;
+        raw = (s.segTexts || []).filter(t => t).join(" ").trim();
+        Voice.teardown(); Voice.s = null;
+        if (!raw) { _voiceParkResult("", before, lost ? "识别失败 — 没能转写这段录音" : "没有识别到内容（没说话，或声音太小）"); return; }
+        // Partial success: keep what we got, say what is missing, let the user decide.
+        if (lost && mode !== "park") { _voiceParkResult(raw, before, "有 " + lost + " 段没能转写（其余已识别）— 可直接 Send/Edit"); return; }
+        await Voice.apply(raw, before, mode); return;
+      }
       // Fall back to the batch engine whenever the realtime path produced nothing —
       // not just when it DROPPED. Stopping during the connect/retry cycle used to
       // land here with raw === "" and dropped === false, so apply("") closed the bar
@@ -9132,29 +9237,25 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // Say what is happening AND why: this step can take a few seconds, and an
         // unexplained pause here reads as "it broke" or "everything I said is lost".
         const _eng = asrWhich ? " with " + asrWhich : "";
-        _recLiveStatus((s.batchOnly ? "transcribing the recording"
-                        : raw ? "realtime stream dropped — re-transcribing the whole clip"
-                              : "no realtime result — transcribing the whole recording")
+        _recLiveStatus((raw ? "realtime stream dropped — re-transcribing the whole clip"
+                            : "no realtime result — transcribing the whole recording")
                        + _eng + "…");
         try { await s.mrDone; } catch {}
         const blob = new Blob(s.chunks || [], { type: (s.mr && s.mr.mimeType) || "audio/webm" });
         Voice.teardown(); Voice.s = null;
         let why = "";
         if (blob.size) {
-          try {
-            const qs = new URLSearchParams(); if (asrWhich) qs.set("which", asrWhich); if (attachedSid) qs.set("sid", attachedSid);
-            const ar = await authedFetch("/api/asr?" + qs.toString(), { method: "POST", headers: { "content-type": blob.type || "audio/webm" }, body: blob, timeoutMs: 60000 });
-            if (ar.ok) { const d = await ar.json(); if (d && d.text) raw = d.text.trim(); }
-            else why = "batch transcription failed — HTTP " + ar.status;
-          } catch (e) {
-            why = "batch transcription failed — " + (e && e.name === "AbortError" ? "timed out (60s)" : "request failed");
-          }
+          const r = await Voice.transcribeClip(blob);
+          if (r.why) why = r.why; else if (r.text) raw = r.text;
         } else why = "nothing was recorded";
         // Don't close on empty: park with the reason, like every other dead end.
         if (!raw) { _voiceParkResult("", before, why || "no speech recognised"); return; }
         await Voice.apply(raw, before, mode); return;
       }
       Voice.teardown(); Voice.s = null;
+      // Never close the popup empty-handed — an empty result gets the same park-with-a-
+      // reason as every other dead end ("park" mode carries its own reason already).
+      if (!raw && mode !== "park") { _voiceParkResult("", before, "没有识别到内容（没说话，或声音太小）"); return; }
       await Voice.apply(raw, before, mode);
     },
     openStream() {   // (re)open just the streaming WS + audio; re-callable for the early-drop retry
@@ -9249,17 +9350,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
                   dropped: !!batchOnly,
                   stopping: false, stream, ac: null, sp: null, src: null, mute: null, ws: null, _finTimer: null,
                   mr: null, chunks: [], mrDone: null, startMs: 0,
+                  segTexts: [], segFail: [], segN: 0, segP: null,   // batch: one slot per ▶…⏸ segment
                   pending: [], pendBytes: 0,     // PCM captured before/between connections
                   paused: false, pausedAt: 0,     // ⏸
                   upReady: false };               // server said its upstream ASR is live
       Voice.s = s;
-      // Record the FULL audio locally in parallel → if streaming drops, recover via non-streaming /api/asr on Stop.
-      try {
-        s.mr = new MediaRecorder(stream);
-        s.mr.ondataavailable = e => { if (e.data && e.data.size && Voice.s === s) s.chunks.push(e.data); };
-        s.mrDone = new Promise(res => { s.mr.onstop = res; });
-        s.mr.start();
-      } catch (e) { s.mr = null; console.warn("no MediaRecorder → no batch fallback:", e); }
+      // Record locally too: realtime falls back on this if the stream drops, and in batch
+      // mode it IS the recording (one clip per ▶…⏸ segment).
+      Voice.mrStart();
       // The OS can take the mic away mid-recording: incoming call, Siri, another app
       // grabbing audio, permission revoked. Nothing used to notice — the timer kept
       // counting and the wave kept animating while only silence was captured, and you
@@ -9288,14 +9386,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       _syncPauseBtn();
       if (recSendEl) {
         recSendEl.style.display = "";                    // Send (raw, submit)
-        // Realtime: Send submits immediately, so it stays DISABLED until the engine has
-        // actually returned something (render() enables it on the first token) —
-        // otherwise it would quietly submit nothing. Batch: there is never any text
-        // before you stop, and "stop → transcribe → submit" is exactly what Send should
-        // do here, so keep it live (Polish/Edit are the ways to look first).
-        recSendEl.disabled = !batchOnly;
+        // Send submits immediately, so in BOTH modes it stays disabled until there is a
+        // transcript to submit (render() enables it as soon as one appears) — otherwise it
+        // would quietly send nothing. In batch that transcript comes from ⏸.
+        recSendEl.disabled = true;
         recSendEl.title = batchOnly
-          ? "stop, transcribe the recording, and submit it as-is"
+          ? "tap ⏸ to transcribe what you have said so far, then Send it"
           : "waiting for the first realtime result — use Polish/Edit to stop and transcribe the whole clip";
       }
       if (recEditEl) recEditEl.style.display = "";       // Edit (raw → input box, no polish/send)
