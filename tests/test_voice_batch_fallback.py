@@ -102,8 +102,8 @@ Voice.goBatch("realtime ASR unreachable");
 check("goBatch marks the session batch-only", Voice.s.dropped === true);
 check("...frees the PCM that can never be shipped", Voice.s.pending.length === 0 && Voice.s.pendBytes === 0);
 check("...closes the socket it gave up on", calls.includes("teardownStream"));
-check("...and says recording continues, in batch", /still recording \(batch\)/.test(bar()), bar().slice(0, 90));
-check("...naming what happens on stop", /transcribed when you stop/.test(bar()));
+check("...and says recording continues, in batch", /recording \(batch\)/.test(bar()), bar().slice(0, 90));
+check("...naming what happens on stop", /transcribed in one go when you stop/.test(bar()));
 check("...without claiming it is still connecting", !/connecting/i.test(bar()));
 check("a second goBatch is a no-op (no double teardown)",
       (() => { calls.length = 0; Voice.goBatch("again"); return calls.length === 0; })());
@@ -116,7 +116,7 @@ check("...and does not resurrect 'connecting ASR'", !/connecting/i.test(bar()));
 Voice.togglePause();
 check("▶ resumes capture", Voice.s.paused === false && Voice.s.mr.state === "recording");
 check("▶ stays in batch for the REST of this recording",
-      /still recording \(batch\)/.test(bar()), bar().slice(0, 90));
+      /recording \(batch\)/.test(bar()), bar().slice(0, 90));
 check("▶ never claims to connect an ASR we gave up on", !/connecting/i.test(bar()));
 check("▶ does not reopen the stream", !calls.includes("openStream"));
 
@@ -135,7 +135,7 @@ Voice.togglePause();                                   // mr.state -> "paused"
 Voice.streamDrop("closed");
 check("the session survives (no Voice.fail)", !calls.some(c => c.startsWith("fail:")), calls.join(","));
 check("...as batch-only", Voice.s.dropped === true);
-check("...and ▶ is still there to press", /tap ▶ to keep recording/.test(bar()), bar().slice(0, 90));
+check("...and ▶ is still there to press", /tap ▶ to record more/.test(bar()), bar().slice(0, 90));
 Voice.togglePause();
 check("...resuming after that drop records in batch", Voice.s.paused === false && /batch/.test(bar()));
 

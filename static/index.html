@@ -8476,7 +8476,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 
   // ---------- voice input: record → ASR → polish → fill ----------
   const micBtn = document.getElementById("mic-btn");
-  let _mediaRec = null, _mediaChunks = [], _recording = false;
+  let _recording = false;
+  // Absolute recording ceiling, shared by BOTH voice paths so they can't drift apart.
+  // It used to live inside the realtime capture loop only, so a batch recording had no
+  // limit at all — a pocket-tap on 🎤 kept recording until the blob was too big to
+  // upload (and the whole thing then failed at the end, with everything lost).
+  const VOICE_MAX_MS = 300000;   // 5 min
   let lastAsrRaw = "", lastPolished = "", lastAsrSec = null, lastPolishSec = null;   // long-press debug view
   let asrConfigs = [], asrWhich = localStorage.getItem("cc_asr_which") || "";
   let asrRtAvail = false, sonioxAvail = false, realtimeEngines = [], asrRtEngine = localStorage.getItem("cc_asr_rt_engine") || "", asrRt = localStorage.getItem("cc_asr_rt") === "1";   // realtime (streaming) ASR
@@ -8628,39 +8633,24 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     _recTimer = setInterval(() => { recTimeEl.textContent = _fmtDur(Date.now() - _recStartMs); }, 250);
   }
   function _showRecBar() {
-    _batchResult = null;   // starting a fresh recording → drop any pending step-2 result
+    _batchResult = null;   // starting a fresh recording → drop any pending result
     _polishAbort();     // a fresh recording supersedes any polish still in flight
     _recPolishStop();   // …and never inherits its spinner/counter state
     _recStartMs = Date.now();
     recTimeEl.textContent = "0:00";
     recBar.style.display = "flex";
     recBar.classList.remove("rec-live-on");
-    recWaveEl.style.display = "";        // batch shows the wave; realtime overrides (rec-live-on + hidden wave)
+    recWaveEl.style.display = "";
     recLiveEl.style.display = "none";
-    // Batch phase 1 = just Cancel + Stop (record blind → transcribe → then choose an action).
-    // Realtime (Voice.start) overrides this to show Polish / Edit / Send with the live transcript.
+    // Bare base state (Cancel + Stop). Voice.start() immediately dresses it for the
+    // actual recording — ⏸, Polish / Edit / Send, and the transcript/status row — in
+    // BOTH modes, since batch is now the same session with no stream attached.
     [recCancelEl, recStopEl].forEach(b => b && (b.style.display = ""));
     [recEditEl, recSendEl, recPauseEl].forEach(b => b && (b.style.display = "none"));
     recBar.classList.remove("rec-paused");   // a fresh recording never inherits ⏸
     if (recStopEl) recStopEl.textContent = "Stop";
     clearInterval(_recTimer);
     _recTimer = setInterval(() => { recTimeEl.textContent = _fmtDur(Date.now() - _recStartMs); }, 250);
-  }
-  // Batch step 2: transcription done → show the raw result + let the user pick Polish / Edit / Send.
-  function _showBatchResultBar(text) {
-    recBar.style.display = "flex"; recBar.classList.add("rec-live-on");
-    if (recWaveEl) recWaveEl.style.display = "none";
-    [recCancelEl, recStopEl, recEditEl, recSendEl].forEach(b => b && (b.style.display = ""));   // Cancel + Polish/Edit/Send
-    if (recPauseEl) recPauseEl.style.display = "none";   // recording is over — nothing to pause
-    recBar.classList.remove("rec-paused");
-    _recClearStatus();
-    if (recStopEl) recStopEl.textContent = "Polish";
-    // A batch result IS a transcript, so Send is meaningful again (it is disabled
-    // while a realtime recording has produced nothing yet).
-    if (recSendEl) { recSendEl.disabled = !text; recSendEl.title = text ? "submit this text as-is (no polish)" : "nothing to send"; }
-    if (recLiveEl) { recLiveEl.style.display = ""; recLiveEl.textContent = text; }
-    clearInterval(_recTimer); _recTimer = null;
-    micBtn.classList.remove("busy"); micBtn.disabled = false;   // keep the popup up but re-enable the mic
   }
   // ----- "stopped, and here's why" state -----
   // Every abnormal end funnels through here instead of hiding the popup. Rules:
@@ -8699,13 +8689,6 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     _batchResult = { raw: raw || "", before: before || "" };      // Polish/Edit/Send/Cancel act on this
     _showVoiceNotice(reason, raw);
   }
-  function _recBarBusy(msg) {   // loading state in the popup (batch transcription / processing) — mic stays 🎤
-    recBar.style.display = "flex"; recBar.classList.add("rec-live-on");
-    if (recWaveEl) recWaveEl.style.display = "none";
-    [recCancelEl, recStopEl, recEditEl, recSendEl, recPauseEl].forEach(b => b && (b.style.display = "none"));
-    if (recLiveEl) { recLiveEl.style.display = ""; recLiveEl.innerHTML = "<span class='rec-live-hint'><span class='rec-spin'></span>" + msg + "</span>"; }
-    clearInterval(_recTimer); _recTimer = null;
-  }
   function _hideRecBar() {
     clearInterval(_recTimer); _recTimer = null;
     _recPolishStop();          // the "finishing"/"Polish" counter must not outlive the bar
@@ -8720,7 +8703,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (_recTimer) { recTimeEl.textContent = _fmtDur(Date.now() - _recStartMs); clearInterval(_recTimer); _recTimer = null; }
     if (recWaveEl) recWaveEl.style.display = "none";
   }
-  let _recCancelled = false, _batchResult = null;   // _batchResult set = batch step 2 (result awaiting Polish/Edit/Send)
+  let _batchResult = null;   // set = a finished/parked result awaiting Polish/Edit/Send/Cancel
   recBar.addEventListener("click", (e) => {   // click bar background (not a button) → Polish (finish)
     if (e.target.closest("button")) return;
     if (_recording) _voiceStop("polish");
@@ -8751,9 +8734,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       _setMic("idle"); if (!isPhone()) inputEl.focus();
       return;
     }
-    if (Voice.s) { Voice.stop(mode); return; }                                           // realtime finish
-    if (_batchResult) { const r = _batchResult; _batchResult = null; await Voice.apply(r.raw, r.before, mode); return; }   // batch step 2 → act on the result
-    if (_mediaRec && _recording) { _recording = false; _mediaRec.stop(); }               // batch step 1: Stop → transcribe
+    if (Voice.s) { Voice.stop(mode); return; }                                           // a live recording (either mode) → finish it
+    if (_batchResult) { const r = _batchResult; _batchResult = null; await Voice.apply(r.raw, r.before, mode); return; }   // a parked result → act on it
   }
   async function _voiceCancel() {   // discard
     // Cancel during polish = discard, same as everywhere else: drop the request and
@@ -8768,7 +8750,6 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     }
     if (Voice.s) { Voice.cancel(); return; }
     if (_batchResult) { const r = _batchResult; _batchResult = null; inputEl.value = r.before; inputEl.dispatchEvent(new Event("input")); _setMic("idle"); return; }   // discard the batch result (restore the box)
-    if (_mediaRec && _recording) { _recCancelled = true; _recording = false; _mediaRec.stop(); }
   }
 
   // ---------- realtime (streaming) voice: browser PCM → /api/asr-stream → OpenAI ----------
@@ -8784,9 +8765,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     for (let i = 0; i < f32.length; i++) { const s = Math.max(-1, Math.min(1, f32[i])); buf[i] = s < 0 ? s * 0x8000 : s * 0x7FFF; }
     return buf;
   }
-  // Realtime streaming-voice module. State in Voice.s (null when idle / using the
-  // batch path); methods handle connect → live tokens → finalize. The batch path
-  // (MediaRecorder) shares Voice.apply() for the send/edit/polish finish step.
+  // THE voice module — both ⚙ modes are one session in Voice.s (null when idle).
+  // Realtime opens a WS and streams tokens; batch (batchOnly) skips the WS and lets the
+  // local MediaRecorder carry the whole clip to /api/asr on stop. Everything else —
+  // capture, ⏸/▶, the 5-min cap, the status line, Polish/Edit/Send, park-with-a-reason —
+  // is shared, which is the point: batch used to be a parallel implementation that
+  // quietly lacked most of it.
   const Voice = {
     s: null,
     render() {
@@ -8842,14 +8826,21 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       Voice.teardownStream();            // stop holding a socket that isn't delivering
       Voice.paintBatchOnly(why);
     },
-    // The transcript row for a batch-only session. Keeps whatever realtime did manage to
-    // return (half a sentence is still worth showing) and appends the reason + what
-    // happens next, so "no more words appearing" never reads as a freeze.
+    // The transcript row for a batch-only session, in both of its flavours:
+    //   why === ""  → batch by choice (⚙ 🎤): nothing went wrong, so just say which mode
+    //                 this is and when text will appear.
+    //   why !== ""  → realtime gave up mid-recording: the same line plus the reason, and
+    //                 keep whatever it did manage to return (half a sentence is still
+    //                 worth having).
+    // Either way, "no words appearing" must never read as a freeze.
     paintBatchOnly(why) {
       const s = Voice.s; if (!s || !recLiveEl) return;
-      const note = "<span class='rec-live-partial'>  ⚠ " + _escHtml(why || "realtime ASR unavailable")
-        + " — " + (s.paused ? "paused; tap ▶ to keep recording" : "still recording (batch)")
-        + "; the whole clip gets transcribed when you stop</span>";
+      const what = s.paused ? "paused — tap ▶ to record more" : "recording";
+      const then = "; transcribed in one go when you stop";
+      const note = why
+        ? "<span class='rec-live-partial'>  ⚠ " + _escHtml(why) + " — " + what + " (batch)" + then + "</span>"
+        : "<span class='rec-live-partial'>batch mode" + (asrWhich ? " · " + _escHtml(asrWhich) : "")
+          + " — " + what + then + "</span>";
       const txt = (s.finalText + s.partial).trim();
       recLiveEl.style.display = "";
       // With no transcript this note IS the status line, so render() must not blank it.
@@ -8870,7 +8861,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     startCapture() {
       const s = Voice.s; if (!s || s.ac) return;
       const PEND_MAX_BYTES = 90 * 24000 * 2;   // ~90s of 24kHz mono PCM16 (~4.3MB)
-      const MAX_MS = 300000;                   // 5-min absolute safety cap (the only auto-stop)
+      const MAX_MS = VOICE_MAX_MS;             // 5-min absolute safety cap (the only auto-stop)
       try {
         const AC = window.AudioContext || window.webkitAudioContext;
         const ac = new AC();   // hardware rate (iOS ignores/breaks a forced 24k) → downsample in JS
@@ -8889,12 +8880,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
             Voice.stop("park");
             return;
           }
+          // Batch (by choice or after a fallback): the clip is transcribed from the
+          // MediaRecorder on stop, so there is nothing to downsample or buffer. The loop
+          // still runs — it owns the 5-min cap above, and ⏸ makes it pause-aware.
+          if (st.dropped) return;
           let buf;
           try { buf = _f32ToPcm16(_downTo24k(ev.inputBuffer.getChannelData(0), ac.sampleRate)).buffer; }
           catch { return; }
           const w = st.ws;
           if (w && w.readyState === 1) { Voice.flushPending(w); try { w.send(buf); } catch {} return; }
-          if (st.dropped) return;   // batch-only: nothing will ever ship these frames
           st.pendBytes = (st.pendBytes || 0) + buf.byteLength;
           if (st.pendBytes <= PEND_MAX_BYTES) { st.pending.push(buf); return; }
           // Past the cap: stop growing, and mark the session so Stop recovers the FULL
@@ -8924,7 +8918,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         if (recWaveEl) recWaveEl.style.display = "none";   // the wave means "listening"
         // Same contradiction as stop: a "recording — connecting…" line must not survive
         // a pause. Only when there's no transcript to protect.
-        if (s.dropped) Voice.paintBatchOnly("realtime ASR unavailable");
+        if (s.dropped) Voice.paintBatchOnly(s.batchOnly ? "" : "realtime ASR unavailable");
         else if (!s.gotAny) _recLiveStatus("paused — tap ▶ to continue");
         _recTimerPause();
       } else {
@@ -8933,9 +8927,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         s.pausedAt = 0;
         try { if (s.mr && s.mr.state === "paused") s.mr.resume(); } catch {}
         if (recWaveEl) recWaveEl.style.display = "";
-        // A session that already fell into batch must NOT resume claiming to connect an
-        // ASR: this recording stays batch to the end (the next 🎤 tap reads ⚙ again).
-        if (s.dropped) Voice.paintBatchOnly("realtime ASR unavailable");
+        // A batch session (by choice, or one that already fell back) must NOT resume
+        // claiming to connect an ASR. A fallback stays batch until this recording ends;
+        // the next 🎤 tap reads ⚙ again.
+        if (s.dropped) Voice.paintBatchOnly(s.batchOnly ? "" : "realtime ASR unavailable");
         else if (!s.gotAny) _recLiveStatus(s.upReady ? "listening — say something…"
                                                     : "recording — connecting ASR…");
         _recTimerResume(gap);
@@ -9053,10 +9048,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const waiting = s.gotAny || connected;
       s._finDeadline = Date.now() + (waiting ? 30000 : 0);
       if (!s.gotAny) {
-        _recLiveStatus(waiting ? "stopped — waiting for the ASR to finish…"
-                               : "no realtime result — transcribing the whole recording…");
+        _recLiveStatus(s.batchOnly ? "stopped — transcribing the recording…"
+                                   : waiting ? "stopped — waiting for the ASR to finish…"
+                                             : "no realtime result — transcribing the whole recording…");
       }
-      s._finTimer = setTimeout(() => Voice.finalize(), s.dropped ? 400 : (waiting ? 30000 : 0));
+      // batchOnly: no stream ever existed, so go straight to the transcription.
+      s._finTimer = setTimeout(() => Voice.finalize(),
+                               s.batchOnly ? 0 : s.dropped ? 400 : (waiting ? 30000 : 0));
     },
     async polish(raw, before) {   // shared polish step (same endpoint + gating as batch)
       _setMic("busy");
@@ -9099,7 +9097,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (failReason) { _voiceParkResult(raw, before, failReason); return; }
       _setMic("idle"); if (!isPhone()) inputEl.focus();
     },
-    apply(raw, before, mode) {   // put text in the box, then act by mode (shared by realtime + batch)
+    apply(raw, before, mode) {   // put text in the box, then act by mode (both ⚙ modes)
+      lastAsrRaw = raw || ""; lastAsrSec = null;   // long-press debug view: what the ASR returned
       // "park": an auto-stop (5-min cap) — don't decide for the user. Text goes in
       // the box AND the popup stays open with the reason + Polish/Edit/Send/Cancel.
       if (mode === "park") {
@@ -9133,8 +9132,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // Say what is happening AND why: this step can take a few seconds, and an
         // unexplained pause here reads as "it broke" or "everything I said is lost".
         const _eng = asrWhich ? " with " + asrWhich : "";
-        _recLiveStatus((raw ? "realtime stream dropped — re-transcribing the whole clip"
-                            : "no realtime result — transcribing the whole recording")
+        _recLiveStatus((s.batchOnly ? "transcribing the recording"
+                        : raw ? "realtime stream dropped — re-transcribing the whole clip"
+                              : "no realtime result — transcribing the whole recording")
                        + _eng + "…");
         try { await s.mrDone; } catch {}
         const blob = new Blob(s.chunks || [], { type: (s.mr && s.mr.mimeType) || "audio/webm" });
@@ -9230,14 +9230,27 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         if (!s.gotAny && !s.dropped) _recLiveStatus("recording — connecting ASR…");
       };
     },
-    start(stream) {
+    // ONE recording path for both ⚙ modes. batchOnly = the user picked 🎤 batch (or no
+    // realtime engine is configured): identical session, we simply never open the
+    // stream, so it behaves exactly like a realtime session that fell back — same
+    // capture, same ⏸/▶ (MediaRecorder.pause() means only spoken segments land in the
+    // blob, so pausing several times just gives one clip of the parts you meant), same
+    // 5-min cap, same status line, same Polish/Edit/Send chosen up front, same
+    // park-with-a-reason on every dead end. The old batch path was a second,
+    // less-capable implementation of all of that (_mediaRec + a two-step result bar).
+    start(stream, batchOnly) {
       const before = inputEl.value ? (inputEl.value.replace(/\s*$/, "") + " ") : "";
-      const provider = asrRtEngine || (sonioxAvail ? "soniox" : "openai");   // user-chosen realtime engine
-      const s = { before, provider, opened: false, dropped: false, gotAny: false, retries: 0, finalText: "", partial: "",
+      const provider = batchOnly ? "" : (asrRtEngine || (sonioxAvail ? "soniox" : "openai"));   // user-chosen realtime engine
+      const s = { before, provider, opened: false, gotAny: false, retries: 0, finalText: "", partial: "",
+                  batchOnly: !!batchOnly,
+                  // dropped = "no realtime text is coming, transcribe the clip on stop".
+                  // A batch-by-choice session starts that way; everything downstream
+                  // (finalize, ⏸, the audio loop) already keys off this one flag.
+                  dropped: !!batchOnly,
                   stopping: false, stream, ac: null, sp: null, src: null, mute: null, ws: null, _finTimer: null,
                   mr: null, chunks: [], mrDone: null, startMs: 0,
                   pending: [], pendBytes: 0,     // PCM captured before/between connections
-                  paused: false, pausedAt: 0,     // ⏸ (realtime only)
+                  paused: false, pausedAt: 0,     // ⏸
                   upReady: false };               // server said its upstream ASR is live
       Voice.s = s;
       // Record the FULL audio locally in parallel → if streaming drops, recover via non-streaming /api/asr on Stop.
@@ -9269,22 +9282,25 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       Voice.startCapture();
       if (recWaveEl) recWaveEl.style.display = "";
       if (recLiveEl) recLiveEl.style.display = "";
-      _recLiveStatus("recording — connecting ASR…");
-      // Send submits immediately, so it stays DISABLED until the realtime engine has
-      // actually returned something (Voice.render enables it on the first token).
-      // Before that there is no transcript to submit — it would have quietly sent
-      // nothing. Polish / Edit stay live: they stop the recording and, if realtime
-      // produced nothing, recover the whole clip through the batch engine.
-      if (recPauseEl) { recPauseEl.style.display = ""; }   // ⏸ pause/resume — realtime only
+      if (batchOnly) Voice.paintBatchOnly("");   // says which mode this is + when text arrives
+      else _recLiveStatus("recording — connecting ASR…");
+      if (recPauseEl) { recPauseEl.style.display = ""; }   // ⏸ pause / ▶ resume
       _syncPauseBtn();
       if (recSendEl) {
-        recSendEl.style.display = "";                    // Send (raw, submit) — realtime only
-        recSendEl.disabled = true;
-        recSendEl.title = "waiting for the first realtime result — use Polish/Edit to stop and transcribe the whole clip";
+        recSendEl.style.display = "";                    // Send (raw, submit)
+        // Realtime: Send submits immediately, so it stays DISABLED until the engine has
+        // actually returned something (render() enables it on the first token) —
+        // otherwise it would quietly submit nothing. Batch: there is never any text
+        // before you stop, and "stop → transcribe → submit" is exactly what Send should
+        // do here, so keep it live (Polish/Edit are the ways to look first).
+        recSendEl.disabled = !batchOnly;
+        recSendEl.title = batchOnly
+          ? "stop, transcribe the recording, and submit it as-is"
+          : "waiting for the first realtime result — use Polish/Edit to stop and transcribe the whole clip";
       }
       if (recEditEl) recEditEl.style.display = "";       // Edit (raw → input box, no polish/send)
       if (recStopEl) recStopEl.textContent = "Polish";
-      Voice.openStream();
+      if (!batchOnly) Voice.openStream();
     },
   };
   micBtn.addEventListener("click", async () => {
@@ -9296,46 +9312,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       alert("麦克风不可用: " + e.name + "。需通过 HTTPS 打开(getUserMedia 要 secure context)。");
       return;
     }
-    if (asrRt && asrRtAvail) { Voice.start(stream); return; }   // streaming path (old batch path below)
-    _mediaChunks = [];
-    _mediaRec = new MediaRecorder(stream);
-    _mediaRec.ondataavailable = e => _mediaChunks.push(e.data);
-    _mediaRec.onstop = async () => {
-      stream.getTracks().forEach(t => t.stop());   // release the mic immediately
-      if (_recCancelled) { _recCancelled = false; _setMic("idle"); return; }   // discarded
-      _setMic("busy"); _recBarBusy("transcribing the recording…");   // step 1 done → result comes all at once
-      const before = inputEl.value ? (inputEl.value.replace(/\s*$/, "") + " ") : "";
-      const blob = new Blob(_mediaChunks, { type: _mediaRec.mimeType });
-      // Every failure below used to end in `_setMic("idle")` — the popup just
-      // disappeared, twice of them without even an alert. Park with the reason
-      // instead; the popup waits for Cancel (or any other button).
-      if (!blob.size) { _voiceParkResult("", before, "没有录到音频（麦克风可能被系统中断）"); return; }
-      let asrText = "";
-      try {
-        const qs = new URLSearchParams();
-        if (asrWhich) qs.set("which", asrWhich);
-        if (attachedSid) qs.set("sid", attachedSid);   // context → ASR prompt (bias domain vocab)
-        const ar = await authedFetch("/api/asr?" + qs.toString(), { method: "POST", headers: { "content-type": blob.type || "audio/webm" }, body: blob, timeoutMs: 60000 });
-        if (!ar.ok) {
-          const body = await ar.text().catch(() => "");
-          _voiceParkResult("", before, "识别失败 (HTTP " + ar.status + ") " + body.slice(0, 120));
-          return;
-        }
-        asrText = ((await ar.json()).text || "").trim();
-      } catch (e) {
-        _voiceParkResult("", before,
-          e && e.name === "AbortError" ? "识别超时（60s）— 请重试" : "识别失败: " + e);
-        return;
-      }
-      if (!asrText) { _voiceParkResult("", before, "没有识别到内容（没说话，或声音太小）"); return; }
-      lastAsrRaw = asrText; lastAsrSec = null; lastPolishSec = null; lastPolished = "";
-      // step 2: drop the raw text into the box and show Polish / Edit / Send to act on it
-      inputEl.value = before + asrText; inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
-      _batchResult = { raw: asrText, before };
-      _showBatchResultBar(asrText);
-    };
-    _recCancelled = false;
-    _mediaRec.start(); _recording = true; _setMic("rec");
+    // One path, two modes: batchOnly when the ⚙ switch says 🎤 batch (or no realtime
+    // engine is configured at all). The ~40 lines of a separate _mediaRec pipeline that
+    // used to live here are gone — see Voice.start().
+    Voice.start(stream, !(asrRt && asrRtAvail));
   });
 
   // ---------- image upload ----------
