@@ -8829,6 +8829,33 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       try { if (s.ws && s.ws.readyState <= 1) { s.ws.onclose = null; s.ws.close(); } } catch {}
       s.ws = null; s.opened = false;
     },
+    // Give up on realtime for THIS recording: keep capturing locally and transcribe the
+    // whole clip through the batch engine on stop. Every mid-capture "the stream is no
+    // good" path funnels through here, so ⏸ / ▶ and the status line agree on which mode
+    // we are in — pressing ▶ resumes into batch instead of claiming to connect an ASR
+    // we already gave up on. Deliberately per-SESSION: the next tap on 🎤 reads the ⚙
+    // mode again, so this is a temporary fallback, not a sticky mode switch.
+    goBatch(why) {
+      const s = Voice.s; if (!s || s.dropped) return;
+      s.dropped = true;
+      s.pending = []; s.pendBytes = 0;   // buffered PCM can never be shipped now — free it
+      Voice.teardownStream();            // stop holding a socket that isn't delivering
+      Voice.paintBatchOnly(why);
+    },
+    // The transcript row for a batch-only session. Keeps whatever realtime did manage to
+    // return (half a sentence is still worth showing) and appends the reason + what
+    // happens next, so "no more words appearing" never reads as a freeze.
+    paintBatchOnly(why) {
+      const s = Voice.s; if (!s || !recLiveEl) return;
+      const note = "<span class='rec-live-partial'>  ⚠ " + _escHtml(why || "realtime ASR unavailable")
+        + " — " + (s.paused ? "paused; tap ▶ to keep recording" : "still recording (batch)")
+        + "; the whole clip gets transcribed when you stop</span>";
+      const txt = (s.finalText + s.partial).trim();
+      recLiveEl.style.display = "";
+      // With no transcript this note IS the status line, so render() must not blank it.
+      _recStatusHtml = txt ? "" : note;
+      recLiveEl.innerHTML = (txt ? _escHtml(txt) : "") + note;
+    },
     // Mic → PCM16, running from the moment you tap 🎤, independent of the ASR
     // connection. Anything captured before the WS is up goes into s.pending and is
     // flushed, in order, the instant it opens.
@@ -8867,16 +8894,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           catch { return; }
           const w = st.ws;
           if (w && w.readyState === 1) { Voice.flushPending(w); try { w.send(buf); } catch {} return; }
+          if (st.dropped) return;   // batch-only: nothing will ever ship these frames
           st.pendBytes = (st.pendBytes || 0) + buf.byteLength;
           if (st.pendBytes <= PEND_MAX_BYTES) { st.pending.push(buf); return; }
           // Past the cap: stop growing, and mark the session so Stop recovers the FULL
           // audio via the batch /api/asr path instead of shipping a holed transcript.
-          if (!st.dropped) {
-            st.dropped = true;
-            console.warn("asr-rt: >90s buffered with no connection → batch fallback on stop");
-            if (recLiveEl) recLiveEl.innerHTML = "<span class='rec-live-hint'><span class='rec-spin'></span>"
-              + "recording — ASR unreachable, will transcribe the whole clip on stop</span>";
-          }
+          console.warn("asr-rt: >90s buffered with no connection → batch fallback on stop");
+          Voice.goBatch("realtime ASR unreachable");
         };
         src.connect(sp); sp.connect(mute); mute.connect(ac.destination);
       } catch (err) {
@@ -8900,7 +8924,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         if (recWaveEl) recWaveEl.style.display = "none";   // the wave means "listening"
         // Same contradiction as stop: a "recording — connecting…" line must not survive
         // a pause. Only when there's no transcript to protect.
-        if (!s.gotAny) _recLiveStatus("paused — tap ▶ to continue");
+        if (s.dropped) Voice.paintBatchOnly("realtime ASR unavailable");
+        else if (!s.gotAny) _recLiveStatus("paused — tap ▶ to continue");
         _recTimerPause();
       } else {
         const gap = Date.now() - (s.pausedAt || Date.now());
@@ -8908,8 +8933,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         s.pausedAt = 0;
         try { if (s.mr && s.mr.state === "paused") s.mr.resume(); } catch {}
         if (recWaveEl) recWaveEl.style.display = "";
-        if (!s.gotAny) _recLiveStatus(s.upReady ? "listening — say something…"
-                                               : "recording — connecting ASR…");
+        // A session that already fell into batch must NOT resume claiming to connect an
+        // ASR: this recording stays batch to the end (the next 🎤 tap reads ⚙ again).
+        if (s.dropped) Voice.paintBatchOnly("realtime ASR unavailable");
+        else if (!s.gotAny) _recLiveStatus(s.upReady ? "listening — say something…"
+                                                    : "recording — connecting ASR…");
         _recTimerResume(gap);
       }
       _syncPauseBtn();
@@ -8974,11 +9002,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         setTimeout(() => { if (Voice.s && !Voice.s.stopping) Voice.openStream(); }, 400 * s.retries);
         return;
       }
-      if (s.mr && s.mr.state === "recording") {
-        s.dropped = true;
-        if (recLiveEl) recLiveEl.innerHTML = _escHtml((s.finalText + s.partial).trim())
-          + "<span class='rec-live-partial'>  ⚠ realtime ASR dropped — still recording; "
-          + "the whole clip gets transcribed when you stop</span>";
+      // Still holding a local recording → degrade to batch and carry on. `!== "inactive"`
+      // rather than `=== "recording"` on purpose: while ⏸ is held the recorder is
+      // "paused", and the old check fell through to Voice.fail() below — so an upstream
+      // timing out during a pause killed the whole session ("语音连接中断") instead of
+      // just marking it batch-only, and there was nothing left to resume.
+      if (s.mr && s.mr.state !== "inactive") {
+        Voice.goBatch("realtime ASR dropped" + (msg ? "（" + msg + "）" : ""));
         return;
       }
       // Nothing transcribed, retries spent, and no local recording to fall back on.
