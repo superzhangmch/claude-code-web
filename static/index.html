@@ -8917,12 +8917,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // Called on every message that carries new text while we're stopping: push the
     // finalize a bit further out, but never past _finDeadline.
     bumpFinalize() {
+      // Called when new text arrives after stop. It may only EXTEND the wait — it used
+      // to re-arm a SHORTER timer (1.2s of quiet), which is what cut bursty tails off.
       const s = Voice.s; if (!s || !s.stopping) return;
-      if (!s._finDeadline) s._finDeadline = Date.now() + 8000;
-      const left = s._finDeadline - Date.now();
+      const want = Date.now() + 10000;                 // keep it alive while text flows
+      if (want > (s._finDeadline || 0)) s._finDeadline = want;
       clearTimeout(s._finTimer);
-      if (left <= 0) { Voice.finalize(); return; }
-      s._finTimer = setTimeout(() => Voice.finalize(), Math.min(1200, left));
+      s._finTimer = setTimeout(() => Voice.finalize(), Math.max(0, s._finDeadline - Date.now()));
     },
     flushPending(w) {
       const s = Voice.s; if (!s || !s.pending || !s.pending.length) return;
@@ -8953,7 +8954,16 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // Unexpected drop. Early (no tokens yet) → silently reconnect a few times. Otherwise the
     // local MediaRecorder keeps the full audio and Stop falls back to non-streaming /api/asr.
     streamDrop(msg) {
-      const s = Voice.s; if (!s || s.stopping) return;
+      const s = Voice.s;
+      if (!s) return;
+      if (s.stopping) {
+        // The socket died while draining: nothing more can arrive, so stop waiting for
+        // the deadline and wrap up with what we have (finalize falls back to the batch
+        // engine if that turned out to be nothing).
+        clearTimeout(s._finTimer);
+        Voice.finalize();
+        return;
+      }
       if (!s.gotAny && (s.retries || 0) < 3) {
         s.retries = (s.retries || 0) + 1;
         console.warn("asr-rt early drop (" + (msg || "") + ") → retry #" + s.retries);
@@ -8998,25 +9008,25 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // fire mid-drain: finalize() nulls Voice.s, every later token was dropped by
       // onmessage, and the box got a HALF sentence. Now the wait extends as long as
       // text keeps arriving (bumpFinalize), bounded by an absolute deadline.
-      s._finDeadline = Date.now() + 8000;
-      // How long to wait for the provider to drain. The 2.5s exists to catch the tail
-      // of your last sentence — but there IS no tail if the stream never came alive,
-      // and sitting on the timer there is the "I pressed stop and it just kept saying
-      // connecting" bug: finalize() is what switches to the batch engine, so delaying
-      // it delays the whole fallback. `opened` alone is not proof of life (the browser→
-      // server hop opens instantly even when the upstream is dead), hence upReady for
-      // soniox; the OpenAI bridge sends no such signal and only emits text after a
-      // commit, so there `opened` is the best we have.
-      const alive = s.provider === "soniox" ? (s.opened && s.upReady) : s.opened;
-      const delay = s.dropped ? 400 : ((s.gotAny || alive) ? 2500 : 0);
-      // Replace any "recording…"/"listening…" line — we just stopped. Guarded on
-      // gotAny because the status line and the transcript share one element: with text
-      // on screen, writing a status would wipe the very words we're waiting to keep.
+      // stop() means ONE thing: stop capturing audio. It must not cut the provider
+      // short. So:
+      //   * still connecting  → there is nothing to wait for; abandon the stream and
+      //     transcribe the whole local clip through the batch engine (delay 0).
+      //   * already connected → let it return EVERYTHING. The end comes from the
+      //     provider itself (soniox `finished`, OpenAI `transcription.completed`) or
+      //     from the socket closing — never from a guessed quiet period. Silence is
+      //     not evidence that it finished; a tail arriving after a flat 2.5s timer used
+      //     to be dropped because finalize() had already nulled the session.
+      //   * the long deadline below is only a net against a wedged socket, so the UI
+      //     can't hang forever. The "finishing 1.4s" counter shows it's still working.
+      const connected = s.provider === "soniox" ? (s.opened && s.upReady) : s.opened;
+      const waiting = s.gotAny || connected;
+      s._finDeadline = Date.now() + (waiting ? 30000 : 0);
       if (!s.gotAny) {
-        _recLiveStatus(delay ? "stopped — waiting for the ASR…"
-                             : "no realtime result — transcribing the whole recording…");
+        _recLiveStatus(waiting ? "stopped — waiting for the ASR to finish…"
+                               : "no realtime result — transcribing the whole recording…");
       }
-      s._finTimer = setTimeout(() => Voice.finalize(), delay);
+      s._finTimer = setTimeout(() => Voice.finalize(), s.dropped ? 400 : (waiting ? 30000 : 0));
     },
     async polish(raw, before) {   // shared polish step (same endpoint + gating as batch)
       _setMic("busy");
