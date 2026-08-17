@@ -103,7 +103,7 @@ check("goBatch marks the session batch-only", Voice.s.dropped === true);
 check("...frees the PCM that can never be shipped", Voice.s.pending.length === 0 && Voice.s.pendBytes === 0);
 check("...closes the socket it gave up on", calls.includes("teardownStream"));
 check("...and says recording continues, in batch", /recording \(batch\)/.test(bar()), bar().slice(0, 90));
-check("...naming what happens on stop", /transcribed in one go when you stop/.test(bar()));
+check("...as a status line, not a how-to", !/tap /.test(bar()) && !/Polish/.test(bar()));
 check("...without claiming it is still connecting", !/connecting/i.test(bar()));
 check("a second goBatch is a no-op (no double teardown)",
       (() => { calls.length = 0; Voice.goBatch("again"); return calls.length === 0; })());
@@ -135,7 +135,7 @@ Voice.togglePause();                                   // mr.state -> "paused"
 Voice.streamDrop("closed");
 check("the session survives (no Voice.fail)", !calls.some(c => c.startsWith("fail:")), calls.join(","));
 check("...as batch-only", Voice.s.dropped === true);
-check("...and ▶ is still there to press", /tap ▶ to record more/.test(bar()), bar().slice(0, 90));
+check("...showing it is paused, in batch", /paused \(batch\)/.test(bar()), bar().slice(0, 90));
 Voice.togglePause();
 check("...resuming after that drop records in batch", Voice.s.paused === false && /batch/.test(bar()));
 

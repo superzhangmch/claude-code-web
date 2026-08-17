@@ -8838,16 +8838,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // Either way, "no words appearing" must never read as a freeze.
     paintBatchOnly(why, warn) {
       const s = Voice.s; if (!s || !recLiveEl) return;
-      const what = s.paused ? "paused — tap ▶ to record more" : "recording";
-      const then = "; transcribed in one go when you stop";
-      const note = why
-        ? "<span class='rec-live-partial'>  ⚠ " + _escHtml(why) + " — " + what + " (batch)" + then + "</span>"
-        : "<span class='rec-live-partial'>batch mode" + (asrWhich ? " · " + _escHtml(asrWhich) : "") + " — " + what
-          + (s.paused ? ", or Polish / Edit / Send" : "; tap ⏸ to transcribe what you have said so far") + "</span>"
-          + (warn ? "<span class='rec-live-err'>  ⚠ " + _escHtml(warn) + "</span>" : "");
       const txt = (s.finalText + s.partial).trim();
+      // STATUS only, no instructions: which mode, which engine, recording or paused, plus
+      // anything that actually went wrong. The how-to blurb this used to carry ("tap ▶ to
+      // record more, or Polish / Edit / Send") was noise stapled to the end of the user's
+      // own words — the buttons are right there and already say what they do.
+      const stat = why
+        ? "⚠ " + _escHtml(why) + " — " + (s.paused ? "paused" : "recording") + " (batch)"
+        : "batch mode" + (asrWhich ? " · " + _escHtml(asrWhich) : "") + " — " + (s.paused ? "paused" : "recording");
+      const note = "<span class='rec-live-partial'>" + (txt ? "  " : "") + stat + "</span>"
+                 + (warn ? "<span class='rec-live-err'>  ⚠ " + _escHtml(warn) + "</span>" : "");
       recLiveEl.style.display = "";
-      // With no transcript this note IS the status line, so render() must not blank it.
+      // With no transcript this line IS the status line, so render() must not blank it.
       _recStatusHtml = txt ? "" : note;
       recLiveEl.innerHTML = (txt ? _escHtml(txt) : "") + note;
     },

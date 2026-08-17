@@ -156,7 +156,8 @@ check("the session is batch-only from the start", s0.batchOnly === true && s0.dr
 check("...with no realtime provider", s0.provider === "");
 check("a clip is being recorded", recorders.length === 1 && recorders[0].state === "recording");
 check("the bar names the mode and engine", /batch mode/.test(bar()) && bar().includes("whisper-big"), bar().slice(0, 95));
-check("...and says ⏸ is what produces text", /tap ⏸ to transcribe/.test(bar()));
+check("...whether it is recording or paused", /— recording/.test(bar()), bar().slice(0, 95));
+check("...and nothing else: status, not a how-to", !/tap ⏸/.test(bar()) && !/Polish/.test(bar()));
 check("...without pretending to connect anything", !/connecting/i.test(bar()));
 check("⏸ is available in batch too", recPauseEl.style.display === "");
 check("Send waits for a transcript, exactly like realtime",
@@ -171,6 +172,8 @@ check("⏸ posts the clip to /api/asr", asrCalls() === 1);
 check("...honouring the ⚙-selected batch engine + session context",
       fetches[0].url.includes("which=whisper-big") && fetches[0].url.includes("sid=sid1"), fetches[0].url);
 check("...the words appear in the bar", bar().includes("first bit"), bar().slice(0, 60));
+check("...followed by the status only, never instructions",
+      /batch mode/.test(bar()) && !/tap ▶/.test(bar()) && !/Polish \/ Edit \/ Send/.test(bar()), bar().slice(0, 110));
 check("...and in the input box", inputEl.value === "first bit", inputEl.value);
 check("...Send becomes usable, as it does on the first realtime token", recSendEl.disabled === false);
 check("...the spinner ran in the time slot, leaving the transcript alone",
