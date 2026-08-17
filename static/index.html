@@ -282,6 +282,29 @@ main {
   padding: 4px 12px; font-size: 12px; cursor: pointer; line-height: 1;
 }
 #picker-font button:hover { border-color: var(--accent); color: var(--text); }
+/* Brief list rows — the ⇆ switcher's one-liner, reused as the list's default view.
+   Same spans (.sw-wt/.sw-sid/.sw-tab/.sw-sess) so the two stay visually identical. */
+#picker-list .brief-row {
+  display: flex; align-items: baseline; gap: 6px; width: 100%; box-sizing: border-box;
+  background: var(--panel2); border: 1px solid transparent; border-radius: 6px;
+  padding: 7px 10px; margin-bottom: 4px; cursor: pointer; font-size: 13px;
+}
+#picker-list .brief-row:hover { border-color: var(--accent); }
+#picker-list .brief-row.current { border-color: var(--accent); }
+#picker-list .brief-row .sw-wt { color: var(--muted); opacity: .7; font-size: 11px; flex-shrink: 0; }
+#picker-list .brief-row .sw-sid { color: var(--muted); opacity: .55; font-size: 11px; flex-shrink: 0;
+  font-family: ui-monospace, Menlo, monospace; }
+#picker-list .brief-row .sw-tab { color: var(--accent); font-weight: 700; flex-shrink: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#picker-list .brief-row .sw-sess { color: var(--text); flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#picker-list .brief-row .sw-sess.dim { color: var(--muted); }
+#picker-list .brief-row .br-time { color: var(--muted); font-size: 11px; flex-shrink: 0; }
+#picker-list .brief-row .br-dot { color: var(--accent); font-size: 11px; flex-shrink: 0; }
+#picker-brief { flex-shrink: 0; background: var(--panel2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px;
+  font-size: 12px; cursor: pointer; line-height: 1; }
+#picker-brief:hover { border-color: var(--accent); color: var(--text); }
 /* Quick filter (client-side, filters the loaded list) — pinned at the top. */
 #picker-quickfilter {
   width: 100%; box-sizing: border-box; margin: 10px 0 4px;
@@ -2291,6 +2314,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div id="picker">
       <div id="picker-head">
         <h2 id="picker-title">Sessions</h2>
+        <button id="picker-brief" title="brief 一行式(快) / full 卡片(带对话摘录)">≣ brief</button>
       </div>
       <div id="picker-runaway" style="display:none"></div>
       <input id="picker-quickfilter" type="search" autocomplete="off"
@@ -2876,6 +2900,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   })();
   // Tabs group ordering: "tab" (window/tab) or "use" (last-modified desc).
   let tabsSort = localStorage.getItem("cc_web_tabs_sort") || "tab";
+  // Brief list = one line per session, built without opening a single transcript
+  // (/api/sessions?brief=1). Default ON: the full list parses every JSONL to produce the
+  // card excerpts, which on a cold cache was ~220ms of server work and ~5x the payload
+  // before the first paint — most of it for text you scroll past anyway.
+  let listBrief = (localStorage.getItem("cc_web_list_brief") || "1") === "1";
 
   // Set `el`'s text with any case-insensitive occurrences of `terms` wrapped in
   // <span class="hl"> (the red "飘红" highlight). Builds DOM, so it's XSS-safe.
@@ -2961,6 +2990,21 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 
   // picker ⚙ dropdown: Q-mode / theme / font / reload all live here now (their
   // own handlers stay wired by id — the buttons just moved inside this menu).
+  const pickerBriefBtn = document.getElementById("picker-brief");
+  function syncBriefBtn() {
+    if (!pickerBriefBtn) return;
+    pickerBriefBtn.textContent = listBrief ? "≣ brief" : "▤ full";
+    pickerBriefBtn.title = listBrief
+      ? "brief: 只列运行中的 tab,一行一个,不读 transcript(快)。点一下切到 full(含 Recent/Named + 对话摘录)"
+      : "full: 卡片 + Recent/Named + 最近对话摘录(要解析每个 transcript)。点一下切回 brief";
+  }
+  syncBriefBtn();
+  if (pickerBriefBtn) pickerBriefBtn.addEventListener("click", () => {
+    listBrief = !listBrief;
+    try { localStorage.setItem("cc_web_list_brief", listBrief ? "1" : "0"); } catch {}
+    syncBriefBtn();
+    refreshPicker();     // the two views need different payloads, so re-fetch
+  });
   const pickerCfgBtn = document.getElementById("picker-cfg");
   const pickerCfgMenu = document.getElementById("picker-cfg-menu");
   pickerCfgBtn.addEventListener("click", (e) => {
@@ -5065,7 +5109,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     pickerListEl.innerHTML = "<div style='color:var(--muted);font-size:12px;padding:20px;text-align:center'>loading…</div>";
     let resp;
     try {
-      resp = await authedFetch("/api/sessions?card=" + cardMode);
+      resp = await authedFetch(listBrief ? "/api/sessions?brief=1"
+                                        : "/api/sessions?card=" + cardMode);
     } catch (e) {
       _pickerError(e && e.name === "AbortError" ? "加载超时" : "加载失败");
       return;
@@ -5210,13 +5255,56 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     });
   }
 
+  // One brief row: wXtY · sid4 · [tab-name] · session-name … last-use.
+  // Click = what the card's title button does (Enter when bound, else Attach); the full
+  // view keeps the management actions (rename, close tab, kill, transcript excerpts).
+  function briefRow(s, singleWin) {
+    const row = document.createElement("div");
+    const isCur = s.claude_session_id === attachedSid;
+    row.className = "brief-row" + (isCur ? " current" : "");
+    row.dataset.sid = s.claude_session_id;
+    const add = (cls, txt) => {
+      if (!txt) return null;
+      const e = document.createElement("span"); e.className = cls; e.textContent = txt;
+      row.appendChild(e); return e;
+    };
+    if (s.group === "tabs") {
+      add("sw-wt", (singleWin ? `t${(s.tab_index || 0) + 1}`
+                              : `w${(s.window_index || 0) + 1}t${(s.tab_index || 0) + 1}`)
+                   + (isCur ? "*" : ""));
+    }
+    add("sw-sid", s.claude_session_id.slice(0, 4));
+    const tn = (s.tab_name || "").trim();
+    if (tn) add("sw-tab", "[" + tabLabel(tn) + "]");
+    // Name, in the same order the switcher uses; the LLM summary is the fallback so a
+    // never-named session is still recognisable.
+    const name = (s.user_name || s.summary_title || s.title || "").trim();
+    const txt = name || (s.summary || "").trim();
+    const nameEl = add("sw-sess", txt || "(no title yet)");
+    if (nameEl && !name) nameEl.classList.add("dim");
+    if (!nameEl) row.appendChild(document.createElement("span"));   // keep the time right-aligned
+    if (s.bound) add("br-dot", "●");                                // attached to a live tab
+    // ~ = the timestamp came from the file mtime because the tail held no human turn.
+    add("br-time", (s.ts_approx ? "~" : "") + (s.last_visit || ""));
+    row.addEventListener("click", () => {
+      const label = s.user_name || s.summary_title || s.title || s.project_path || "";
+      if (s.bound) enterTranscript(s.claude_session_id, label);
+      else attachSession(s.claude_session_id, label);
+    });
+    return row;
+  }
+
   function renderPicker() {
     const searching = searchResults !== null;
     const sessions = visibleSessions();
     if (!sessions.length) {
       const msg = searching ? "No sessions match this search."
         : (quickText.trim() ? "No sessions match the quick filter."
-          : `No sessions yet. Start <code>claude</code> in ${TERM} and use the <em>session-name</em> skill to name it.`);
+          : listBrief
+            // brief lists the live tabs only, so "nothing here" means no tab is running —
+            // NOT that there are no sessions. Say where the history is.
+            ? `No live <code>claude</code> tab. Start one in ${TERM}, or tap <b>≣ brief</b> above to switch to <b>▤ full</b> and browse past sessions.`
+            : `No sessions yet. Start <code>claude</code> in ${TERM} and use the <em>session-name</em> skill to name it.`);
       pickerListEl.innerHTML = "<div style='color:var(--muted);font-size:12px;padding:20px;text-align:center'>" + msg + "</div>";
       return;
     }
@@ -5276,6 +5364,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         pickerListEl.appendChild(hdr);
       }
       if (hideCurrent) continue;   // collapsed group → skip its cards
+      // Brief view: one compact line, same shape as the ⇆ switcher. Search results keep
+      // the full card even in brief mode — their whole point is the matched text, and
+      // /api/search returns it anyway.
+      if (listBrief && !searching) {
+        pickerListEl.appendChild(briefRow(s, tabsSingleWin));
+        continue;
+      }
       const card = document.createElement("div");
       card.className = "session-card" + (s.named ? "" : " unnamed");
       card.dataset.sid = s.claude_session_id;

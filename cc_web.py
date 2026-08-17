@@ -2190,6 +2190,160 @@ def build_picker_sessions(live_tabs: Optional[list[dict]] = None,
     return out
 
 
+# How much of the END of a transcript the brief list reads to find the last human turn.
+# 64KB is enough for almost every session; a few end in one enormous assistant turn (an
+# 11MB transcript here), so escalate instead of giving up — even three reads of a 4MB tail
+# beat parsing the whole file, and the alternative is a visibly wrong "last used".
+BRIEF_TAIL_WINDOWS = (64 * 1024, 512 * 1024, 4 * 1024 * 1024)
+_BRIEF_TS_CACHE: dict[tuple, tuple[float, bool, int, bool]] = {}
+
+
+def _brief_tail_meta(jsonl: Path, st) -> tuple[float, bool, int, bool]:
+    """What the brief list needs from a transcript, from its TAIL only:
+    (last human message epoch, exact?, human turns seen, was the whole file read?).
+
+    Two things come out of the same read:
+
+    1. "Last used". The file mtime is NOT usable: background rewrites (autonomous-loop
+       ticks, resume, file sync) bump it without anyone talking to the session, and on
+       this corpus that put a session last spoken to on 07-17 at the top of the list
+       dated 08-17. The full list fixes that by parsing everything and taking the last
+       human message; this gets the same answer from one seek+read, which is what makes
+       it usable as the DEFAULT view. exact=False → nothing human was found at all and
+       the caller falls back to mtime, flagged, instead of lying about it.
+
+    2. Whether the session is "empty" (<=1 round), which the browse groups filter on.
+       A file smaller than the window means the "tail" IS the whole file, so the count is
+       the true one and brief can apply the full list's exact rule. Above that, the count
+       is a lower bound: >=2 proves non-empty, and 1 is treated as non-empty too — for a
+       big file that means one round with an enormous answer, and showing a row the full
+       list would hide is a far smaller sin than hiding one it shows.
+    """
+    import datetime as _dt
+    ck = (str(jsonl), st.st_mtime, st.st_size) if st else None
+    hit = _BRIEF_TS_CACHE.get(ck) if ck else None
+    if hit is not None:
+        return hit
+    size = st.st_size if st else 0
+    out = (st.st_mtime if st else 0.0, False, 0, size <= BRIEF_TAIL_WINDOWS[0])
+    for window in BRIEF_TAIL_WINDOWS:
+        best = 0.0
+        rounds = 0
+        whole = size <= window
+        try:
+            with jsonl.open("rb") as f:
+                if size > window:
+                    f.seek(size - window)
+                    f.readline()      # drop the partial line the seek landed in
+                blob = f.read()
+            for line in blob.split(b"\n"):
+                if not line.strip():
+                    continue
+                try:
+                    e = json.loads(line.decode("utf-8", "replace"))
+                except Exception:
+                    continue
+                if not _is_round_start_entry(e):
+                    continue
+                rounds += 1
+                ts = e.get("timestamp") or ""
+                try:
+                    best = max(best, _dt.datetime.fromisoformat(
+                        ts.replace("Z", "+00:00")).timestamp())
+                except Exception:
+                    continue
+        except OSError:
+            break
+        if best:
+            out = (best, True, rounds, whole)
+            break
+        if whole:                     # already read the whole file — a bigger window
+            out = (out[0], False, rounds, True)
+            break                     # would find nothing new
+    
+    if ck:
+        if len(_BRIEF_TS_CACHE) > 512:
+            _BRIEF_TS_CACHE.clear()
+        _BRIEF_TS_CACHE[ck] = out
+    return out
+
+
+def brief_picker_sessions(live_tabs: Optional[list[dict]] = None) -> list[dict]:
+    """The brief list: the live claude tabs, and nothing else.
+
+    build_picker_sessions() also browses the transcript corpus for "recent"/"named"
+    sessions, and calls _session_views() on every row — i.e. parses every JSONL — to
+    produce the card excerpts (cold: ~220ms for 10 rows here, and those excerpts are
+    ~74% of the response body). None of it survives in a one-line row, so brief skips
+    all of it: one directory scan for the tabs' file sizes, one tail read each for
+    "last used" (see _brief_tail_meta — the sort toggle needs it and the file mtime
+    lies), and names straight out of memory.
+
+    Browsing history is what the full view is for; the frontend keeps a toggle.
+    """
+    live_tabs = live_tabs or []
+    if not live_tabs:
+        return []
+    titles = {e["session_id"]: e for e in load_session_index()}
+    wanted = {lt.get("sid") for lt in live_tabs if lt.get("sid")}
+    # One scan, only for the tabs' own files (sizes + paths). No tail read happens for a
+    # transcript that isn't on screen.
+    files: dict[str, Path] = {}
+    if PROJECTS_ROOT.exists():
+        for proj in PROJECTS_ROOT.iterdir():
+            if not proj.is_dir():
+                continue
+            for jsonl in proj.glob("*.jsonl"):
+                if jsonl.stem in wanted:
+                    files[jsonl.stem] = jsonl
+
+    import datetime as _dt
+    out: list[dict] = []
+    seen: set[str] = set()
+    for lt in sorted(live_tabs, key=lambda x: (x.get("window_index", 0),
+                                               x.get("tab_index", 0))):
+        sid = lt.get("sid")
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        used, exact, size = 0.0, True, 0
+        jsonl = files.get(sid)
+        if jsonl is not None:
+            try:
+                st = jsonl.stat()
+                size = st.st_size
+                used, exact, _rounds, _whole = _brief_tail_meta(jsonl, st)
+            except OSError:
+                pass
+        named = titles.get(sid)
+        binding_info = bindings.get_by_session(sid)
+        s_title, s_summary = _summary_of(sid)
+        out.append({
+            "claude_session_id": sid,
+            "group": "tabs",
+            "title": (named.get("title") if named else ""),
+            "project_path": (named.get("project_path") if named else "") or lt.get("cwd", "") or "",
+            "last_visit": _dt.datetime.fromtimestamp(used).strftime("%m-%d %H:%M") if used else "",
+            "mtime": used,            # the frontend's "last use" sort key
+            "ts_approx": not exact,    # no human turn in the tail → mtime, flagged
+            "file_size": size,
+            "named": named is not None,
+            "bound": binding_info is not None and verify_binding(binding_info),
+            "summary": s_summary,
+            "summary_title": s_title,
+            "user_name": _user_name_of(sid),
+            "brief": True,             # the frontend must not present this as a full card
+            "tab_name": lt.get("name", ""),
+            "window_index": lt.get("window_index", 0),
+            "tab_index": lt.get("tab_index", 0),
+            "iterm_session_id": lt.get("iterm_session_id", ""),
+            "pid": lt.get("pid"),
+            "proc_start": lt.get("proc_start"),
+            "cwd": lt.get("cwd", ""),
+        })
+    return out
+
+
 # ---------- transcript / mode filtering (unchanged from before) ----------
 
 # Per-tool "headline" field, in priority order — the first present string
@@ -3912,13 +4066,22 @@ def _get_battery() -> Optional[dict]:
 
 
 @app.get("/api/sessions", dependencies=[Depends(require_token)])
-async def get_sessions(card: str = "both"):
+async def get_sessions(card: str = "both", brief: int = 0):
     """Picker list, grouped: tabs / recent / named. The "tabs" group lists EVERY
     live iTerm2 claude tab, resolved to its session-id via the claude session
-    store (ground-truth pid->session map); recent/named browse the transcripts."""
+    store (ground-truth pid->session map); recent/named browse the transcripts.
+
+    brief=1 → the cheap list (see brief_picker_sessions): no transcript is opened, so
+    no excerpts come back. It is the frontend's default view because first paint on a
+    phone used to wait on parsing every JSONL."""
     live_tabs: list[dict] = []
     try:
-        await bridge.ensure_connected()
+        # ensure_connected() is a wasted connect+refresh on macOS (~100-200ms) because
+        # list_claude_tabs() builds its own connection anyway — /api/tabs learned this
+        # already. Keep it for the full list (harmless there, it is already the slow
+        # path) but never make the brief list pay for it.
+        if not brief:
+            await bridge.ensure_connected()
         for t in await bridge.list_claude_tabs():
             meta = _claude_session_meta(t.pid)
             sid = (meta or {}).get("sessionId") or (t.claude_session_id or "")
@@ -3941,9 +4104,12 @@ async def get_sessions(card: str = "both"):
     if store.get("ok") is False:
         log.warning("claude session-store changed? %s", store.get("detail"))
     return {
-        "sessions": build_picker_sessions(live_tabs=live_tabs,
-                                          recent_n=max(10, n_claude_tabs),
-                                          card_mode=card),
+        "sessions": (brief_picker_sessions(live_tabs=live_tabs)
+                     if brief else
+                     build_picker_sessions(live_tabs=live_tabs,
+                                           recent_n=max(10, n_claude_tabs),
+                                           card_mode=card)),
+        "brief": bool(brief),
         "battery": await asyncio.to_thread(_get_battery),
         "claude_store": store,
         "runaway": await asyncio.to_thread(_runaway_processes, live_tabs),
