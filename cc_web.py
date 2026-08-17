@@ -2195,29 +2195,21 @@ def build_picker_sessions(live_tabs: Optional[list[dict]] = None,
 # 11MB transcript here), so escalate instead of giving up — even three reads of a 4MB tail
 # beat parsing the whole file, and the alternative is a visibly wrong "last used".
 BRIEF_TAIL_WINDOWS = (64 * 1024, 512 * 1024, 4 * 1024 * 1024)
-_BRIEF_TS_CACHE: dict[tuple, tuple[float, bool, int, bool]] = {}
+_BRIEF_TS_CACHE: dict[tuple, tuple[float, bool]] = {}
 
 
-def _brief_tail_meta(jsonl: Path, st) -> tuple[float, bool, int, bool]:
-    """What the brief list needs from a transcript, from its TAIL only:
-    (last human message epoch, exact?, human turns seen, was the whole file read?).
+def _brief_tail_meta(jsonl: Path, st) -> tuple[float, bool]:
+    """(epoch of the last human message, exact?) read from the TAIL of a transcript.
 
-    Two things come out of the same read:
+    The file mtime is NOT a usable "last used": background rewrites (autonomous-loop
+    ticks, resume, file sync) bump it without anyone talking to the session, and on this
+    corpus that put a session last spoken to on 07-17 at the top of a list dated 08-17 —
+    exactly the lie that makes a "last use" sort worthless. The full list fixes it by
+    parsing everything and taking the last human message; this gets the same answer from
+    one seek+read, which is what makes it affordable in the DEFAULT view.
 
-    1. "Last used". The file mtime is NOT usable: background rewrites (autonomous-loop
-       ticks, resume, file sync) bump it without anyone talking to the session, and on
-       this corpus that put a session last spoken to on 07-17 at the top of the list
-       dated 08-17. The full list fixes that by parsing everything and taking the last
-       human message; this gets the same answer from one seek+read, which is what makes
-       it usable as the DEFAULT view. exact=False → nothing human was found at all and
-       the caller falls back to mtime, flagged, instead of lying about it.
-
-    2. Whether the session is "empty" (<=1 round), which the browse groups filter on.
-       A file smaller than the window means the "tail" IS the whole file, so the count is
-       the true one and brief can apply the full list's exact rule. Above that, the count
-       is a lower bound: >=2 proves non-empty, and 1 is treated as non-empty too — for a
-       big file that means one round with an enormous answer, and showing a row the full
-       list would hide is a far smaller sin than hiding one it shows.
+    exact=False → no human turn was found even after escalating, so the returned time is
+    the file mtime and the caller flags it (ts_approx) rather than presenting a guess.
     """
     import datetime as _dt
     ck = (str(jsonl), st.st_mtime, st.st_size) if st else None
@@ -2225,10 +2217,9 @@ def _brief_tail_meta(jsonl: Path, st) -> tuple[float, bool, int, bool]:
     if hit is not None:
         return hit
     size = st.st_size if st else 0
-    out = (st.st_mtime if st else 0.0, False, 0, size <= BRIEF_TAIL_WINDOWS[0])
+    out = (st.st_mtime if st else 0.0, False)
     for window in BRIEF_TAIL_WINDOWS:
         best = 0.0
-        rounds = 0
         whole = size <= window
         try:
             with jsonl.open("rb") as f:
@@ -2245,7 +2236,6 @@ def _brief_tail_meta(jsonl: Path, st) -> tuple[float, bool, int, bool]:
                     continue
                 if not _is_round_start_entry(e):
                     continue
-                rounds += 1
                 ts = e.get("timestamp") or ""
                 try:
                     best = max(best, _dt.datetime.fromisoformat(
@@ -2255,12 +2245,10 @@ def _brief_tail_meta(jsonl: Path, st) -> tuple[float, bool, int, bool]:
         except OSError:
             break
         if best:
-            out = (best, True, rounds, whole)
+            out = (best, True)
             break
-        if whole:                     # already read the whole file — a bigger window
-            out = (out[0], False, rounds, True)
-            break                     # would find nothing new
-    
+        if whole:                     # already read the whole file, so a bigger
+            break                     # window would find nothing new
     if ck:
         if len(_BRIEF_TS_CACHE) > 512:
             _BRIEF_TS_CACHE.clear()
@@ -2312,7 +2300,7 @@ def brief_picker_sessions(live_tabs: Optional[list[dict]] = None) -> list[dict]:
             try:
                 st = jsonl.stat()
                 size = st.st_size
-                used, exact, _rounds, _whole = _brief_tail_meta(jsonl, st)
+                used, exact = _brief_tail_meta(jsonl, st)
             except OSError:
                 pass
         named = titles.get(sid)
