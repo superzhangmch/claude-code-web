@@ -8994,7 +8994,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // onmessage, and the box got a HALF sentence. Now the wait extends as long as
       // text keeps arriving (bumpFinalize), bounded by an absolute deadline.
       s._finDeadline = Date.now() + 8000;
-      s._finTimer = setTimeout(() => Voice.finalize(), s.dropped ? 400 : 2500);
+      // How long to wait for the provider to drain. The 2.5s exists to catch the tail
+      // of your last sentence — but there IS no tail if the stream never came alive,
+      // and sitting on the timer there is the "I pressed stop and it just kept saying
+      // connecting" bug: finalize() is what switches to the batch engine, so delaying
+      // it delays the whole fallback. `opened` alone is not proof of life (the browser→
+      // server hop opens instantly even when the upstream is dead), hence upReady for
+      // soniox; the OpenAI bridge sends no such signal and only emits text after a
+      // commit, so there `opened` is the best we have.
+      const alive = s.provider === "soniox" ? (s.opened && s.upReady) : s.opened;
+      const delay = s.dropped ? 400 : ((s.gotAny || alive) ? 2500 : 0);
+      if (!delay) _recLiveStatus("no realtime result — transcribing the whole recording…");
+      s._finTimer = setTimeout(() => Voice.finalize(), delay);
     },
     async polish(raw, before) {   // shared polish step (same endpoint + gating as batch)
       _setMic("busy");
@@ -9112,7 +9123,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // falling through to render() would blank the status line.
         if (ev.type === "status") {
           if (!s.gotAny) {
-            if (ev.state === "upstream-ready") _recLiveStatus("listening — say something…");
+            if (ev.state === "upstream-ready") { s.upReady = true; _recLiveStatus("listening — say something…"); }
             else _recLiveStatus("recording — connecting ASR" + (ev.attempt > 1 ? " (attempt " + ev.attempt + ")" : "") + "…");
           }
           return;
@@ -9170,7 +9181,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
                   stopping: false, stream, ac: null, sp: null, src: null, mute: null, ws: null, _finTimer: null,
                   mr: null, chunks: [], mrDone: null, startMs: 0,
                   pending: [], pendBytes: 0,     // PCM captured before/between connections
-                  paused: false, pausedAt: 0 };   // ⏸ (realtime only)
+                  paused: false, pausedAt: 0,     // ⏸ (realtime only)
+                  upReady: false };               // server said its upstream ASR is live
       Voice.s = s;
       // Record the FULL audio locally in parallel → if streaming drops, recover via non-streaming /api/asr on Stop.
       try {
