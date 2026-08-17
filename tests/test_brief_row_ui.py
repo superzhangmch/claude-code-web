@@ -28,6 +28,9 @@ def main():
     m = re.search(r"\n  (function briefRow\(s, singleWin\) \{.*?\n  \})\n", src, re.S)
     if not m:
         print("  FAIL  could not extract briefRow() from static/index.html"); return 1
+    chrome = re.search(r"\n  (function syncBriefChrome\(\) \{.*?\n  \})\n", src, re.S)
+    if not chrome:
+        print("  FAIL  could not extract syncBriefChrome() from static/index.html"); return 1
 
     js = r"""
 const _fails = [];
@@ -42,7 +45,10 @@ function mkEl(tag) {
            appendChild(c) { this.children.push(c); return c; },
            addEventListener(ev, fn) { this.__click = fn; } };
 }
-const document = { createElement: (t) => { const e = mkEl(t); e.classList.__el = e; return e; } };
+const chromeEls = { "picker-quickfilter": { style: {} }, "picker-search": { style: {} } };
+const document = { createElement: (t) => { const e = mkEl(t); e.classList.__el = e; return e; },
+                   getElementById: (id) => chromeEls[id] || null };
+let listBrief = true;
 let entered = null, attached = null;
 function enterTranscript(sid, label) { entered = { sid, label }; }
 function attachSession(sid, label) { attached = { sid, label }; }
@@ -51,6 +57,7 @@ const tabLabel = (s) => clampU(s, 24);
 let attachedSid = "";
 
 __ROW__
+__CHROME__
 
 const parts = (row) => row.children.map(c => c.className.trim() + "=" + c.textContent);
 const text = (row) => row.children.map(c => c.textContent).join("|");
@@ -102,10 +109,18 @@ row = briefRow({ ...s, bound: false }, true); row.__click();
 check("an unbound one goes through attach", attached && attached.sid === "d585bf36-aaaa-bbbb",
       JSON.stringify(attached));
 
+console.log("=== brief hides the search chrome ===");
+listBrief = true; syncBriefChrome();
+check("the quick filter is hidden in brief", chromeEls["picker-quickfilter"].style.display === "none");
+check("the full-search panel is hidden in brief", chromeEls["picker-search"].style.display === "none");
+listBrief = false; syncBriefChrome();
+check("...and both come back in full", chromeEls["picker-quickfilter"].style.display === ""
+      && chromeEls["picker-search"].style.display === "");
+
 console.log(_fails.length ? "\nFAILED: " + _fails.join(", ") : "\nall pass");
 process.exit(_fails.length ? 1 : 0);
 """
-    js = js.replace("__ROW__", m.group(1))
+    js = js.replace("__ROW__", m.group(1)).replace("__CHROME__", chrome.group(1))
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as fh:
         fh.write(js)
         path = fh.name

@@ -2991,6 +2991,16 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // picker ⚙ dropdown: Q-mode / theme / font / reload all live here now (their
   // own handlers stay wired by id — the buttons just moved inside this menu).
   const pickerBriefBtn = document.getElementById("picker-brief");
+  // brief lists the live tabs only and they fit on one screen, so the quick filter and the
+  // full-search panel are dead weight there. Hiding them also removes a trap: a filter you
+  // cannot see is a filter that silently hides rows. Looked up by id rather than through
+  // the consts below, because this runs before those are initialised.
+  function syncBriefChrome() {
+    for (const id of ["picker-quickfilter", "picker-search"]) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = listBrief ? "none" : "";
+    }
+  }
   function syncBriefBtn() {
     if (!pickerBriefBtn) return;
     pickerBriefBtn.textContent = listBrief ? "≣ brief" : "▤ full";
@@ -2998,11 +3008,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       ? "brief: 只列运行中的 tab,一行一个,不读 transcript(快)。点一下切到 full(含 Recent/Named + 对话摘录)"
       : "full: 卡片 + Recent/Named + 最近对话摘录(要解析每个 transcript)。点一下切回 brief";
   }
-  syncBriefBtn();
+  syncBriefBtn(); syncBriefChrome();
   if (pickerBriefBtn) pickerBriefBtn.addEventListener("click", () => {
     listBrief = !listBrief;
     try { localStorage.setItem("cc_web_list_brief", listBrief ? "1" : "0"); } catch {}
-    syncBriefBtn();
+    if (listBrief) {
+      // Never leave a filter applied behind an input that is no longer on screen.
+      searchResults = null; searchTerm = ""; quickText = "";
+      const qf = document.getElementById("picker-quickfilter");
+      if (qf) qf.value = "";
+    }
+    syncBriefBtn(); syncBriefChrome();
     refreshPicker();     // the two views need different payloads, so re-fetch
   });
   const pickerCfgBtn = document.getElementById("picker-cfg");
@@ -3445,6 +3461,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     quickText = "";
     if (quickEl) quickEl.value = "";
     if (psStatus) psStatus.textContent = "";
+    syncBriefChrome();
     refreshPicker();
   }
 
