@@ -8898,6 +8898,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         try { if (s.ws && s.ws.readyState === 1) Voice.flushPending(s.ws); } catch {}
         try { if (s.mr && s.mr.state === "recording") s.mr.pause(); } catch {}
         if (recWaveEl) recWaveEl.style.display = "none";   // the wave means "listening"
+        // Same contradiction as stop: a "recording — connecting…" line must not survive
+        // a pause. Only when there's no transcript to protect.
+        if (!s.gotAny) _recLiveStatus("paused — tap ▶ to continue");
         _recTimerPause();
       } else {
         const gap = Date.now() - (s.pausedAt || Date.now());
@@ -8905,6 +8908,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         s.pausedAt = 0;
         try { if (s.mr && s.mr.state === "paused") s.mr.resume(); } catch {}
         if (recWaveEl) recWaveEl.style.display = "";
+        if (!s.gotAny) _recLiveStatus(s.upReady ? "listening — say something…"
+                                               : "recording — connecting ASR…");
         _recTimerResume(gap);
       }
       _syncPauseBtn();
@@ -9004,7 +9009,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // commit, so there `opened` is the best we have.
       const alive = s.provider === "soniox" ? (s.opened && s.upReady) : s.opened;
       const delay = s.dropped ? 400 : ((s.gotAny || alive) ? 2500 : 0);
-      if (!delay) _recLiveStatus("no realtime result — transcribing the whole recording…");
+      // Replace any "recording…"/"listening…" line — we just stopped. Guarded on
+      // gotAny because the status line and the transcript share one element: with text
+      // on screen, writing a status would wipe the very words we're waiting to keep.
+      if (!s.gotAny) {
+        _recLiveStatus(delay ? "stopped — waiting for the ASR…"
+                             : "no realtime result — transcribing the whole recording…");
+      }
       s._finTimer = setTimeout(() => Voice.finalize(), delay);
     },
     async polish(raw, before) {   // shared polish step (same endpoint + gating as batch)
@@ -9122,8 +9133,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // Deliberately handled before the provider branches: it carries no tokens, so
         // falling through to render() would blank the status line.
         if (ev.type === "status") {
-          if (!s.gotAny) {
-            if (ev.state === "upstream-ready") { s.upReady = true; _recLiveStatus("listening — say something…"); }
+          if (ev.state === "upstream-ready") s.upReady = true;   // remember it either way
+          // Only paint this while we are actually capturing. After stop (or ⏸) the
+          // session is no longer recording, and the server keeps reporting its upstream
+          // retries — repainting "recording — connecting ASR…" then contradicted the
+          // state the user had just chosen. Those paths own the message instead.
+          if (!s.gotAny && !s.stopping && !s.paused) {
+            if (ev.state === "upstream-ready") _recLiveStatus("listening — say something…");
             else _recLiveStatus("recording — connecting ASR" + (ev.attempt > 1 ? " (attempt " + ev.attempt + ")" : "") + "…");
           }
           return;
