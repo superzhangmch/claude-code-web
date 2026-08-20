@@ -4138,6 +4138,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const snapDlgPrev = document.getElementById("snapdlg-prev");
   let _snapPick = "";          // "manual" | "auto:<file>"
   let _snapPickSessions = [];  // what that snapshot holds (shown before you commit)
+  // From the row itself. The preview is a separate fetch that can fail on a blip, and the
+  // server reads the snapshot itself at resume time — so a failed PREVIEW must not block
+  // a resume of a snapshot we know has sessions in it.
+  let _snapPickCount = 0;
   const snapStopBtn = document.getElementById("tabs-snap-stop");
   if (snapStopBtn) snapStopBtn.addEventListener("click", async () => {
     snapStopBtn.disabled = true;
@@ -4150,12 +4154,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // The polling loop below picks up `cancelled` and does the rest; it also puts this
     // button back. It stops BEFORE the next tab — whatever is already open stays open.
   });
-  let _snapInfo = null;   // last /api/sessions-snapshot payload (both stores)
   // Load both stores. Used by the chooser and by Save's overwrite guard.
   async function loadSnapSources() {
     let j = null;
     try { j = await (await authedFetch("/api/sessions-snapshot")).json(); } catch {}
-    _snapInfo = j;
     const st = j && j.auto_state;
     if (st && snapStatus && !snapStatus.textContent) {
       snapStatus.textContent = st.at ? `auto ${st.at} (${st.count})`
@@ -4195,8 +4197,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
   // Show what the highlighted snapshot actually contains. Resuming the wrong one opens a
   // screenful of the wrong tabs, so the contents belong on screen BEFORE you commit.
-  async function snapDlgSelect(val, sessions) {
+  async function snapDlgSelect(val, sessions, count) {
     _snapPick = val;
+    _snapPickCount = count != null ? count : (sessions ? sessions.length : 0);
     for (const b of snapDlgList.querySelectorAll(".sd-row"))
       b.classList.toggle("on", b.dataset.val === val);
     if (sessions) { _snapPickSessions = sessions; renderSnapPreview(sessions); return; }
@@ -4209,7 +4212,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (_snapPick !== val) return;         // another row was clicked meanwhile
     _snapPickSessions = (d && d.sessions) || [];
     if (_snapPickSessions.length) renderSnapPreview(_snapPickSessions);
-    else snapDlgPrev.textContent = "(读不到这份快照的内容)";
+    else snapDlgPrev.textContent = _snapPickCount
+      ? `(读不到内容,但这份快照有 ${_snapPickCount} 个 session — 仍可恢复)`
+      : "(这份快照里没有 session)";
   }
   async function openSnapDlg() {
     const j = await loadSnapSources();
@@ -4225,7 +4230,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const m = document.createElement("span"); m.className = "sd-meta";
       m.textContent = `${when} · ${count} 个 session` + (note ? " · " + note : "");
       b.appendChild(k); b.appendChild(m);
-      b.addEventListener("click", () => snapDlgSelect(val, val === "manual" ? man.sessions : null));
+      b.addEventListener("click", () => snapDlgSelect(val, val === "manual" ? man.sessions : null, count));
       snapDlgList.appendChild(b);
     };
     if (man) row("manual", "手动", man.saved_at, man.sessions.length, "你自己点 Save 存的");
@@ -4237,7 +4242,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // entry, and defaulting to a stale manual list resumes last week's tabs.
     const newest = (man && autos[0]) ? (autos[0].saved_at > man.saved_at ? "auto:" + autos[0].file : "manual")
                  : (man ? "manual" : "auto:" + autos[0].file);
-    await snapDlgSelect(newest, newest === "manual" ? man.sessions : null);
+    const newestCount = newest === "manual" ? man.sessions.length
+                      : (autos.find(a => "auto:" + a.file === newest) || {}).count || 0;
+    await snapDlgSelect(newest, newest === "manual" ? man.sessions : null, newestCount);
     snapDlg.classList.add("show");
   }
   document.getElementById("snapdlg-cancel").addEventListener("click", () => snapDlg.classList.remove("show"));
@@ -4284,12 +4291,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   document.getElementById("snapdlg-go").addEventListener("click", async () => {
     const pick = _snapPick;
     const sessions = _snapPickSessions;
-    if (!pick || !sessions.length) { alert("这份快照里没有 session。"); return; }
+    const n = sessions.length || _snapPickCount;
+    if (!pick || !n) { alert("这份快照里没有 session。"); return; }
     snapDlg.classList.remove("show");
     const body = pick.startsWith("auto:") ? { source: "auto", file: pick.slice(5) }
                                           : { source: "manual" };
     snapBusy(true);
-    snapStatus.textContent = "resuming… 0/" + sessions.length;
+    snapStatus.textContent = "resuming… 0/" + n;
     try {
       const r = await authedFetch("/api/sessions-snapshot/resume", {
         method: "POST", headers: { "content-type": "application/json" },
@@ -5400,7 +5408,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // server renders as an empty Tabs group — indistinguishable from "no session open",
   // which once had me hunting for lost sessions that were never lost. Carries the fix
   // (reconnect) rather than just the complaint.
+  let _bridgeErr = "";   // last reported bridge failure; the empty-list text needs it
   function renderBridgeWarn(msg) {
+    _bridgeErr = msg || "";
     const el = document.getElementById("picker-bridge");
     if (!el) return;
     if (!msg) { el.style.display = "none"; el.innerHTML = ""; return; }
@@ -5567,7 +5577,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (!sessions.length) {
       const msg = searching ? "No sessions match this search."
         : (quickText.trim() ? "No sessions match the quick filter."
-          : listBrief
+          : _bridgeErr
+            // The banner above says the terminal is unreachable; the list must not then
+            // assert there is nothing running. That contradiction is the exact bug this
+            // whole banner exists to kill.
+            ? `⚠ 读不到 ${TERM} 的 tab 列表,所以这里是空的 —— 不代表没有 session 在跑。`
+            : listBrief
             // brief lists the live tabs only, so "nothing here" means no tab is running —
             // NOT that there are no sessions. Say where the history is.
             ? `No live <code>claude</code> tab. Start one in ${TERM}, or tap <b>≣ brief</b> above to switch to <b>▤ full</b> and browse past sessions.`

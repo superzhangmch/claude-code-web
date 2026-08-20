@@ -4124,12 +4124,13 @@ async def get_sessions(card: str = "both", brief: int = 0):
 
 
 def _bridge_reason(exc) -> str:
-    """Readable text for a terminal-bridge failure (see iterm_bridge.bridge_reason)."""
+    """Readable text for a terminal-bridge failure, naming THIS host's terminal
+    (iTerm2 / tmux) — see iterm_bridge.bridge_reason."""
     try:
         from iterm_bridge import bridge_reason
-        return bridge_reason(exc)
+        return bridge_reason(exc, TERM_NAME)
     except Exception:
-        return f"{TERM} bridge 出错: {type(exc).__name__}"
+        return f"{TERM_NAME} bridge 出错: {type(exc).__name__}"
 
 
 @app.post("/api/bridge-reset", dependencies=[Depends(require_token)])
@@ -6271,17 +6272,15 @@ def _snap_enrich(sessions: list[dict]) -> list[dict]:
     lives in memory here, so the picker can show a row that reads like the session list
     instead of a bare tab title. Never mutates what is on disk.
     """
+    # Read the index ONCE, not once per entry: it was inside the loop, so a 15-session
+    # preview of unnamed sessions opened and parsed the same JSON 15 times.
+    idx = {e["session_id"]: e.get("title", "") for e in load_session_index()}
     out: list[dict] = []
     for e in sessions or []:
         sid = e.get("sid") or ""
         title, _ = _summary_of(sid)
-        out.append({**e, "session_name": _user_name_of(sid) or title
-                    or (load_session_index_titles().get(sid) or "")})
+        out.append({**e, "session_name": _user_name_of(sid) or title or idx.get(sid, "")})
     return out
-
-
-def load_session_index_titles() -> dict:
-    return {e["session_id"]: e.get("title", "") for e in load_session_index()}
 
 
 @app.get("/api/sessions-snapshot/preview", dependencies=[Depends(require_token)])
@@ -7253,7 +7252,7 @@ _resume_ended_mono = 0.0
 _snapshot_auto = {"at": "", "count": 0, "skipped": "", "every_min": SNAPSHOT_AUTO_MIN}
 
 
-def _write_snapshot(sessions: list[dict], auto: bool = False) -> dict:
+def _write_snapshot(sessions: list[dict]) -> dict:
     """Write the MANUAL snapshot, keeping the previous copy as .prev.json.
 
     The rotation is deliberate: this file is a record of what was open, it is worth
@@ -7262,7 +7261,7 @@ def _write_snapshot(sessions: list[dict], auto: bool = False) -> dict:
     """
     import datetime as _dt
     snap = {"saved_at": _dt.datetime.now().isoformat(timespec="seconds"),
-            "auto": auto, "sessions": sessions}
+            "auto": False, "sessions": sessions}
     try:
         prev = SNAPSHOT_FILE.read_text(encoding="utf-8")
         if json.loads(prev).get("sessions") != sessions:
@@ -7320,7 +7319,9 @@ async def _snapshot_autosave(interval_sec: float, first_delay: float = 120.0) ->
                         log.info("auto snapshot: %d session(s) -> %s",
                                  len(sessions), snap["saved_at"])
                     else:
-                        _snapshot_auto["skipped"] = "nothing written (see _auto_snap_save)"
+                        # _auto_snap_save only declines to write if it cannot (it has
+                        # logged why); a same-set tick now REPLACES rather than skipping.
+                        _snapshot_auto["skipped"] = "could not write the auto snapshot"
         except Exception as e:
             why = _bridge_reason(e)
         if why:
@@ -7343,7 +7344,7 @@ async def post_snapshot_save():
             (getattr(bridge, "last_error", "") or "no live claude tab")
             + " — 没有可保存的 tab,已保留上一份快照"))
     try:
-        snap = _write_snapshot(sessions, auto=False)
+        snap = _write_snapshot(sessions)
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"save failed: {e}")
     return {"ok": True, "count": len(sessions), **snap}

@@ -136,6 +136,14 @@ async def main():
           len(set(msgs)) == 3 and all(len(m) > 15 for m in msgs))
     check("...and none of them leaks the raw text the user saw",
           not any("close frame" in m for m in msgs), " | ".join(m[:28] for m in msgs))
+    # A tmux host must not be told its iTerm2 connection dropped.
+    tm = [bridge_reason(e, "tmux") for e in (we.ConnectionClosedError(None, None),
+                                             asyncio.TimeoutError(), ConnectionRefusedError())]
+    check("the message names THIS host's terminal", all("tmux" in m for m in tm), tm[0][:40])
+    check("...and never the wrong one", not any("iTerm2" in m for m in tm), " | ".join(m[:30] for m in tm))
+    check("cc_web passes its own terminal name through",
+          cc_web.TERM_NAME in cc_web._bridge_reason(we.ConnectionClosedError(None, None)),
+          cc_web._bridge_reason(we.ConnectionClosedError(None, None))[:50])
 
     print("=== connecting retries (a relaunched iTerm2 needs a moment) ===")
     import iterm_bridge

@@ -32,19 +32,25 @@ class BridgeUnavailable(RuntimeError):
     a websockets/asyncio internal ("no close frame received or sent") reach the UI."""
 
 
-def bridge_reason(exc) -> str:
-    """One actionable sentence for the UI. The library's own message is useless to a
-    user: a deadlocked iTerm2 surfaces as "no close frame received or sent"."""
+def bridge_reason(exc, term: str = "iTerm2") -> str:
+    """One actionable sentence for the UI. The library's own message is useless to a user:
+    a deadlocked iTerm2 surfaces as "no close frame received or sent".
+
+    `term` is the terminal this host actually uses — the text is shown on Linux/tmux hosts
+    too, where naming iTerm2 was simply wrong (and confusing: it made a tmux problem look
+    like someone else's).
+    """
     name = type(exc).__name__ if exc is not None else ""
     if isinstance(exc, asyncio.TimeoutError):
-        return "iTerm2 的 Python API 超时未响应(iTerm2 可能卡死) — 用 ⚙ 里的 reconnect,或重启 iTerm2"
+        return f"{term} 没有响应(可能卡死) — 用 ⚙ 里的 reconnect,或重启 {term}"
     if name in ("ConnectionClosedError", "ConnectionClosedOK", "ConnectionClosed",
                 "IncompleteReadError"):
-        return "与 iTerm2 的连接已断开(iTerm2 被重启过?) — 用 ⚙ 里的 reconnect 重连"
+        return f"与 {term} 的连接已断开({term} 被重启过?) — 用 ⚙ 里的 reconnect 重连"
     if isinstance(exc, (ConnectionRefusedError, FileNotFoundError, OSError)):
-        return ("连不上 iTerm2 的 Python API — iTerm2 没运行,或 Preferences > General > "
-                "Magic 里的 Python API 没开")
-    return f"iTerm2 bridge 出错: {name}"
+        extra = ("(iTerm2 没运行,或 Preferences > General > Magic 里的 Python API 没开)"
+                 if term == "iTerm2" else "(它没在运行?)")
+        return f"连不上 {term} {extra}"
+    return f"{term} bridge 出错: {name}"
 
 
 async def _gv(session, var, timeout=5):
@@ -164,6 +170,7 @@ class ItermBridge:
                     self.app = await asyncio.wait_for(
                         iterm2.async_get_app(self.connection), _RPC_TIMEOUT)
                     await asyncio.wait_for(self.app.async_refresh(), _RPC_TIMEOUT)
+                    self.last_error = ""   # the connection answered; drop any stale reason
                     return
                 except Exception:
                     self.connection = None
