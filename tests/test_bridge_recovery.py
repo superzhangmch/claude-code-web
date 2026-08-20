@@ -49,7 +49,9 @@ def check(name, cond, detail=""):
 class Ref:
     def __init__(self, sid, i):
         self.claude_session_id = sid
-        self.name = f"tab{i}"
+        # iTerm hands over a DECORATED title: a status glyph while claude is working and
+        # a " (claude)" suffix for the running process. Neither is part of the name.
+        self.name = f"✳ tab{i} (claude)"
         self.window_index = 0
         self.tab_index = i
         self.pid = 5000 + i
@@ -165,6 +167,9 @@ async def main():
     cc_web._write_snapshot(fifteen)
     check("a manual save writes all 15 to the manual file",
           len(json.loads(cc_web.SNAPSHOT_FILE.read_text())["sessions"]) == 15)
+    names = [x["name"] for x in json.loads(cc_web.SNAPSHOT_FILE.read_text())["sessions"]]
+    check("...storing the real names, not iTerm's live decorations",
+          names[:2] == ["tab0", "tab1"], str(names[:2]))
 
     async def tick():
         """One autosave pass, without waiting out the interval."""

@@ -1582,8 +1582,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #snapdlg .sd-prev {
   background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
   padding: 6px 8px; max-height: 30vh; overflow-y: auto; margin-bottom: 8px;
-  font-size: 11px; color: var(--muted); white-space: pre-wrap; line-height: 1.5;
+  font-size: 12px; color: var(--muted); line-height: 1.6;
 }
+/* Same shape as a brief list row, so what you are about to reopen reads the way the
+   session list reads: sid · [tab-name] · session name. */
+#snapdlg .sd-prev .sd-item { display: flex; gap: 6px; align-items: baseline; }
+#snapdlg .sd-prev .sw-sid { color: var(--muted); opacity: .55; font-size: 11px;
+  flex-shrink: 0; font-family: ui-monospace, Menlo, monospace; }
+#snapdlg .sd-prev .sw-tab { color: var(--accent); font-weight: 700; flex-shrink: 0;
+  white-space: nowrap; }
+#snapdlg .sd-prev .sw-sess { color: var(--text); min-width: 0; overflow: hidden;
+  white-space: nowrap; text-overflow: ellipsis; }
 #candidlg.modal { padding: 4px; }
 #candidlg .modal-card { padding: 10px; }
 
@@ -4153,15 +4162,36 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     }
     return j;
   }
-  const fmtSnapNames = (arr) => arr.map((x, i) =>
-    `${i + 1}. [${(x.sid || "").slice(0, 8)}] ${x.name || ""}`).join("\n");
+  // One preview line per session, in the same shape as a brief list row:
+  //   aaaa  [tab-name]  session name
+  // stripTab as well as the server-side clean, because snapshots taken before that fix
+  // still hold "✳ … (claude)" and should not read worse than the tabs they restore.
+  function renderSnapPreview(sessions) {
+    snapDlgPrev.innerHTML = "";
+    if (!sessions.length) { snapDlgPrev.textContent = "(这份快照里没有 session)"; return; }
+    for (const x of sessions) {
+      const row = document.createElement("div"); row.className = "sd-item";
+      const add = (cls, txt) => {
+        if (!txt) return;
+        const e = document.createElement("span"); e.className = cls; e.textContent = txt;
+        row.appendChild(e);
+      };
+      add("sw-sid", (x.sid || "").slice(0, 4));
+      const tn = stripTab(x.name || "");
+      if (tn) add("sw-tab", "[" + tabLabel(tn, 24) + "]");
+      const sess = (x.session_name || "").trim();
+      // Don't print the same string twice: renaming via cc-web sets both.
+      if (sess && sess !== tn) add("sw-sess", sess);
+      snapDlgPrev.appendChild(row);
+    }
+  }
   // Show what the highlighted snapshot actually contains. Resuming the wrong one opens a
   // screenful of the wrong tabs, so the contents belong on screen BEFORE you commit.
   async function snapDlgSelect(val, sessions) {
     _snapPick = val;
     for (const b of snapDlgList.querySelectorAll(".sd-row"))
       b.classList.toggle("on", b.dataset.val === val);
-    if (sessions) { _snapPickSessions = sessions; snapDlgPrev.textContent = fmtSnapNames(sessions); return; }
+    if (sessions) { _snapPickSessions = sessions; renderSnapPreview(sessions); return; }
     snapDlgPrev.textContent = "读取中…";
     let d = null;
     try {
@@ -4170,8 +4200,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     } catch {}
     if (_snapPick !== val) return;         // another row was clicked meanwhile
     _snapPickSessions = (d && d.sessions) || [];
-    snapDlgPrev.textContent = _snapPickSessions.length
-      ? fmtSnapNames(_snapPickSessions) : "(读不到这份快照的内容)";
+    if (_snapPickSessions.length) renderSnapPreview(_snapPickSessions);
+    else snapDlgPrev.textContent = "(读不到这份快照的内容)";
   }
   async function openSnapDlg() {
     const j = await loadSnapSources();
@@ -4205,7 +4235,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   document.getElementById("snapdlg-cancel").addEventListener("click", () => snapDlg.classList.remove("show"));
   snapDlg.addEventListener("click", (e) => { if (e.target === snapDlg) snapDlg.classList.remove("show"); });
   const fmtSnap = (arr) => arr.map((s, i) =>
-    `${i + 1}. [${(s.sid || "").slice(0, 8)}] ${s.name || ""}  ${s.cwd || ""}`).join("\n");
+    `${i + 1}. [${(s.sid || "").slice(0, 8)}] ${stripTab(s.name || "")}  ${s.cwd || ""}`).join("\n");
   // Disable BOTH buttons while either op runs (resume can take 10s+; no
   // double-clicks / concurrent save+resume).
   const snapBusy = (on) => {

@@ -6263,6 +6263,27 @@ def fs_preview(path: str, where: str = "head", max_bytes: int = _FS_PREVIEW_BYTE
     }
 
 
+def _snap_enrich(sessions: list[dict]) -> list[dict]:
+    """Copies of the stored entries, plus the session's CURRENT name.
+
+    A snapshot only records what it needs to reopen a tab (sid / cwd / tab name / order).
+    The name a human recognises a session by — the one you set, or the generated title —
+    lives in memory here, so the picker can show a row that reads like the session list
+    instead of a bare tab title. Never mutates what is on disk.
+    """
+    out: list[dict] = []
+    for e in sessions or []:
+        sid = e.get("sid") or ""
+        title, _ = _summary_of(sid)
+        out.append({**e, "session_name": _user_name_of(sid) or title
+                    or (load_session_index_titles().get(sid) or "")})
+    return out
+
+
+def load_session_index_titles() -> dict:
+    return {e["session_id"]: e.get("title", "") for e in load_session_index()}
+
+
 @app.get("/api/sessions-snapshot/preview", dependencies=[Depends(require_token)])
 async def get_snapshot_preview(file: str = ""):
     """The contents of one auto snapshot, so the resume confirmation can list what it is
@@ -6270,7 +6291,8 @@ async def get_snapshot_preview(file: str = ""):
     d = _auto_snap_read(file)
     if d is None:
         raise HTTPException(status_code=404, detail="no such auto snapshot")
-    return {"ok": True, "saved_at": d.get("saved_at", ""), "sessions": d.get("sessions") or []}
+    return {"ok": True, "saved_at": d.get("saved_at", ""),
+            "sessions": _snap_enrich(d.get("sessions") or [])}
 
 
 class ResumePayload(BaseModel):
@@ -7102,7 +7124,12 @@ async def _live_tab_entries() -> list[dict]:
         sid = (meta or {}).get("sessionId") or (t.claude_session_id or "")
         if not sid:
             continue
-        out.append({"sid": sid, "cwd": t.cwd or "", "name": t.name or "",
+        # Store the CLEAN name. iTerm's tab title carries live decorations — a leading
+        # status glyph ("✳ ") and a trailing " (claude)" for the running process — which
+        # are not part of the name. Resume already stripped them when re-titling the tab,
+        # so keeping them in the file only made the snapshot and its preview read like
+        # junk while the restored tab read fine.
+        out.append({"sid": sid, "cwd": t.cwd or "", "name": _clean_tab_name(t.name or ""),
                     "window_index": t.window_index, "tab_index": t.tab_index})
     out.sort(key=lambda e: (e["window_index"], e["tab_index"]))
     return out
@@ -7302,7 +7329,7 @@ async def get_snapshot():
         man = {"saved_at": None, "sessions": []}
     auto = _auto_snap_list()
     return {"ok": bool(man.get("sessions")) or bool(auto),
-            "saved_at": man.get("saved_at"), "sessions": man.get("sessions") or [],
+            "saved_at": man.get("saved_at"), "sessions": _snap_enrich(man.get("sessions") or []),
             "auto": auto[:40], "auto_total": len(auto), "auto_max": AUTO_SNAP_MAX,
             "auto_state": dict(_snapshot_auto)}
 
