@@ -1563,6 +1563,27 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   /* Same intent for evidence rows: no wrap, horizontal scroll. */
   white-space: pre; overflow-x: auto;
 }
+/* Resume-source chooser. A native confirm() can only say yes/no, so picking WHICH
+   snapshot had to live in a dropdown next to the button — separate from the action, and
+   easy to read as a status label rather than a control. This puts the choice in the same
+   place as the decision. */
+#snapdlg .modal-card { padding: 12px; max-width: 560px; width: 92vw; }
+#snapdlg h2 { margin: 0 0 8px; font-size: 15px; }
+#snapdlg .sd-list { max-height: 34vh; overflow-y: auto; margin-bottom: 8px; }
+#snapdlg .sd-row {
+  display: block; width: 100%; box-sizing: border-box; text-align: left; cursor: pointer;
+  background: var(--panel2); color: var(--text); border: 1px solid transparent;
+  border-radius: 6px; padding: 7px 10px; margin-bottom: 4px; font-size: 13px;
+}
+#snapdlg .sd-row:hover { border-color: var(--accent); }
+#snapdlg .sd-row.on { border-color: var(--accent); font-weight: 700; }
+#snapdlg .sd-row .sd-kind { color: var(--accent); }
+#snapdlg .sd-row .sd-meta { color: var(--muted); font-size: 11px; }
+#snapdlg .sd-prev {
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 8px; max-height: 30vh; overflow-y: auto; margin-bottom: 8px;
+  font-size: 11px; color: var(--muted); white-space: pre-wrap; line-height: 1.5;
+}
 #candidlg.modal { padding: 4px; }
 #candidlg .modal-card { padding: 10px; }
 
@@ -2173,10 +2194,6 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       </div>
       <div class="modal-row tabs-snap-row">
         <button id="tabs-snap-save" class="btn" title="保存当前所有 claude tab（含顺序），重启前点">💾 Save list</button>
-        <!-- Which snapshot to resume FROM. Manual = the list you chose to keep; auto =
-             what was actually open at that time (one entry per change). After something
-             breaks, the one you want is usually an auto entry from just before it. -->
-        <select id="tabs-snap-src" title="从哪份快照恢复:手动保存的,还是自动记录的某个时间点"></select>
         <button id="tabs-snap-resume" class="btn" title="按选中的快照 claude --resume 恢复，重启后点">↻ Resume saved</button>
         <!-- Only visible while resuming: 15 tabs take ~20s to open, which is long enough
              to notice you picked the wrong snapshot. -->
@@ -2462,6 +2479,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   </div>
 
   <!-- candidate-pick dialog (after attach when ambiguous) -->
+  <!-- Which snapshot to resume from (opened by ↻ Resume saved). -->
+  <div id="snapdlg" class="modal">
+    <div class="modal-card">
+      <h2>从哪份快照恢复?</h2>
+      <div id="snapdlg-list" class="sd-list"></div>
+      <div id="snapdlg-prev" class="sd-prev"></div>
+      <div class="modal-actions">
+        <button id="snapdlg-cancel">取消</button>
+        <button id="snapdlg-go" class="primary">↻ 开始恢复</button>
+      </div>
+    </div>
+  </div>
+
   <div id="candidlg" class="modal">
     <div class="modal-card">
       <h2 id="candidlg-title">Pick the right tab</h2>
@@ -4093,7 +4123,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const snapStatus = document.getElementById("tabs-snap-status");
   const snapSaveBtn = document.getElementById("tabs-snap-save");
   const snapResumeBtn = document.getElementById("tabs-snap-resume");
-  const snapSrcEl = document.getElementById("tabs-snap-src");
+  const snapDlg = document.getElementById("snapdlg");
+  const snapDlgList = document.getElementById("snapdlg-list");
+  const snapDlgPrev = document.getElementById("snapdlg-prev");
+  let _snapPick = "";          // "manual" | "auto:<file>"
+  let _snapPickSessions = [];  // what that snapshot holds (shown before you commit)
   const snapStopBtn = document.getElementById("tabs-snap-stop");
   if (snapStopBtn) snapStopBtn.addEventListener("click", async () => {
     snapStopBtn.disabled = true;
@@ -4107,27 +4141,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // button back. It stops BEFORE the next tab — whatever is already open stays open.
   });
   let _snapInfo = null;   // last /api/sessions-snapshot payload (both stores)
-  // Fill the source picker: the manual snapshot first, then the auto history (newest
-  // first). Each option says when and how many, because that is what you pick on.
+  // Load both stores. Used by the chooser and by Save's overwrite guard.
   async function loadSnapSources() {
     let j = null;
     try { j = await (await authedFetch("/api/sessions-snapshot")).json(); } catch {}
     _snapInfo = j;
-    if (!snapSrcEl) return j;
-    snapSrcEl.innerHTML = "";
-    const add = (val, label) => {
-      const o = document.createElement("option"); o.value = val; o.textContent = label;
-      snapSrcEl.appendChild(o);
-    };
-    const man = (j && (j.sessions || []).length) ? j : null;
-    if (man) add("manual", `手动 · ${man.saved_at} (${man.sessions.length})`);
-    for (const a of ((j && j.auto) || [])) add("auto:" + a.file, `自动 · ${a.saved_at} (${a.count})`);
-    if (!snapSrcEl.options.length) add("", "(还没有任何快照)");
-    // Default to whichever is NEWER — after a crash that is nearly always the auto one,
-    // and defaulting to a stale manual list is how you resume last week's tabs.
-    const newestAuto = ((j && j.auto) || [])[0];
-    if (man && newestAuto) snapSrcEl.value = (newestAuto.saved_at > man.saved_at)
-      ? "auto:" + newestAuto.file : "manual";
     const st = j && j.auto_state;
     if (st && snapStatus && !snapStatus.textContent) {
       snapStatus.textContent = st.at ? `auto ${st.at} (${st.count})`
@@ -4135,6 +4153,57 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     }
     return j;
   }
+  const fmtSnapNames = (arr) => arr.map((x, i) =>
+    `${i + 1}. [${(x.sid || "").slice(0, 8)}] ${x.name || ""}`).join("\n");
+  // Show what the highlighted snapshot actually contains. Resuming the wrong one opens a
+  // screenful of the wrong tabs, so the contents belong on screen BEFORE you commit.
+  async function snapDlgSelect(val, sessions) {
+    _snapPick = val;
+    for (const b of snapDlgList.querySelectorAll(".sd-row"))
+      b.classList.toggle("on", b.dataset.val === val);
+    if (sessions) { _snapPickSessions = sessions; snapDlgPrev.textContent = fmtSnapNames(sessions); return; }
+    snapDlgPrev.textContent = "读取中…";
+    let d = null;
+    try {
+      d = await (await authedFetch("/api/sessions-snapshot/preview?file="
+                                  + encodeURIComponent(val.slice(5)))).json();
+    } catch {}
+    if (_snapPick !== val) return;         // another row was clicked meanwhile
+    _snapPickSessions = (d && d.sessions) || [];
+    snapDlgPrev.textContent = _snapPickSessions.length
+      ? fmtSnapNames(_snapPickSessions) : "(读不到这份快照的内容)";
+  }
+  async function openSnapDlg() {
+    const j = await loadSnapSources();
+    const man = (j && (j.sessions || []).length) ? j : null;
+    const autos = (j && j.auto) || [];
+    if (!man && !autos.length) { alert("还没有任何快照(点 💾 Save list 存一份,或等自动快照)。"); return; }
+    snapDlgList.innerHTML = "";
+    snapDlgPrev.textContent = "";
+    const row = (val, kind, when, count, note) => {
+      const b = document.createElement("button");
+      b.className = "sd-row"; b.dataset.val = val;
+      const k = document.createElement("span"); k.className = "sd-kind"; k.textContent = kind + " ";
+      const m = document.createElement("span"); m.className = "sd-meta";
+      m.textContent = `${when} · ${count} 个 session` + (note ? " · " + note : "");
+      b.appendChild(k); b.appendChild(m);
+      b.addEventListener("click", () => snapDlgSelect(val, val === "manual" ? man.sessions : null));
+      snapDlgList.appendChild(b);
+    };
+    if (man) row("manual", "手动", man.saved_at, man.sessions.length, "你自己点 Save 存的");
+    autos.forEach((a, i) => row("auto:" + a.file, "自动", a.saved_at, a.count, i ? "" : "最近一次"));
+    if ((j && j.auto_total) > autos.length)
+      snapDlgList.appendChild(Object.assign(document.createElement("div"),
+        { className: "sd-meta", textContent: `(共 ${j.auto_total} 份自动快照,只列最近 ${autos.length} 份;上限 ${j.auto_max})` }));
+    // Preselect the NEWEST of the two stores: after a crash that is nearly always an auto
+    // entry, and defaulting to a stale manual list resumes last week's tabs.
+    const newest = (man && autos[0]) ? (autos[0].saved_at > man.saved_at ? "auto:" + autos[0].file : "manual")
+                 : (man ? "manual" : "auto:" + autos[0].file);
+    await snapDlgSelect(newest, newest === "manual" ? man.sessions : null);
+    snapDlg.classList.add("show");
+  }
+  document.getElementById("snapdlg-cancel").addEventListener("click", () => snapDlg.classList.remove("show"));
+  snapDlg.addEventListener("click", (e) => { if (e.target === snapDlg) snapDlg.classList.remove("show"); });
   const fmtSnap = (arr) => arr.map((s, i) =>
     `${i + 1}. [${(s.sid || "").slice(0, 8)}] ${s.name || ""}  ${s.cwd || ""}`).join("\n");
   // Disable BOTH buttons while either op runs (resume can take 10s+; no
@@ -4171,36 +4240,27 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     } catch (e) { snapStatus.textContent = "error"; alert("Save error: " + e); }
     finally { snapBusy(false); }
   });
-  snapResumeBtn.addEventListener("click", async () => {
-    const j = _snapInfo || await loadSnapSources();
-    const pick = (snapSrcEl && snapSrcEl.value) || "manual";
-    if (!pick) { alert("没有任何快照可恢复。"); return; }
-    // Show the CHOSEN snapshot's contents, not just a count — resuming the wrong one
-    // opens a screenful of the wrong tabs.
-    let sessions = [], when = "", body = { source: "manual" };
-    if (pick.startsWith("auto:")) {
-      const file = pick.slice(5);
-      body = { source: "auto", file };
-      const meta = ((j && j.auto) || []).find(a => a.file === file) || {};
-      when = meta.saved_at || file;
-      let d = null;
-      try { d = await (await authedFetch("/api/sessions-snapshot/preview?file=" + encodeURIComponent(file))).json(); } catch {}
-      sessions = (d && d.sessions) || [];
-      if (!sessions.length) sessions = new Array(meta.count || 0).fill({});
-    } else {
-      sessions = (j && j.sessions) || [];
-      when = (j && j.saved_at) || "";
-    }
-    if (!sessions.length) { alert("这份快照里没有 session。"); return; }
-    const listed = sessions[0] && sessions[0].sid ? fmtSnap(sessions) : "(" + sessions.length + " 个 session)";
-    if (!confirm(`将按原顺序 resume ${sessions.length} 个 session(已在运行的会自动跳过):\n\n${listed}\n\n来源: ${pick.startsWith("auto:") ? "自动快照" : "手动快照"} ${when}\n\n继续?`)) return;
+  // ↻ Resume saved just opens the chooser. Everything about the decision — which
+  // snapshot, what is in it, and backing out — lives in that one dialog now.
+  snapResumeBtn.addEventListener("click", () => { openSnapDlg(); });
+  document.getElementById("snapdlg-go").addEventListener("click", async () => {
+    const pick = _snapPick;
+    const sessions = _snapPickSessions;
+    if (!pick || !sessions.length) { alert("这份快照里没有 session。"); return; }
+    snapDlg.classList.remove("show");
+    const body = pick.startsWith("auto:") ? { source: "auto", file: pick.slice(5) }
+                                          : { source: "manual" };
     snapBusy(true);
     snapStatus.textContent = "resuming… 0/" + sessions.length;
-    const snap = { sessions };
     try {
       const r = await authedFetch("/api/sessions-snapshot/resume", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify(body) });
+      if (r.status === 409 || r.status === 404) {
+        snapStatus.textContent = "resume failed";
+        alert("无法恢复:" + (await r.text()));
+        snapBusy(false); return;
+      }
       if (!r.ok) { snapStatus.textContent = "resume failed"; alert("Resume failed: " + await r.text()); snapBusy(false); return; }
       // Resume runs in the background (1.2s per tab) — poll for live progress so
       // the user sees "N/total · <current tab>" and tabs appearing as they come up.
