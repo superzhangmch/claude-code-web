@@ -5485,10 +5485,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     });
   }
 
-  // One brief row: wXtY · sid4 · [tab-name] · session-name … last-use.
+  // One brief row: sid4 · [tab-name] · session-name … last-use.
   // Click = what the card's title button does (Enter when bound, else Attach); the full
   // view keeps the management actions (rename, close tab, kill, transcript excerpts).
-  function briefRow(s, singleWin) {
+  // No wXtY: the numbers were noise next to the names, and the Tabs group is still SORTED
+  // by tab position (the ↹/↺ toggle), so the order still carries that information.
+  function briefRow(s) {
     const row = document.createElement("div");
     const isCur = s.claude_session_id === attachedSid;
     row.className = "brief-row" + (isCur ? " current" : "");
@@ -5498,11 +5500,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const e = document.createElement("span"); e.className = cls; e.textContent = txt;
       row.appendChild(e); return e;
     };
-    if (s.group === "tabs") {
-      add("sw-wt", (singleWin ? `t${(s.tab_index || 0) + 1}`
-                              : `w${(s.window_index || 0) + 1}t${(s.tab_index || 0) + 1}`)
-                   + (isCur ? "*" : ""));
-    }
+    // The tab you are currently in is shown by the row's accent border (.current) —
+    // that used to be a "*" on the wXtY chip which no longer exists.
     add("sw-sid", s.claude_session_id.slice(0, 4));
     const tn = (s.tab_name || "").trim();
     if (tn) add("sw-tab", "[" + tabLabel(tn) + "]");
@@ -5598,7 +5597,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // the full card even in brief mode — their whole point is the matched text, and
       // /api/search returns it anyway.
       if (listBrief && !searching) {
-        pickerListEl.appendChild(briefRow(s, tabsSingleWin));
+        pickerListEl.appendChild(briefRow(s));
         continue;
       }
       const card = document.createElement("div");

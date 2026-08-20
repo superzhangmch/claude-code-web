@@ -3,8 +3,9 @@
 
 Extracts the REAL briefRow() out of static/index.html and runs it under node, so the row
 the user actually sees is what gets asserted. It deliberately mirrors the ⇆ switcher's
-shape (wXtY · sid4 · [tab-name] · session-name … last-use), because that is the layout
-this view was asked for.
+shape (sid4 · [tab-name] · session-name … last-use), because that is the layout this
+view was asked for. The wXtY chip the switcher shows is deliberately NOT here: the names
+are what you read, and the Tabs group is still sorted by tab position.
 
     python3 tests/test_brief_row_ui.py      # exit 0 = pass  (needs `node`)
 """
@@ -25,7 +26,7 @@ def main():
         print("SKIP: needs node"); return 0
 
     src = open(INDEX, encoding="utf-8").read()
-    m = re.search(r"\n  (function briefRow\(s, singleWin\) \{.*?\n  \})\n", src, re.S)
+    m = re.search(r"\n  (function briefRow\(s\) \{.*?\n  \})\n", src, re.S)
     if not m:
         print("  FAIL  could not extract briefRow() from static/index.html"); return 1
     chrome = re.search(r"\n  (function syncBriefChrome\(\) \{.*?\n  \})\n", src, re.S)
@@ -68,44 +69,42 @@ console.log("=== a live tab row ===");
 let s = { claude_session_id: "d585bf36-aaaa-bbbb", group: "tabs", window_index: 0, tab_index: 0,
           tab_name: "Compare Hermes and the others", user_name: "", summary_title: "本地AI Agent 对比",
           summary: "…", bound: true, last_visit: "08-17 11:38" };
-let row = briefRow(s, false);
-check("window/tab comes first", parts(row)[0] === "sw-wt=w1t1", parts(row)[0]);
-check("...then the 4-char session id", parts(row)[1] === "sw-sid=d585", parts(row)[1]);
+let row = briefRow(s);
+check("no wXtY chip — the names lead", !parts(row).some(p => p.startsWith("sw-wt=")), parts(row).join(" "));
+check("the 4-char session id comes first", parts(row)[0] === "sw-sid=d585", parts(row)[0]);
 check("...then the terminal tab name in brackets",
-      /^sw-tab=\[Compare Hermes/.test(parts(row)[2]), parts(row)[2]);
+      /^sw-tab=\[Compare Hermes/.test(parts(row)[1]), parts(row)[1]);
 check("...then the session name", span(row, "sw-sess") === "本地AI Agent 对比", span(row, "sw-sess"));
 check("...and the last-use time last", parts(row).at(-1) === "br-time=08-17 11:38", parts(row).at(-1));
 check("a bound session is marked", parts(row).some(p => p.startsWith("br-dot=")), parts(row).join(" "));
 check("no transcript excerpt anywhere (brief carries none)", !text(row).includes("…\n"));
 
-console.log("=== a single-window machine drops the wX ===");
-row = briefRow(s, true);
-check("t1 instead of w1t1", parts(row)[0] === "sw-wt=t1", parts(row)[0]);
+console.log("=== the tab you are in ===");
 attachedSid = "d585bf36-aaaa-bbbb";
-row = briefRow(s, true);
-check("the tab you are in is marked with *", parts(row)[0] === "sw-wt=t1*", parts(row)[0]);
-check("...and the row is styled current", / current/.test(row.className), row.className);
+row = briefRow(s);
+check("is marked by the row itself, now that the * had nowhere to live",
+      / current/.test(row.className), row.className);
 attachedSid = "";
 
 console.log("=== names: user override wins, summary is the last resort ===");
-row = briefRow({ ...s, user_name: "my own name" }, true);
+row = briefRow({ ...s, user_name: "my own name" });
 check("a user-set name beats the LLM title", span(row, "sw-sess") === "my own name", span(row, "sw-sess"));
-row = briefRow({ ...s, user_name: "", summary_title: "", title: "", summary: "只有摘要" }, true);
+row = briefRow({ ...s, user_name: "", summary_title: "", title: "", summary: "只有摘要" });
 check("with no name at all the summary is shown", span(row, "sw-sess") === "只有摘要", span(row, "sw-sess"));
-row = briefRow({ ...s, tab_name: "", user_name: "", summary_title: "", title: "", summary: "" }, true);
+row = briefRow({ ...s, tab_name: "", user_name: "", summary_title: "", title: "", summary: "" });
 check("with nothing at all it says so rather than rendering blank",
       text(row).includes("(no title yet)"), text(row));
 
 console.log("=== an approximate timestamp is marked, not presented as fact ===");
-row = briefRow({ ...s, ts_approx: true }, true);
+row = briefRow({ ...s, ts_approx: true });
 check("~ prefixes a mtime-derived time", parts(row).at(-1) === "br-time=~08-17 11:38", parts(row).at(-1));
 
 console.log("=== clicking ===");
-row = briefRow({ ...s, bound: true }, true); row.__click();
+row = briefRow({ ...s, bound: true }); row.__click();
 check("a bound session opens its transcript", entered && entered.sid === "d585bf36-aaaa-bbbb",
       JSON.stringify(entered));
 entered = null;
-row = briefRow({ ...s, bound: false }, true); row.__click();
+row = briefRow({ ...s, bound: false }); row.__click();
 check("an unbound one goes through attach", attached && attached.sid === "d585bf36-aaaa-bbbb",
       JSON.stringify(attached));
 
