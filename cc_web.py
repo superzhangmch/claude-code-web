@@ -7160,6 +7160,7 @@ def _auto_snap_list() -> list[dict]:
         except Exception:
             continue
         out.append({"file": f.name, "saved_at": d.get("saved_at", ""),
+                    "first_seen": d.get("first_seen") or d.get("saved_at", ""),
                     "count": len(d.get("sessions") or [])})
     return out
 
@@ -7177,7 +7178,19 @@ def _auto_snap_read(name: str) -> Optional[dict]:
 
 
 def _auto_snap_save(sessions: list[dict]) -> Optional[dict]:
-    """Write a new auto snapshot iff the session list CHANGED. Returns it, or None."""
+    """Record the live list. History is keyed on WHICH SESSIONS were open, not on the
+    exact bytes:
+
+      * same session-id set as the newest entry → write the new one, then delete the one
+        it supersedes. One entry per set, always refreshed to the latest observation.
+        Comparing whole entries instead meant a tab rename (or a reordering) left a
+        near-duplicate behind, and the 100 slots filled up with the same set over and
+        over — pushing out the genuinely different snapshots that are the point.
+      * different set → keep both. That is the history worth having.
+
+    Write-then-delete, in that order: there is never a moment with no snapshot on disk.
+    Returns the snapshot written, or None if nothing was written.
+    """
     import datetime as _dt
     try:
         AUTO_SNAP_DIR.mkdir(parents=True, exist_ok=True)
@@ -7185,18 +7198,32 @@ def _auto_snap_save(sessions: list[dict]) -> Optional[dict]:
         log.warning("auto snapshot dir: %s", e)
         return None
     newest = _auto_snap_list()
+    supersedes, first_seen = None, ""
     if newest:
         prev = _auto_snap_read(newest[0]["file"]) or {}
-        if (prev.get("sessions") or []) == sessions:
-            return None                      # nothing changed → no new file
+        prev_sids = {e.get("sid") for e in (prev.get("sessions") or [])}
+        if prev_sids == {e.get("sid") for e in sessions}:
+            supersedes = newest[0]["file"]
+            # Keep WHEN this set first appeared: with replace semantics the old file (and
+            # its timestamp) goes away, and "these 15 have been open since 09:00" is worth
+            # more than "observed again at 19:00".
+            first_seen = prev.get("first_seen") or prev.get("saved_at") or ""
     now = _dt.datetime.now()
-    snap = {"saved_at": now.isoformat(timespec="seconds"), "auto": True, "sessions": sessions}
+    snap = {"saved_at": now.isoformat(timespec="seconds"), "auto": True,
+            "first_seen": first_seen or now.isoformat(timespec="seconds"),
+            "sessions": sessions}
     # Milliseconds, not seconds: two changes inside the same second would otherwise land
     # on the same filename and one would be silently lost. Still sorts chronologically.
     f = AUTO_SNAP_DIR / ("auto-" + now.strftime("%Y%m%dT%H%M%S%f")[:-3] + ".json")
     tmp = f.with_name(f.name + ".tmp")
     tmp.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(f)
+    # Only now that the new file is on disk: drop the one it replaces.
+    if supersedes and supersedes != f.name:
+        try:
+            (AUTO_SNAP_DIR / supersedes).unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("auto snapshot: could not remove superseded %s: %s", supersedes, e)
     # Prune oldest beyond the cap (filenames sort chronologically by construction).
     try:
         olds = sorted(AUTO_SNAP_DIR.glob("auto-*.json"), reverse=True)[AUTO_SNAP_MAX:]
@@ -7213,9 +7240,12 @@ def _auto_snap_save(sessions: list[dict]) -> Optional[dict]:
 # Manual Save only helps if you remember to click it, and the moment you need it (the
 # terminal just died) is exactly when you can no longer take one. So take one on a timer
 # as well. `snapshot_every_min=` in cc_web.conf; 0 turns it off.
-SNAPSHOT_AUTO_MIN = 60.0
+# 30 min rather than 60: an unchanged session set costs nothing (the entry is replaced,
+# not accumulated), so the only thing a shorter period buys is a tighter bound on how
+# much a crash can lose — and it halves it.
+SNAPSHOT_AUTO_MIN = 30.0
 try:
-    SNAPSHOT_AUTO_MIN = float(_load_conf().get("snapshot_every_min") or 60)
+    SNAPSHOT_AUTO_MIN = float(_load_conf().get("snapshot_every_min") or 30)
 except Exception:
     pass
 SNAPSHOT_QUIET_AFTER_RESUME = 120.0     # seconds
@@ -7290,7 +7320,7 @@ async def _snapshot_autosave(interval_sec: float, first_delay: float = 120.0) ->
                         log.info("auto snapshot: %d session(s) -> %s",
                                  len(sessions), snap["saved_at"])
                     else:
-                        _snapshot_auto["skipped"] = "unchanged since the last auto snapshot"
+                        _snapshot_auto["skipped"] = "nothing written (see _auto_snap_save)"
         except Exception as e:
             why = _bridge_reason(e)
         if why:

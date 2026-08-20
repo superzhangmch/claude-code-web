@@ -47,11 +47,11 @@ def check(name, cond, detail=""):
 
 
 class Ref:
-    def __init__(self, sid, i):
+    def __init__(self, sid, i, name=None):
         self.claude_session_id = sid
         # iTerm hands over a DECORATED title: a status glyph while claude is working and
         # a " (claude)" suffix for the running process. Neither is part of the name.
-        self.name = f"✳ tab{i} (claude)"
+        self.name = f"✳ {name or ('tab' + str(i))} (claude)"
         self.window_index = 0
         self.tab_index = i
         self.pid = 5000 + i
@@ -77,6 +77,10 @@ class FakeBridge:
 
     async def list_claude_tabs(self):
         self.connects += 1
+        if getattr(self, "rename", False):
+            self.last_error = ""
+            return [Ref(f"{chr(97+i)*8}-1111-2222-3333-444444444444", i, "renamed%d" % i)
+                    for i in range(self.n)]
         if self.mode == "closed":
             self.last_error = "与 iTerm2 的连接已断开(iTerm2 被重启过?) — 用 ⚙ 里的 reconnect 重连"
             return []
@@ -205,13 +209,39 @@ async def main():
     hist = await tick()
     check("once quiet, the live list IS recorded", len(hist) == 1 and hist[0]["count"] == 3, str(hist))
     check("...in the auto directory, leaving the manual file alone", len(manual_now()) == 15)
+    was = hist[0]
     hist = await tick()
-    check("unchanged → NO second file (diff, not a file per hour)", len(hist) == 1, str(len(hist)))
+    check("same sessions again → still ONE entry (no file per hour)", len(hist) == 1, str(len(hist)))
+    check("...refreshed to the newer observation, the old one deleted",
+          hist[0]["file"] != was["file"] and hist[0]["saved_at"] >= was["saved_at"],
+          f'{was["file"]} -> {hist[0]["file"]}')
+    check("...while remembering when this set first appeared",
+          hist[0]["first_seen"] == was["first_seen"],
+          f'{hist[0]["first_seen"]} vs {was["first_seen"]}')
+    check("...and never leaving the directory empty in between",
+          len(list(cc_web.AUTO_SNAP_DIR.glob("auto-*.json"))) == 1)
+
+    # A rename (same sessions, different tab name) must NOT cost a history slot: that is
+    # what filled the 100 with near-duplicates when whole entries were compared.
+    fake.rename = True
+    hist = await tick()
+    check("a tab RENAME with the same sessions replaces, it does not accumulate",
+          len(hist) == 1, str(len(hist)))
+    newest = cc_web._auto_snap_read(hist[0]["file"])
+    check("...and the new name is what got stored",
+          newest["sessions"][0]["name"].startswith("renamed"), newest["sessions"][0]["name"])
+    fake.rename = False
+
     fake.n = 5
     hist = await tick()
-    check("changed → a new entry, newest first",
+    check("a DIFFERENT session set → keep both, newest first",
           len(hist) == 2 and hist[0]["count"] == 5 and hist[1]["count"] == 3,
           str([h["count"] for h in hist]))
+    # Compared against its OWN saved_at, not against the other entry: both files can be
+    # written inside the same second, and these timestamps only have second resolution.
+    check("...and the new set's first_seen starts fresh rather than being inherited",
+          hist[0]["first_seen"] == hist[0]["saved_at"],
+          f'{hist[0]["first_seen"]} vs {hist[0]["saved_at"]}')
 
     print("=== the history is capped, oldest dropped ===")
     for i in range(cc_web.AUTO_SNAP_MAX + 5):
