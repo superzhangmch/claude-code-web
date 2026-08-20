@@ -2178,6 +2178,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
              breaks, the one you want is usually an auto entry from just before it. -->
         <select id="tabs-snap-src" title="从哪份快照恢复:手动保存的,还是自动记录的某个时间点"></select>
         <button id="tabs-snap-resume" class="btn" title="按选中的快照 claude --resume 恢复，重启后点">↻ Resume saved</button>
+        <!-- Only visible while resuming: 15 tabs take ~20s to open, which is long enough
+             to notice you picked the wrong snapshot. -->
+        <button id="tabs-snap-stop" class="btn" style="display:none" title="停止恢复(已经开出来的 tab 保留)">✕ 停止恢复</button>
         <span id="tabs-snap-status"></span>
       </div>
       <div id="tabs-list" class="tabs-list"></div>
@@ -4091,6 +4094,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const snapSaveBtn = document.getElementById("tabs-snap-save");
   const snapResumeBtn = document.getElementById("tabs-snap-resume");
   const snapSrcEl = document.getElementById("tabs-snap-src");
+  const snapStopBtn = document.getElementById("tabs-snap-stop");
+  if (snapStopBtn) snapStopBtn.addEventListener("click", async () => {
+    snapStopBtn.disabled = true;
+    snapStopBtn.textContent = "停止中…";
+    try {
+      const r = await authedFetch("/api/sessions-snapshot/resume/cancel", { method: "POST" });
+      const d = await r.json();
+      if (!d.ok) alert("没有正在进行的恢复。");
+    } catch (e) { alert("取消失败: " + e); }
+    // The polling loop below picks up `cancelled` and does the rest; it also puts this
+    // button back. It stops BEFORE the next tab — whatever is already open stays open.
+  });
   let _snapInfo = null;   // last /api/sessions-snapshot payload (both stores)
   // Fill the source picker: the manual snapshot first, then the auto history (newest
   // first). Each option says when and how many, because that is what you pick on.
@@ -4124,7 +4139,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     `${i + 1}. [${(s.sid || "").slice(0, 8)}] ${s.name || ""}  ${s.cwd || ""}`).join("\n");
   // Disable BOTH buttons while either op runs (resume can take 10s+; no
   // double-clicks / concurrent save+resume).
-  const snapBusy = (on) => { snapSaveBtn.disabled = on; snapResumeBtn.disabled = on; };
+  const snapBusy = (on) => {
+    snapSaveBtn.disabled = on; snapResumeBtn.disabled = on;
+    // Stop is the one control that must be available exactly while the others are not.
+    if (snapStopBtn) {
+      snapStopBtn.style.display = on ? "" : "none";
+      snapStopBtn.disabled = false;
+      snapStopBtn.textContent = "✕ 停止恢复";
+    }
+  };
   snapSaveBtn.addEventListener("click", async () => {
     // Guard the footgun: Save OVERWRITES the previous MANUAL snapshot. If one exists
     // (e.g. you meant to click Resume after a reboot), confirm before clobbering.
@@ -4190,9 +4213,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
             snapStatus.textContent = `resuming ${st.done}/${st.total}` + (st.current ? " · " + st.current : "");
             if (st.done !== lastDone) { lastDone = st.done; loadItermTabs(); }   // refresh as each tab appears
             if (!st.running) {
-              snapStatus.textContent = `resumed ${st.resumed}/${st.total}`;
+              const stopped = !!st.cancelled;
+              snapStatus.textContent = (stopped ? "stopped " : "resumed ")
+                + `${st.resumed}/${st.total}`;
               const rl = (st.results || []).map(x => `[${(x.sid || "").slice(0, 8)}] ${x.name || ""} — ${x.status}`).join("\n");
-              alert(`恢复完成(resumed ${st.resumed}/${st.total}):\n\n${rl}`);
+              alert((stopped
+                      // Say plainly what a stop did and did NOT do: the tabs already
+                      // opened are still there, and stopping never closes anything.
+                      ? `已停止恢复:开了 ${st.resumed}/${st.total} 个就停下了。\n已经开出来的 tab 保留(不会替你关掉)。\n\n`
+                      : `恢复完成(resumed ${st.resumed}/${st.total}):\n\n`) + rl);
               loadItermTabs();
               resolve(); return;
             }

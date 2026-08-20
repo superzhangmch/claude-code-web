@@ -7323,6 +7323,10 @@ def _clean_tab_name(name: str) -> str:
 _resume_progress: dict = {
     "running": False, "total": 0, "done": 0, "current": "",
     "results": [], "resumed": 0, "started_at": None, "finished_at": None,
+    # Set by /resume/cancel. Resume opens one tab every ~1.2s, so restoring 15 takes
+    # twenty seconds of watching — long enough to realise you picked the wrong snapshot,
+    # and until now there was no way to stop it.
+    "cancel": False, "cancelled": False,
 }
 
 
@@ -7340,6 +7344,13 @@ async def _run_resume(sessions: list[dict]) -> None:
         st["finished_at"] = _dt.datetime.now().isoformat(timespec="seconds")
         return
     for e in sessions:
+        if st.get("cancel"):
+            # Between tabs only: a tab that is already opening is left alone. Nothing
+            # opened so far is closed either — undoing that would mean killing sessions,
+            # which is not what "stop" should mean. The caller is told how far it got.
+            st["cancelled"] = True
+            log.info("resume cancelled after %d/%d", st["done"], st["total"])
+            break
         sid = e.get("sid")
         if not sid:
             st["done"] += 1
@@ -7411,12 +7422,23 @@ async def post_snapshot_resume(payload: Optional[ResumePayload] = None):
         raise HTTPException(status_code=409, detail="that snapshot has no sessions in it")
     _resume_progress.update({
         "running": True, "total": len(sessions), "done": 0, "current": "",
-        "results": [], "resumed": 0,
+        "results": [], "resumed": 0, "cancel": False, "cancelled": False,
         "started_at": _dt.datetime.now().isoformat(timespec="seconds"),
         "finished_at": None,
     })
     asyncio.create_task(_run_resume(sessions))
     return {"ok": True, "started": True, "total": len(sessions)}
+
+
+@app.post("/api/sessions-snapshot/resume/cancel", dependencies=[Depends(require_token)])
+async def post_resume_cancel():
+    """Stop a resume that is still opening tabs. Takes effect before the next tab; what
+    is already open stays open (stopping must not mean killing sessions)."""
+    if not _resume_progress.get("running"):
+        return {"ok": False, "error": "no resume is running"}
+    _resume_progress["cancel"] = True
+    return {"ok": True, "done": _resume_progress.get("done", 0),
+            "total": _resume_progress.get("total", 0)}
 
 
 @app.get("/api/sessions-snapshot/resume-status", dependencies=[Depends(require_token)])

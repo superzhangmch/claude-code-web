@@ -219,6 +219,9 @@ async def main():
           ["sessions"][0]["name"] == f"n{cc_web.AUTO_SNAP_MAX + 4}")
 
     print("=== resume asks which store, and both are reachable ===")
+    real_resume = cc_web._run_resume          # keep the genuine one for the tests below
+    async def _noop(*a, **k):
+        return None
     called = {}
     async def fake_resume(sessions):
         called["n"] = len(sessions)
@@ -246,6 +249,74 @@ async def main():
     except Exception as e:
         code = getattr(e, "status_code", -1)
     check("a bogus file name is refused, not read", code == 404, f"status {code}")
+
+    print("=== resume: skips what is already running, and can be stopped ===")
+    # Drive the REAL _run_resume this time (the stub above only proved source selection).
+    cc_web._run_resume = real_resume
+    opened, alive = [], {"aaaa1111-1111-2222-3333-444444444444"}   # pretend this one is up
+    async def fake_open(cwd, sid, label):
+        opened.append((sid, label))
+        return "iterm-" + sid[:4]
+    fake.open_resume_claude_tab = fake_open
+    cc_web._pids_for_session = lambda sid: [999] if sid in alive else []
+    cc_web._ensure_iterm2_running = _noop
+    cc_web._clean_tab_name = lambda n: n
+    want = [{"sid": "aaaa1111-1111-2222-3333-444444444444", "cwd": "/tmp/a", "name": "already-up"},
+            {"sid": "bbbb2222-1111-2222-3333-444444444444", "cwd": "/tmp/b", "name": "second"},
+            {"sid": "cccc3333-1111-2222-3333-444444444444", "cwd": "/tmp/c", "name": "third"}]
+    cc_web._resume_progress.update({"running": True, "total": 3, "done": 0, "results": [],
+                                    "resumed": 0, "cancel": False, "cancelled": False})
+    await cc_web._run_resume(want)
+    st = cc_web._resume_progress
+    check("a session that is already running is NOT reopened",
+          [o[0][:4] for o in opened] == ["bbbb", "cccc"], str([o[0][:4] for o in opened]))
+    check("...it is reported as already running, not as a failure",
+          any(r["status"] == "already running" for r in st["results"]),
+          str([r["status"] for r in st["results"]]))
+    check("...so the count reflects only what it actually opened", st["resumed"] == 2, str(st["resumed"]))
+    check("the saved tab name is used as the label", opened[0][1] == "second", str(opened[0]))
+
+    # Running it again is a no-op: whatever the first pass opened is now alive, so the
+    # second pass has nothing left to do. That makes Resume safe to click twice (or to
+    # re-run after a partial/cancelled attempt) without ending up with duplicate tabs.
+    alive |= {sid for sid, _ in opened}
+    opened.clear()
+    cc_web._resume_progress.update({"running": True, "total": 3, "done": 0, "results": [],
+                                    "resumed": 0, "cancel": False, "cancelled": False})
+    await cc_web._run_resume(want)
+    st = cc_web._resume_progress
+    check("resuming the same snapshot again opens NOTHING (idempotent per session)",
+          opened == [], str(opened))
+    check("...and says so for every entry",
+          all(r["status"] == "already running" for r in st["results"]),
+          str([r["status"] for r in st["results"]]))
+    # A cancelled run can simply be re-run: the ones it managed to open are skipped and
+    # it picks up the rest.
+    alive -= {"cccc3333-1111-2222-3333-444444444444"}
+    opened.clear()
+    cc_web._resume_progress.update({"running": True, "total": 3, "done": 0, "results": [],
+                                    "resumed": 0, "cancel": False, "cancelled": False})
+    await cc_web._run_resume(want)
+    check("re-running after a partial attempt only opens what is missing",
+          [o[0][:4] for o in opened] == ["cccc"], str([o[0][:4] for o in opened]))
+
+    alive = {"aaaa1111-1111-2222-3333-444444444444"}
+    cc_web._pids_for_session = lambda sid: [999] if sid in alive else []
+    opened.clear()
+    cc_web._resume_progress.update({"running": True, "total": 3, "done": 0, "results": [],
+                                    "resumed": 0, "cancel": False, "cancelled": False})
+    async def cancel_soon():
+        while cc_web._resume_progress["done"] < 1:
+            await asyncio.sleep(0.02)
+        await cc_web.post_resume_cancel()
+    await asyncio.gather(cc_web._run_resume(want), cancel_soon())
+    st = cc_web._resume_progress
+    check("cancel stops it part-way", st["cancelled"] is True and st["done"] < 3,
+          f'done={st["done"]} cancelled={st["cancelled"]}')
+    check("...leaving the tabs it already opened alone (stop ≠ kill)", len(opened) <= 2, str(len(opened)))
+    check("...and it is no longer marked running", st["running"] is False)
+    r = await cc_web.post_resume_cancel()
+    check("cancelling when nothing is running just says so", r["ok"] is False, str(r))
 
     print("=== the picker's data: both stores in one payload ===")
     d = await cc_web.get_snapshot()
