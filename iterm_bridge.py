@@ -23,6 +23,28 @@ except Exception:  # pragma: no cover - Linux / iterm2 not installed
 # iTerm2 RPC hard timeout: a hung/half-open websocket await must never wedge the
 # asyncio event loop (which would freeze every concurrent request).
 _RPC_TIMEOUT = 5
+_CONNECT_TRIES = 4          # a just-restarted iTerm2 needs a moment before its API listens
+
+
+class BridgeUnavailable(RuntimeError):
+    """iTerm2's Python API could not be reached: the app isn't running, the API is
+    switched off, it was restarted under us, or it is wedged. Raised instead of letting
+    a websockets/asyncio internal ("no close frame received or sent") reach the UI."""
+
+
+def bridge_reason(exc) -> str:
+    """One actionable sentence for the UI. The library's own message is useless to a
+    user: a deadlocked iTerm2 surfaces as "no close frame received or sent"."""
+    name = type(exc).__name__ if exc is not None else ""
+    if isinstance(exc, asyncio.TimeoutError):
+        return "iTerm2 的 Python API 超时未响应(iTerm2 可能卡死) — 用 ⚙ 里的 reconnect,或重启 iTerm2"
+    if name in ("ConnectionClosedError", "ConnectionClosedOK", "ConnectionClosed",
+                "IncompleteReadError"):
+        return "与 iTerm2 的连接已断开(iTerm2 被重启过?) — 用 ⚙ 里的 reconnect 重连"
+    if isinstance(exc, (ConnectionRefusedError, FileNotFoundError, OSError)):
+        return ("连不上 iTerm2 的 Python API — iTerm2 没运行,或 Preferences > General > "
+                "Magic 里的 Python API 没开")
+    return f"iTerm2 bridge 出错: {name}"
 
 
 async def _gv(session, var, timeout=5):
@@ -66,10 +88,64 @@ class ItermBridge:
         self.app: Optional[iterm2.App] = None
         self._lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
+        # Why the last connection attempt failed, "" when the last one worked. The
+        # endpoints report it, because an unreachable iTerm2 and "no claude tab open"
+        # both produce an empty tab list and used to be indistinguishable on screen.
+        self.last_error: str = ""
 
     async def connect(self) -> None:
         self.connection = await iterm2.Connection.async_create()
         self.app = await iterm2.async_get_app(self.connection)
+
+    def drop(self) -> None:
+        """Throw away the cached connection so the next call builds a fresh one.
+        Used by the manual reconnect: a connection to an iTerm2 that has since been
+        restarted looks alive until you actually send on it."""
+        old, self.connection, self.app = self.connection, None, None
+        if old is not None:
+            try:
+                close = getattr(old, "async_close", None)
+                if close:
+                    asyncio.get_event_loop().create_task(close())
+            except Exception:
+                pass
+
+    async def _connect_retry(self) -> None:
+        """Connect, retrying a few times with backoff.
+
+        This used to be a single bare `await self.connect()` outside any try, so one
+        transient failure — most commonly iTerm2 having been relaunched seconds earlier,
+        its API server not listening yet — propagated a raw websockets error all the way
+        into a "resume failed" dialog, and nothing recovered until cc_web was restarted.
+        """
+        last: Optional[BaseException] = None
+        for i in range(_CONNECT_TRIES):
+            try:
+                await asyncio.wait_for(self.connect(), _RPC_TIMEOUT)
+                self.last_error = ""
+                return
+            except Exception as e:
+                last = e
+                self.connection = None
+                self.app = None
+                if i + 1 < _CONNECT_TRIES:
+                    await asyncio.sleep(0.4 * (i + 1))
+        self.last_error = bridge_reason(last)
+        raise BridgeUnavailable(self.last_error) from last
+
+    async def wait_ready(self, timeout: float = 20.0) -> bool:
+        """Block until the API actually answers, up to `timeout`. Checking that the
+        iTerm2 PROCESS exists is not enough — its API server starts a beat later, and
+        anything issued in that window fails."""
+        deadline = asyncio.get_event_loop().time() + timeout
+        while True:
+            try:
+                await self.ensure_connected()
+                return True
+            except Exception:
+                if asyncio.get_event_loop().time() >= deadline:
+                    return False
+                await asyncio.sleep(0.5)
 
     async def ensure_connected(self) -> None:
         """Lazy connect + reconnect-on-failure. Serialized to avoid duplicate connects.
@@ -92,7 +168,7 @@ class ItermBridge:
                 except Exception:
                     self.connection = None
                     self.app = None
-            await asyncio.wait_for(self.connect(), _RPC_TIMEOUT)
+            await self._connect_retry()
 
     async def list_claude_tabs(self) -> list[ClaudeSessionRef]:
         """Enumerate all iTerm2 tabs with a live foreground `claude` process.
@@ -119,12 +195,16 @@ class ItermBridge:
                 # async_get_app returns before the window model is fully
                 # populated, yielding a partial tab list.
                 await asyncio.wait_for(self.app.async_refresh(), _RPC_TIMEOUT)
-            except Exception:
+            except Exception as e:
                 self.connection = None
                 self.app = None
+                # Remember WHY: the callers below can only see an empty list, and an
+                # unreachable iTerm2 must not read as "you have no tabs open".
+                self.last_error = bridge_reason(e)
             await _close_conn(old, self.connection)   # don't leak the previous websocket
         if self.app is None:
             return []
+        self.last_error = ""
         procs = await asyncio.to_thread(_claude_procs_by_tty)   # ps off the loop
         flat = [(wi, ti, session)
                 for wi, window in enumerate(self.app.windows)

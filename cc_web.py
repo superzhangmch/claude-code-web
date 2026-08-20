@@ -1979,18 +1979,28 @@ async def _ensure_iterm2_running() -> None:
         ).stdout.strip()
     except Exception:
         out = ""
-    if out:
-        return
-    try:
-        subprocess.Popen(["open", "-a", "iTerm"])
-    except Exception as e:
-        log.warning("could not launch iTerm2: %s", e)
-        return
-    import asyncio
-    for _ in range(20):
-        await asyncio.sleep(0.5)
-        if subprocess.run(["pgrep", "-x", "iTerm2"], capture_output=True).stdout.strip():
+    if not out:
+        try:
+            subprocess.Popen(["open", "-a", "iTerm"])
+        except Exception as e:
+            log.warning("could not launch iTerm2: %s", e)
             return
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            if subprocess.run(["pgrep", "-x", "iTerm2"], capture_output=True).stdout.strip():
+                break
+    # The process existing is NOT the same as its API being reachable: iTerm2's Python
+    # API server starts a beat after the app, and anything issued in that window failed
+    # with a raw websockets error (a "Resume saved" fired right after an iTerm2 restart
+    # died exactly here, reporting "no close frame received or sent"). Wait for a real
+    # connection instead, and let the caller report it if it never comes.
+    # Deliberately does NOT raise: every caller already handles a failing
+    # bridge.ensure_connected() right after this, and that path produces the readable
+    # BridgeUnavailable message. Raising here would just add a second error channel
+    # (two of the callers don't guard this line, so it would surface as a 500).
+    if not await bridge.wait_ready(20.0):
+        log.warning("iTerm2 is running but its API is not answering: %s",
+                    getattr(bridge, "last_error", "") or "unknown")
 
 
 # ---------- picker (file-only) ----------
@@ -3485,6 +3495,10 @@ async def lifespan(app: FastAPI):
     reaper_task = asyncio.create_task(_binding_reaper(30.0))
     cpu_task = asyncio.create_task(_cpu_sampler_loop())
     apierr_task = asyncio.create_task(_api_error_watcher(180.0))
+    snap_task = (asyncio.create_task(_snapshot_autosave(SNAPSHOT_AUTO_MIN * 60.0))
+                 if SNAPSHOT_AUTO_MIN > 0 else None)
+    if snap_task:
+        log.info("session snapshot: auto-save every %g min", SNAPSHOT_AUTO_MIN)
     # Session-summary generator: independent daemon thread (does blocking file
     # reads + litellm calls, so it stays off the event loop).
     _load_summaries()
@@ -3494,7 +3508,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for t in (reaper_task, cpu_task, apierr_task):
+        for t in (reaper_task, cpu_task, apierr_task, snap_task):
+            if t is None:
+                continue
             t.cancel()
             try:
                 await t
@@ -4063,6 +4079,7 @@ async def get_sessions(card: str = "both", brief: int = 0):
     no excerpts come back. It is the frontend's default view because first paint on a
     phone used to wait on parsing every JSONL."""
     live_tabs: list[dict] = []
+    bridge_err = ""
     try:
         # ensure_connected() is a wasted connect+refresh on macOS (~100-200ms) because
         # list_claude_tabs() builds its own connection anyway — /api/tabs learned this
@@ -4085,8 +4102,8 @@ async def get_sessions(card: str = "both", brief: int = 0):
                 "window_index": t.window_index,
                 "tab_index": t.tab_index,
             })
-    except Exception:
-        pass
+    except Exception as e:
+        bridge_err = _bridge_reason(e)
     n_claude_tabs = len(live_tabs)
     store = _claude_store_health(n_claude_tabs)
     if store.get("ok") is False:
@@ -4098,10 +4115,49 @@ async def get_sessions(card: str = "both", brief: int = 0):
                                            recent_n=max(10, n_claude_tabs),
                                            card_mode=card)),
         "brief": bool(brief),
+        # Empty tabs group + this set = the terminal is unreachable, not idle.
+        "bridge_error": bridge_err or getattr(bridge, "last_error", ""),
         "battery": await asyncio.to_thread(_get_battery),
         "claude_store": store,
         "runaway": await asyncio.to_thread(_runaway_processes, live_tabs),
     }
+
+
+def _bridge_reason(exc) -> str:
+    """Readable text for a terminal-bridge failure (see iterm_bridge.bridge_reason)."""
+    try:
+        from iterm_bridge import bridge_reason
+        return bridge_reason(exc)
+    except Exception:
+        return f"{TERM} bridge 出错: {type(exc).__name__}"
+
+
+@app.post("/api/bridge-reset", dependencies=[Depends(require_token)])
+async def post_bridge_reset():
+    """Rebuild the terminal-bridge connection from scratch (⚙ → reconnect).
+
+    The automatic recovery in the bridge covers the normal cases; this is the escape
+    hatch for the rest — above all "I just restarted iTerm2", where cc_web used to need
+    a full restart because a connection to the dead app looked alive until it was used.
+    Launches iTerm2 if it isn't running, then reports what it can see.
+    """
+    try:
+        bridge.drop()
+    except Exception:
+        pass
+    try:
+        await _ensure_iterm2_running()          # also waits for the API to answer
+        await bridge.ensure_connected()
+        tabs = await bridge.list_claude_tabs()
+    except Exception as e:
+        reason = getattr(bridge, "last_error", "") or _bridge_reason(e)
+        log.warning("bridge-reset failed: %s", e)
+        return {"ok": False, "error": reason, "tabs": 0}
+    err = getattr(bridge, "last_error", "")
+    if err:
+        return {"ok": False, "error": err, "tabs": len(tabs)}
+    log.info("bridge-reset: reconnected, %d claude tab(s)", len(tabs))
+    return {"ok": True, "tabs": len(tabs)}
 
 
 @app.get("/api/tabs", dependencies=[Depends(require_token)])
@@ -4111,6 +4167,7 @@ async def get_tabs():
     the user-set name, then the LLM title, then the iTerm tab name. `cwd` is what the
     Files popup's "prj" shortcut jumps to — the bridge already resolves it per tab."""
     out: list[dict] = []
+    err = ""
     try:
         # No ensure_connected() here — list_claude_tabs() builds its own fresh
         # connection, so a prior connect+refresh is wasted (~100-200ms/click).
@@ -4129,10 +4186,13 @@ async def get_tabs():
                 "name": _user_name_of(sid) or title or (t.name or ""),  # legacy combined
                 "cwd": t.cwd or "",                             # the dir this claude runs in
             })
-    except Exception:
-        pass
+    except Exception as e:
+        err = _bridge_reason(e)
     out.sort(key=lambda e: (e["window_index"], e["tab_index"]))
-    return {"tabs": out}
+    # An unreachable terminal and "no claude tab is open" both give an empty list. They
+    # are very different situations and the UI must not present them the same way — that
+    # is how a wedged iTerm2 spent an afternoon looking like "all my sessions vanished".
+    return {"tabs": out, "bridge_error": err or getattr(bridge, "last_error", "")}
 
 
 class KillProcessPayload(BaseModel):
@@ -6203,6 +6263,16 @@ def fs_preview(path: str, where: str = "head", max_bytes: int = _FS_PREVIEW_BYTE
     }
 
 
+@app.get("/api/sessions-snapshot/preview", dependencies=[Depends(require_token)])
+async def get_snapshot_preview(file: str = ""):
+    """The contents of one auto snapshot, so the resume confirmation can list what it is
+    about to open rather than just how many. `file` is validated in _auto_snap_read."""
+    d = _auto_snap_read(file)
+    if d is None:
+        raise HTTPException(status_code=404, detail="no such auto snapshot")
+    return {"ok": True, "saved_at": d.get("saved_at", ""), "sessions": d.get("sessions") or []}
+
+
 class ResumePayload(BaseModel):
     claude_session_id: str
 
@@ -7038,6 +7108,169 @@ async def _live_tab_entries() -> list[dict]:
     return out
 
 
+# --- auto snapshot history -----------------------------------------------------------
+# Two stores, deliberately separate:
+#   manual  → SNAPSHOT_FILE, written only when you click Save. Nothing automatic ever
+#             touches it, so "the list I curated" can't be overwritten by a timer.
+#   auto    → AUTO_SNAP_DIR, one file per CHANGE (diffed against the newest one, so an
+#             idle machine doesn't accumulate 24 identical files a day), newest
+#             AUTO_SNAP_MAX kept. History matters: the useful snapshot is usually not the
+#             last one but the one from before whatever went wrong.
+AUTO_SNAP_DIR = Path.home() / ".claude" / "cc_web_snapshots"
+AUTO_SNAP_MAX = 100
+
+
+def _auto_snap_list() -> list[dict]:
+    """Newest first: [{file, saved_at, count}]. Cheap — reads each file's header only."""
+    out: list[dict] = []
+    try:
+        files = sorted(AUTO_SNAP_DIR.glob("auto-*.json"), reverse=True)
+    except OSError:
+        return out
+    for f in files:
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        out.append({"file": f.name, "saved_at": d.get("saved_at", ""),
+                    "count": len(d.get("sessions") or [])})
+    return out
+
+
+def _auto_snap_read(name: str) -> Optional[dict]:
+    """Load one auto snapshot by file name. Rejects anything that isn't ours — the name
+    arrives from the client, so it must not be usable to read arbitrary files."""
+    if not re.fullmatch(r"auto-[0-9T:_.\-]{1,40}\.json", name or ""):
+        return None
+    f = AUTO_SNAP_DIR / name
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _auto_snap_save(sessions: list[dict]) -> Optional[dict]:
+    """Write a new auto snapshot iff the session list CHANGED. Returns it, or None."""
+    import datetime as _dt
+    try:
+        AUTO_SNAP_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        log.warning("auto snapshot dir: %s", e)
+        return None
+    newest = _auto_snap_list()
+    if newest:
+        prev = _auto_snap_read(newest[0]["file"]) or {}
+        if (prev.get("sessions") or []) == sessions:
+            return None                      # nothing changed → no new file
+    now = _dt.datetime.now()
+    snap = {"saved_at": now.isoformat(timespec="seconds"), "auto": True, "sessions": sessions}
+    # Milliseconds, not seconds: two changes inside the same second would otherwise land
+    # on the same filename and one would be silently lost. Still sorts chronologically.
+    f = AUTO_SNAP_DIR / ("auto-" + now.strftime("%Y%m%dT%H%M%S%f")[:-3] + ".json")
+    tmp = f.with_name(f.name + ".tmp")
+    tmp.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(f)
+    # Prune oldest beyond the cap (filenames sort chronologically by construction).
+    try:
+        olds = sorted(AUTO_SNAP_DIR.glob("auto-*.json"), reverse=True)[AUTO_SNAP_MAX:]
+        for o in olds:
+            o.unlink(missing_ok=True)
+        if olds:
+            log.info("auto snapshots: pruned %d beyond the newest %d", len(olds), AUTO_SNAP_MAX)
+    except OSError:
+        pass
+    return snap
+
+
+# --- periodic snapshot ---------------------------------------------------------------
+# Manual Save only helps if you remember to click it, and the moment you need it (the
+# terminal just died) is exactly when you can no longer take one. So take one on a timer
+# as well. `snapshot_every_min=` in cc_web.conf; 0 turns it off.
+SNAPSHOT_AUTO_MIN = 60.0
+try:
+    SNAPSHOT_AUTO_MIN = float(_load_conf().get("snapshot_every_min") or 60)
+except Exception:
+    pass
+SNAPSHOT_QUIET_AFTER_RESUME = 120.0     # seconds
+_resume_ended_mono = 0.0
+_snapshot_auto = {"at": "", "count": 0, "skipped": "", "every_min": SNAPSHOT_AUTO_MIN}
+
+
+def _write_snapshot(sessions: list[dict], auto: bool = False) -> dict:
+    """Write the MANUAL snapshot, keeping the previous copy as .prev.json.
+
+    The rotation is deliberate: this file is a record of what was open, it is worth
+    having precisely when something has gone wrong, and one bad write must not be the
+    end of it. (Auto snapshots live in their own directory — see _auto_snap_save.)
+    """
+    import datetime as _dt
+    snap = {"saved_at": _dt.datetime.now().isoformat(timespec="seconds"),
+            "auto": auto, "sessions": sessions}
+    try:
+        prev = SNAPSHOT_FILE.read_text(encoding="utf-8")
+        if json.loads(prev).get("sessions") != sessions:
+            SNAPSHOT_FILE.with_name(SNAPSHOT_FILE.stem + ".prev.json").write_text(
+                prev, encoding="utf-8")
+    except Exception:
+        pass
+    tmp = SNAPSHOT_FILE.with_name(SNAPSHOT_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(SNAPSHOT_FILE)
+    return snap
+
+
+async def _snapshot_autosave(interval_sec: float, first_delay: float = 120.0) -> None:
+    """Capture the live tab list every `interval_sec`, starting sooner than that.
+
+    The first pass is early on purpose: cc_web restarts (deploys, crashes, a reboot) and
+    an hour-long first interval means a fresh process can run most of a day with nothing
+    recorded — exactly the window where you most want a snapshot.
+
+    Every rule here is "never replace a good snapshot with a worse one", because each
+    skipped case is a way the file could otherwise be destroyed at the worst moment:
+
+      * bridge unreachable  → an empty list, which would erase the only copy of what
+        was open. This is not hypothetical: a wedged iTerm2 reported zero tabs for
+        hours while 15 claude sessions were alive and well.
+      * zero tabs           → same file-destroying write, and from here an idle machine
+        and a broken terminal look identical.
+      * a resume in flight (or just finished) → the list is partial while tabs are being
+        reopened; writing 3-of-15 over the 15 you are restoring FROM is the single worst
+        moment to save. Hence the quiet period after it ends, too.
+    """
+    delay = min(first_delay, interval_sec)
+    while True:
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        delay = interval_sec
+        why = ""
+        try:
+            if _resume_progress.get("running"):
+                why = "resume in progress"
+            elif _time.monotonic() - _resume_ended_mono < SNAPSHOT_QUIET_AFTER_RESUME:
+                why = "just finished resuming"
+            else:
+                sessions = await _live_tab_entries()
+                if not sessions:
+                    why = (getattr(bridge, "last_error", "") or "no live claude tab")
+                else:
+                    snap = _auto_snap_save(sessions)   # None → identical to the last one
+                    if snap:
+                        _snapshot_auto.update({"at": snap["saved_at"], "count": len(sessions),
+                                               "skipped": ""})
+                        log.info("auto snapshot: %d session(s) -> %s",
+                                 len(sessions), snap["saved_at"])
+                    else:
+                        _snapshot_auto["skipped"] = "unchanged since the last auto snapshot"
+        except Exception as e:
+            why = _bridge_reason(e)
+        if why:
+            _snapshot_auto["skipped"] = why
+            log.info("snapshot auto-save skipped: %s", why)
+
+
 @app.post("/api/sessions-snapshot/save", dependencies=[Depends(require_token)])
 async def post_snapshot_save():
     """Capture all live claude tabs (session-id + cwd, in window/tab order) so
@@ -7047,12 +7280,13 @@ async def post_snapshot_save():
         sessions = await _live_tab_entries()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
-    snap = {"saved_at": _dt.datetime.now().isoformat(timespec="seconds"),
-            "sessions": sessions}
+    if not sessions:
+        # Same reasoning as the autosave: never trade a real snapshot for an empty one.
+        raise HTTPException(status_code=409, detail=(
+            (getattr(bridge, "last_error", "") or "no live claude tab")
+            + " — 没有可保存的 tab,已保留上一份快照"))
     try:
-        tmp = SNAPSHOT_FILE.with_name(SNAPSHOT_FILE.name + ".tmp")
-        tmp.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(SNAPSHOT_FILE)
+        snap = _write_snapshot(sessions, auto=False)
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"save failed: {e}")
     return {"ok": True, "count": len(sessions), **snap}
@@ -7060,10 +7294,17 @@ async def post_snapshot_save():
 
 @app.get("/api/sessions-snapshot", dependencies=[Depends(require_token)])
 async def get_snapshot():
+    """Both stores. Top-level saved_at/sessions stay = the MANUAL one (what Save wrote),
+    plus `auto` = the newest-first history the resume picker offers."""
     try:
-        return {"ok": True, **json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))}
+        man = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return {"ok": False, "saved_at": None, "sessions": []}
+        man = {"saved_at": None, "sessions": []}
+    auto = _auto_snap_list()
+    return {"ok": bool(man.get("sessions")) or bool(auto),
+            "saved_at": man.get("saved_at"), "sessions": man.get("sessions") or [],
+            "auto": auto[:40], "auto_total": len(auto), "auto_max": AUTO_SNAP_MAX,
+            "auto_state": dict(_snapshot_auto)}
 
 
 def _clean_tab_name(name: str) -> str:
@@ -7123,21 +7364,51 @@ async def _run_resume(sessions: list[dict]) -> None:
     st["current"] = ""
     st["running"] = False
     st["finished_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+    # The tabs exist now but claude needs a few seconds per pane before it shows up in
+    # the process table, so the live list stays SHORT for a while after this returns.
+    # The autosave must not photograph that.
+    global _resume_ended_mono
+    _resume_ended_mono = _time.monotonic()
+
+
+class ResumePayload(BaseModel):
+    source: str = "manual"      # "manual" | "auto"
+    file: str = ""              # a specific auto snapshot; empty = the newest
 
 
 @app.post("/api/sessions-snapshot/resume", dependencies=[Depends(require_token)])
-async def post_snapshot_resume():
+async def post_snapshot_resume(payload: Optional[ResumePayload] = None):
     """Kick off resume in the background (restores tab names + original order,
-    skips already-running). Returns immediately; poll /resume-status for
-    progress."""
+    skips already-running). Returns immediately; poll /resume-status for progress.
+
+    The source is explicit because the two stores answer different questions: the manual
+    one is "the set I chose to keep", the auto history is "what was actually open at
+    <time>" — after something goes wrong, the one you want is usually an auto snapshot
+    from before it.
+    """
     import datetime as _dt
     if _resume_progress["running"]:
         return {"ok": True, "already_running": True, **_resume_progress}
-    try:
-        snap = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        raise HTTPException(status_code=404, detail="no saved snapshot")
+    src = (payload.source if payload else "manual") or "manual"
+    want = (payload.file if payload else "") or ""
+    if src == "auto":
+        if want:
+            snap = _auto_snap_read(want)
+            if snap is None:
+                raise HTTPException(status_code=404, detail=f"no such auto snapshot: {want}")
+        else:
+            lst = _auto_snap_list()
+            if not lst:
+                raise HTTPException(status_code=404, detail="no auto snapshot yet")
+            snap = _auto_snap_read(lst[0]["file"]) or {}
+    else:
+        try:
+            snap = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            raise HTTPException(status_code=404, detail="no saved snapshot")
     sessions = snap.get("sessions", [])
+    if not sessions:
+        raise HTTPException(status_code=409, detail="that snapshot has no sessions in it")
     _resume_progress.update({
         "running": True, "total": len(sessions), "done": 0, "current": "",
         "results": [], "resumed": 0,

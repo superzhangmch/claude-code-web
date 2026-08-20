@@ -401,11 +401,15 @@ body.light .hl { color: #c81e1e; }
   color: var(--muted); word-break: break-all; min-height: 1em;
 }
 #newdlg-resolved .rp-sub { color: var(--accent); }
-#picker-warn {
+#picker-warn, #picker-bridge {
   margin: 8px 2px; padding: 8px 10px; border-radius: 6px;
   background: #2a1a14; border: 1px solid #ff8b6a; color: #ffb499;
   font-size: 12px; line-height: 1.4;
 }
+#picker-bridge .pb-act { margin-left: 8px; background: transparent; color: inherit;
+  border: 1px solid currentColor; border-radius: 999px; padding: 2px 10px;
+  font-size: 11px; cursor: pointer; }
+#picker-bridge .pb-act:disabled { opacity: .5; cursor: default; }
 /* Red alarm: runaway high-CPU processes (overheating). */
 #picker-runaway {
   margin: 10px 2px 4px; padding: 8px 10px; border-radius: 6px;
@@ -1673,6 +1677,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #tabs-modal .modal-row h3 { margin: 0; flex: 1; font-size: 14px; }
 #tabs-modal .tabs-snap-row { flex-shrink: 0; }
 #tabs-modal #tabs-snap-status { font-size: 11px; color: var(--muted); margin-left: auto; }
+#tabs-modal #tabs-snap-src {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 3px 6px; font-size: 11px; max-width: 42vw;
+}
 #tabs-modal .tabs-list {
   /* Desktop: pack tabs left-to-right into as many columns as fit, wrapping down. */
   display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
@@ -2094,6 +2102,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <div class="scr-cfg-row"><span>LaTeX 公式</span>
           <button id="picker-latex" class="btn" title="公式渲染: 自动 / 手动点每条消息的 ∑">手动</button>
         </div>
+        <div class="scr-cfg-row"><span>终端连接</span>
+          <button id="picker-bridge-reset" class="btn" title="重连终端 (iTerm2 / tmux)。重启过 iTerm2 之后用这个,不用重启 cc-web">↻ reconnect</button>
+        </div>
         <div class="scr-cfg-row"><span>整页刷新</span>
           <button id="picker-reload" class="btn" title="reload the whole page — pick up the latest UI after a deploy">↻ reload</button>
         </div>
@@ -2162,7 +2173,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       </div>
       <div class="modal-row tabs-snap-row">
         <button id="tabs-snap-save" class="btn" title="保存当前所有 claude tab（含顺序），重启前点">💾 Save list</button>
-        <button id="tabs-snap-resume" class="btn" title="按原顺序 claude --resume 恢复，重启后点">↻ Resume saved</button>
+        <!-- Which snapshot to resume FROM. Manual = the list you chose to keep; auto =
+             what was actually open at that time (one entry per change). After something
+             breaks, the one you want is usually an auto entry from just before it. -->
+        <select id="tabs-snap-src" title="从哪份快照恢复:手动保存的,还是自动记录的某个时间点"></select>
+        <button id="tabs-snap-resume" class="btn" title="按选中的快照 claude --resume 恢复，重启后点">↻ Resume saved</button>
         <span id="tabs-snap-status"></span>
       </div>
       <div id="tabs-list" class="tabs-list"></div>
@@ -2317,6 +2332,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <button id="picker-brief" title="brief 一行式(快) / full 卡片(带对话摘录)">≣ brief</button>
       </div>
       <div id="picker-runaway" style="display:none"></div>
+      <!-- Terminal bridge unreachable. Separate from #picker-warn (claude's session
+           store) because they fail independently and each needs its own text. -->
+      <div id="picker-bridge" style="display:none"></div>
       <input id="picker-quickfilter" type="search" autocomplete="off"
              placeholder="Quick filter…  a &amp; b (AND) · a | b (OR)" />
       <div id="picker-warn" style="display:none"></div>
@@ -2990,6 +3008,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 
   // picker ⚙ dropdown: Q-mode / theme / font / reload all live here now (their
   // own handlers stay wired by id — the buttons just moved inside this menu).
+  const pickerBridgeResetBtn = document.getElementById("picker-bridge-reset");
+  if (pickerBridgeResetBtn) pickerBridgeResetBtn.addEventListener("click", (e) => {
+    e.stopPropagation(); bridgeReset(pickerBridgeResetBtn);
+  });
   const pickerBriefBtn = document.getElementById("picker-brief");
   // brief lists the live tabs only and they fit on one screen, so the quick filter and the
   // full-search panel are dead weight there. Hiding them also removes a trap: a filter you
@@ -3195,9 +3217,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (switchMenu.style.display !== "none") { hideSwitchMenu(); return; }
     switchMenu.innerHTML = "<div class='sw-empty'>loading…</div>";
     switchMenu.style.display = "";
-    let tabs = [];
-    try { const r = await authedFetch("/api/tabs"); if (r.ok) tabs = (await r.json()).tabs || []; } catch {}
-    if (!tabs.length) { switchMenu.innerHTML = "<div class='sw-empty'>没有运行中的 claude tab</div>"; return; }
+    let tabs = [], bridgeErr = "";
+    try {
+      const r = await authedFetch("/api/tabs");
+      if (r.ok) { const j = await r.json(); tabs = j.tabs || []; bridgeErr = j.bridge_error || ""; }
+    } catch {}
+    if (!tabs.length) {
+      // "没有运行中的 claude tab" was a lie whenever the bridge was the problem.
+      switchMenu.innerHTML = "<div class='sw-empty'>" + (bridgeErr
+        ? "⚠ 连不上 " + TERM + ":" + _escHtml(bridgeErr) + "<br>(会话列表页 ⚙ → reconnect)"
+        : "没有运行中的 claude tab") + "</div>";
+      return;
+    }
     const single = new Set(tabs.map(t => t.window_index || 0)).size <= 1;
     switchMenu.innerHTML = "";
     for (const t of tabs) {
@@ -4040,6 +4071,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     tabsLive.stop(); tabsLive.reset();
     tabsScreenEl.textContent = "Pick a tab above to view its screen.";
     loadItermTabs();
+    loadSnapSources();      // fill the resume-source picker (manual + auto history)
   });
   tabsRefresh.addEventListener("click", () => {
     loadItermTabs();
@@ -4058,16 +4090,47 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const snapStatus = document.getElementById("tabs-snap-status");
   const snapSaveBtn = document.getElementById("tabs-snap-save");
   const snapResumeBtn = document.getElementById("tabs-snap-resume");
+  const snapSrcEl = document.getElementById("tabs-snap-src");
+  let _snapInfo = null;   // last /api/sessions-snapshot payload (both stores)
+  // Fill the source picker: the manual snapshot first, then the auto history (newest
+  // first). Each option says when and how many, because that is what you pick on.
+  async function loadSnapSources() {
+    let j = null;
+    try { j = await (await authedFetch("/api/sessions-snapshot")).json(); } catch {}
+    _snapInfo = j;
+    if (!snapSrcEl) return j;
+    snapSrcEl.innerHTML = "";
+    const add = (val, label) => {
+      const o = document.createElement("option"); o.value = val; o.textContent = label;
+      snapSrcEl.appendChild(o);
+    };
+    const man = (j && (j.sessions || []).length) ? j : null;
+    if (man) add("manual", `手动 · ${man.saved_at} (${man.sessions.length})`);
+    for (const a of ((j && j.auto) || [])) add("auto:" + a.file, `自动 · ${a.saved_at} (${a.count})`);
+    if (!snapSrcEl.options.length) add("", "(还没有任何快照)");
+    // Default to whichever is NEWER — after a crash that is nearly always the auto one,
+    // and defaulting to a stale manual list is how you resume last week's tabs.
+    const newestAuto = ((j && j.auto) || [])[0];
+    if (man && newestAuto) snapSrcEl.value = (newestAuto.saved_at > man.saved_at)
+      ? "auto:" + newestAuto.file : "manual";
+    const st = j && j.auto_state;
+    if (st && snapStatus && !snapStatus.textContent) {
+      snapStatus.textContent = st.at ? `auto ${st.at} (${st.count})`
+        : (st.skipped ? "auto: " + st.skipped : "");
+    }
+    return j;
+  }
   const fmtSnap = (arr) => arr.map((s, i) =>
     `${i + 1}. [${(s.sid || "").slice(0, 8)}] ${s.name || ""}  ${s.cwd || ""}`).join("\n");
   // Disable BOTH buttons while either op runs (resume can take 10s+; no
   // double-clicks / concurrent save+resume).
   const snapBusy = (on) => { snapSaveBtn.disabled = on; snapResumeBtn.disabled = on; };
   snapSaveBtn.addEventListener("click", async () => {
-    // Guard the footgun: Save OVERWRITES the previous snapshot. If one exists
+    // Guard the footgun: Save OVERWRITES the previous MANUAL snapshot. If one exists
     // (e.g. you meant to click Resume after a reboot), confirm before clobbering.
+    // (The auto history is a separate store and is never touched by Save.)
     let prev = null;
-    try { prev = await (await authedFetch("/api/sessions-snapshot")).json(); } catch {}
+    try { prev = await loadSnapSources(); } catch {}
     if (prev && (prev.sessions || []).length) {
       if (!confirm(`⚠️ 已存在快照:${prev.sessions.length} 个 session(存于 ${prev.saved_at})。\n\nSave 会用“当前”的 tab 列表覆盖它。\n（重启后想恢复的话应该点 “Resume saved”,不是 Save!）\n\n确定要覆盖?`)) return;
     } else {
@@ -4080,19 +4143,41 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (!r.ok) { snapStatus.textContent = "save failed"; alert("Save failed: " + await r.text()); return; }
       const j = await r.json();
       snapStatus.textContent = `saved ${j.count} · ${j.saved_at}`;
+      loadSnapSources();
       alert(`已保存 ${j.count} 个 claude session(按顺序):\n\n${fmtSnap(j.sessions || [])}\n\n保存时间: ${j.saved_at}\n现在可以安全重启。重启后回到本页点 “Resume saved”。`);
     } catch (e) { snapStatus.textContent = "error"; alert("Save error: " + e); }
     finally { snapBusy(false); }
   });
   snapResumeBtn.addEventListener("click", async () => {
-    let snap;
-    try { snap = await (await authedFetch("/api/sessions-snapshot")).json(); } catch { snap = null; }
-    if (!snap || !(snap.sessions || []).length) { alert("没有已保存的 session 快照。"); return; }
-    if (!confirm(`将按原顺序 resume ${snap.sessions.length} 个 session(已在运行的会自动跳过):\n\n${fmtSnap(snap.sessions)}\n\n保存于 ${snap.saved_at}\n\n继续?`)) return;
+    const j = _snapInfo || await loadSnapSources();
+    const pick = (snapSrcEl && snapSrcEl.value) || "manual";
+    if (!pick) { alert("没有任何快照可恢复。"); return; }
+    // Show the CHOSEN snapshot's contents, not just a count — resuming the wrong one
+    // opens a screenful of the wrong tabs.
+    let sessions = [], when = "", body = { source: "manual" };
+    if (pick.startsWith("auto:")) {
+      const file = pick.slice(5);
+      body = { source: "auto", file };
+      const meta = ((j && j.auto) || []).find(a => a.file === file) || {};
+      when = meta.saved_at || file;
+      let d = null;
+      try { d = await (await authedFetch("/api/sessions-snapshot/preview?file=" + encodeURIComponent(file))).json(); } catch {}
+      sessions = (d && d.sessions) || [];
+      if (!sessions.length) sessions = new Array(meta.count || 0).fill({});
+    } else {
+      sessions = (j && j.sessions) || [];
+      when = (j && j.saved_at) || "";
+    }
+    if (!sessions.length) { alert("这份快照里没有 session。"); return; }
+    const listed = sessions[0] && sessions[0].sid ? fmtSnap(sessions) : "(" + sessions.length + " 个 session)";
+    if (!confirm(`将按原顺序 resume ${sessions.length} 个 session(已在运行的会自动跳过):\n\n${listed}\n\n来源: ${pick.startsWith("auto:") ? "自动快照" : "手动快照"} ${when}\n\n继续?`)) return;
     snapBusy(true);
-    snapStatus.textContent = "resuming… 0/" + snap.sessions.length;
+    snapStatus.textContent = "resuming… 0/" + sessions.length;
+    const snap = { sessions };
     try {
-      const r = await authedFetch("/api/sessions-snapshot/resume", { method: "POST" });
+      const r = await authedFetch("/api/sessions-snapshot/resume", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify(body) });
       if (!r.ok) { snapStatus.textContent = "resume failed"; alert("Resume failed: " + await r.text()); snapBusy(false); return; }
       // Resume runs in the background (1.2s per tab) — poll for live progress so
       // the user sees "N/total · <current tab>" and tabs appearing as they come up.
@@ -5150,6 +5235,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         pw.style.display = "";
       } else { pw.style.display = "none"; }
     }
+    renderBridgeWarn(data.bridge_error || "");
     renderRunaway(data.runaway || []);
     pickerBase = data.sessions || [];
     updateTabMeta(pickerBase);   // funnel the list's names/indices into the central store
@@ -5182,6 +5268,44 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
   function startTabNamePoll() { stopTabNamePoll(); _tabNameTimer = setInterval(pollTabNames, 15000); }
   function stopTabNamePoll() { if (_tabNameTimer) { clearInterval(_tabNameTimer); _tabNameTimer = null; } }
+
+  // The terminal bridge is unreachable. Without this, a wedged iTerm2 / stopped tmux
+  // server renders as an empty Tabs group — indistinguishable from "no session open",
+  // which once had me hunting for lost sessions that were never lost. Carries the fix
+  // (reconnect) rather than just the complaint.
+  function renderBridgeWarn(msg) {
+    const el = document.getElementById("picker-bridge");
+    if (!el) return;
+    if (!msg) { el.style.display = "none"; el.innerHTML = ""; return; }
+    el.innerHTML = "";
+    el.appendChild(document.createTextNode("⚠ 连不上 " + TERM + ":" + msg));
+    const b = document.createElement("button");
+    b.className = "pb-act"; b.textContent = "↻ reconnect";
+    b.addEventListener("click", () => bridgeReset(b));
+    el.appendChild(b);
+    el.style.display = "";
+  }
+  // Force a fresh bridge connection. The bridge retries on its own now, but a
+  // connection to an iTerm2 that has since been restarted looks alive until you send on
+  // it, so an explicit "throw it away and reconnect" is still worth having.
+  async function bridgeReset(btn) {
+    const was = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "reconnecting…"; }
+    let d = null;
+    try {
+      const r = await authedFetch("/api/bridge-reset", { method: "POST", timeoutMs: 45000 });
+      d = await r.json();
+    } catch (e) {
+      d = { ok: false, error: (e && e.name === "AbortError") ? "超时(45s)" : String(e) };
+    }
+    if (btn) { btn.disabled = false; btn.textContent = was; }
+    if (d && d.ok) {
+      alert(`已重连 ${TERM}:看到 ${d.tabs} 个 claude tab` + (d.tabs ? "" : "\n(连上了,但确实没有正在运行的 claude tab)"));
+      refreshPicker();
+    } else {
+      alert(`重连 ${TERM} 失败:\n\n${(d && d.error) || "unknown"}`);
+    }
+  }
 
   // Red alarm: processes stuck high-CPU for >1h (overheating the machine).
   function renderRunaway(list) {

@@ -133,6 +133,7 @@ class TmuxBridge:
 
     def __init__(self) -> None:
         self._send_lock = asyncio.Lock()
+        self.last_error: str = ""   # same contract as the iTerm bridge (see its docstring)
 
     # tmux is a stateless CLI — there's no persistent connection to hold open.
     async def connect(self) -> None:
@@ -141,8 +142,17 @@ class TmuxBridge:
     async def ensure_connected(self) -> None:
         return
 
+    def drop(self) -> None:
+        return          # nothing cached to drop
+
+    async def wait_ready(self, timeout: float = 20.0) -> bool:
+        return bool(await asyncio.to_thread(_panes))   # tmux server up with >=1 pane?
+
     async def list_claude_tabs(self) -> list[ClaudeSessionRef]:
         panes = await asyncio.to_thread(_panes)
+        # No panes at all means the tmux server isn't running — on Linux that is the
+        # equivalent of a wedged iTerm2, and it used to show up as "no tabs" too.
+        self.last_error = "" if panes else "tmux server 没在运行(claude 需要跑在 tmux 里才能被接管)"
         procs = await asyncio.to_thread(_claude_procs_by_tty)
         refs: list[ClaudeSessionRef] = []
         for idx, p in enumerate(panes):
