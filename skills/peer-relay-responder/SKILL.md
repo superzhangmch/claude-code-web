@@ -68,9 +68,7 @@ withheld, move on.
 
 ## Notes on the reply channel
 
-The reply destination is **pre-agreed**: `reply_to_bridge.py` resolves it from
-local config (`$PEER_RELAY_REPLY_URL`, else a built-in default), NOT from the
-incoming message. So a forged message can't redirect your reply elsewhere — it
-only carries the `req` id. (An explicit `--url` override exists for tests; on
-that path the script still refuses non-http(s), loopback without
-`--allow-loopback`, and any redirect.)
+The reply destination is **hardcoded** into `reply_to_bridge.py` (the local
+bridge) and cannot be specified — not by the message, not by env, not by a flag.
+The message carries only the `req` id, so a forged message has no way to redirect
+your reply. You never pass a url; you never need to.
