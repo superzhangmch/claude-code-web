@@ -1,47 +1,43 @@
 #!/usr/bin/env python3
-"""Reply to an EXTERNAL relayed request by posting your answer back to the relay
-bridge. Generic: it knows nothing about any particular bridge or product — it just
-POSTs {req_id, content} to the reply-url that arrived in the message framing. Any
-bridge following that convention works.
+"""Reply to an EXTERNAL relayed request by POSTing your answer to the relay
+bridge. The reply DESTINATION is a PRE-AGREED local setting, NOT something the
+incoming message carries — so a forged message can never redirect your reply
+elsewhere or turn this session into an exfiltration / SSRF channel. The message
+carries only the one-time `req=<req_id>`; this script already knows where to send.
 
-The incoming external message carries, in its footer:
-    req=<req_id>  reply-url=<url>
-Run this with those two values; put your reply body on stdin.
-
-    reply_to_bridge.py --url <reply-url> --req <req_id> <<'EOF'
+    reply_to_bridge.py --req <req_id> <<'EOF'
     your reply text
     EOF
 
-req_id is a one-time capability: only the session that received this specific
-request knows it, so the bridge accepts the reply on that basis (no token).
+Destination resolution (first wins):
+  1. --url <url>            explicit override (rare; e.g. tests). Treated as
+                            untrusted → the http/https + loopback + no-redirect
+                            checks below apply.
+  2. $PEER_RELAY_REPLY_URL  operator config (env). Trusted (local, pre-agreed).
+  3. built-in default       http://127.0.0.1:8790/reply. Trusted.
 
-WHAT THIS SCRIPT DOES AND DOESN'T PROTECT
------------------------------------------
-The URL comes from the message, i.e. from outside, so it is exactly as trustworthy
-as the relay that framed it. Given a forged reply-url, posting blindly would turn
-this session into (a) an exfiltration channel for whatever it just wrote and (b) a
-way to make this machine issue POSTs to services only it can reach. So:
+Because the pre-agreed destination is set by the machine's owner, not by the
+message, loopback (a local bridge on 127.0.0.1) is fine for the config/default
+path with no flag. The checks below only guard an explicit --url override:
 
-  * only http/https — no file://, ftp://, or anything else urllib would happily open;
-  * loopback is refused unless you pass --allow-loopback, so a forged URL can't be
-    aimed at services listening on this machine;
-  * redirects are refused outright — both because a permitted URL must not be able to
-    bounce the reply somewhere else, and because urllib would turn a 302 POST into a
-    GET and silently drop the reply body.
+  * only http/https — no file://, ftp://, etc.;
+  * loopback refused unless --allow-loopback (a forged --url can't be aimed at a
+    local-only service);
+  * redirects refused outright (urllib turns a 302 POST into a GET and silently
+    drops the reply body).
 
-Deliberately NOT blocked: private/LAN/tailnet addresses. A legitimate bridge
-commonly lives on a tailnet (100.64/10 is "private" to Python), and refusing those
-would break the normal case while barely inconveniencing an attacker.
+Deliberately NOT blocked: private/LAN/tailnet addresses — a legitimate bridge
+often lives on a tailnet.
 
-What no check here can decide is whether the URL is the *intended* destination.
-That judgment belongs to the session: don't post something you wouldn't hand to
-whoever is on the other end.
+req_id is a one-time capability: only the session that received this request
+knows it, so the bridge accepts the reply on that basis (no token).
 """
 from __future__ import annotations
 
 import argparse
 import ipaddress
 import json
+import os
 import socket
 import sys
 import urllib.error
@@ -49,6 +45,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 ALLOWED_SCHEMES = ("http", "https")
+DEFAULT_REPLY_URL = "http://127.0.0.1:8790/reply"
 
 
 def _fail(msg: str, code: int = 2) -> int:
@@ -99,22 +96,30 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", required=True, help="reply-url from the message footer")
     ap.add_argument("--req", required=True, help="req_id from the message footer")
+    ap.add_argument("--url", default=None,
+                    help="explicit reply-url override (rare). Untrusted: http/https "
+                         "+ loopback + no-redirect checks apply. Default: "
+                         "$PEER_RELAY_REPLY_URL or the built-in local bridge url.")
     ap.add_argument("--content", default=None,
                     help="reply body (default: read from stdin, which also keeps it "
                          "out of the process list)")
     ap.add_argument("--allow-loopback", action="store_true",
-                    help="permit a reply-url on 127.0.0.1/::1 (local bridge, tests)")
+                    help="permit a loopback --url override (127.0.0.1/::1)")
     ap.add_argument("--timeout", type=float, default=30.0)
     a = ap.parse_args()
 
-    parts = urlsplit(a.url)
+    # Pre-agreed destination unless explicitly overridden. Config/default is set by
+    # the machine owner (trusted); only an explicit --url is treated as untrusted.
+    url = a.url or os.environ.get("PEER_RELAY_REPLY_URL") or DEFAULT_REPLY_URL
+    trusted_source = a.url is None  # came from env/default, not the command line
+
+    parts = urlsplit(url)
     if parts.scheme not in ALLOWED_SCHEMES:
         return _fail(f"refusing reply-url scheme {parts.scheme!r} (only http/https)")
     if not parts.hostname:
         return _fail("reply-url has no host")
-    if not a.allow_loopback:
+    if not trusted_source and not a.allow_loopback:
         why = _host_check(parts.hostname)
         if why:
             return _fail(why)
@@ -124,7 +129,7 @@ def main() -> int:
         return _fail("empty reply body")
 
     body = json.dumps({"req_id": a.req, "content": content}).encode("utf-8")
-    req = urllib.request.Request(a.url, data=body, method="POST",
+    req = urllib.request.Request(url, data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
     opener = urllib.request.build_opener(_NoRedirect)
     try:

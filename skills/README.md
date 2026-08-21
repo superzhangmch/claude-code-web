@@ -83,21 +83,27 @@ session. Two kinds, told apart by the tag the relay puts at the start:
   the asker reads your transcript.
 - **external** — `[⇄ from external peer session — <who>]`, someone who is *not*
   the owner, relayed in through some bridge. The reply goes back by POSTing it to
-  the `reply-url` carried in the message footer.
+  a **pre-agreed local** destination; the message carries only a one-time `req` id.
 
 ```sh
 cp -R skills/peer-relay-responder ~/.claude/skills/
 ```
 
-Deliberately bridge- and product-agnostic: it depends only on the tags and the
-`reply-url`, and the helper holds no keys — it takes `--url` / `--req` from the
-message. Nothing to configure.
+Deliberately bridge- and product-agnostic: it depends only on the tags, and the
+helper holds no keys — the message gives it a `req` id and nothing else.
 
-`reply_to_bridge.py` treats that URL as untrusted, because it arrives from
-outside: http/https only, loopback refused unless you pass `--allow-loopback`,
-and no redirects (urllib would turn a 302 POST into a GET and drop the reply body
-while the call still looked like it succeeded). It cannot tell whether the URL is
-the *intended* destination — that stays the session's judgment, which is also why
+Where the reply goes is **not in the message**: `reply_to_bridge.py` resolves it
+from local config (`$PEER_RELAY_REPLY_URL`, else a built-in `127.0.0.1` default),
+so a forged message cannot redirect a reply elsewhere or use this session to POST
+at services only this machine can reach. Point it at a different bridge by
+changing that one setting.
+
+An explicit `--url` override exists for tests and is treated as untrusted:
+http/https only, loopback refused without `--allow-loopback`, and no redirects on
+any path (urllib turns a 302 POST into a GET, so following one would drop the
+reply body while the call still looked like it succeeded).
+
+What no check can decide is whether an answer should be given at all, which is why
 the skill keeps a short list of what not to do on a stranger's request.
 
 ## my-session-id
