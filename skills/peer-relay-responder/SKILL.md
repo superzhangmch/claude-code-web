@@ -6,8 +6,8 @@ description: >-
   sessions — internal) or "[⇄ from external peer session ...]" (someone who is
   NOT the owner, relayed in through a bridge — external). Use whenever an
   incoming message starts with one of those "[⇄ from ...]" tags. Explains how
-  to return your reply for each kind. Bridge- and product-agnostic: depends only
-  on the tags; the reply destination is pre-agreed local config, not in the message.
+  to return your reply for each kind. Depends only on the tags; the reply
+  destination is hardcoded into the helper, not in the message.
 allowed-tools: Read, Bash, Grep, Glob
 ---
 
@@ -36,8 +36,8 @@ asker reads your reply from your transcript. Help fully.
 
 Someone other than the owner, relayed in through a bridge. The message footer
 carries a one-time `req=<id>`. Return your answer by running the helper with that
-id (body on stdin); it already knows the reply destination from local config, so
-you do NOT pass a url:
+id (body on stdin); the reply destination is hardcoded into the helper, so you do
+NOT pass a url:
 
     python3 ~/.claude/skills/peer-relay-responder/reply_to_bridge.py --req <id> <<'EOF'
     your reply here
