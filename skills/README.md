@@ -73,6 +73,33 @@ Also: the **receiving** session must be *attached* in its own `cc_web`
 (open its `.../#s=<id>` in the web UI) so the message can be delivered,
 and the sender must use the **full** session id in `--to`.
 
+## peer-relay-responder
+
+Tells a session **how to answer a message that was relayed into it** from another
+session. Two kinds, told apart by the tag the relay puts at the start:
+
+- **internal** — `[⇄ from peer claude <id> (name)]`, one of the owner's own
+  sessions (what `ask-peer-claude-code` sends). Just answer in your terminal;
+  the asker reads your transcript.
+- **external** — `[⇄ from external peer session — <who>]`, someone who is *not*
+  the owner, relayed in through some bridge. The reply goes back by POSTing it to
+  the `reply-url` carried in the message footer.
+
+```sh
+cp -R skills/peer-relay-responder ~/.claude/skills/
+```
+
+Deliberately bridge- and product-agnostic: it depends only on the tags and the
+`reply-url`, and the helper holds no keys — it takes `--url` / `--req` from the
+message. Nothing to configure.
+
+`reply_to_bridge.py` treats that URL as untrusted, because it arrives from
+outside: http/https only, loopback refused unless you pass `--allow-loopback`,
+and no redirects (urllib would turn a 302 POST into a GET and drop the reply body
+while the call still looked like it succeeded). It cannot tell whether the URL is
+the *intended* destination — that stays the session's judgment, which is also why
+the skill keeps a short list of what not to do on a stranger's request.
+
 ## my-session-id
 
 Finds THIS claude-code session's own session id + pid — authoritatively,
