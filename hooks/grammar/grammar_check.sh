@@ -55,9 +55,9 @@ if grep -qxF "$prompt_hash" "$SEEN" 2>/dev/null; then
   exit 0
 fi
 
-# Long input (>250 chars): truncate to head 100 + tail 100 with a skipped-count marker
-if [ ${#prompt} -gt 250 ]; then
-  prompt=$(printf '%s' "$prompt" | "$PY" -c 'import sys; s=sys.stdin.read(); print(f"{s[:100]} [..{len(s)-200} chars skipped..] {s[-100:]}")')
+# Long input (>500 chars): truncate to head 200 + tail 200 with a skipped-count marker
+if [ ${#prompt} -gt 500 ]; then
+  prompt=$(printf '%s' "$prompt" | "$PY" -c 'import sys; s=sys.stdin.read(); print(f"{s[:200]} [..{len(s)-400} chars skipped..] {s[-200:]}")')
   echo "[$(date '+%H:%M:%S')] TRUNCATED to head+tail (${#prompt} chars sent)" >> "$LOG"
 fi
 
