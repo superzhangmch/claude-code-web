@@ -3569,7 +3569,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const b = document.createElement("button");
       b.className = "ask-row" + (i === cur ? " current" : "");
       const num = document.createElement("span"); num.className = "ask-n";
-      num.textContent = "#" + (i + 1);
+      // Counted from the NEWEST, so the numbers don't move. Numbering 1..N downwards
+      // meant every "载入更早" renumbered the whole list — the ask you were looking at
+      // was #3 a moment ago and is #10 now, which makes the number useless for keeping
+      // your place. Newest is #1; loading older history only ever appends bigger ones.
+      num.textContent = "#" + (nodes.length - i);
       const t = document.createElement("span"); t.className = "ask-t";
       const full = askText(n);
       t.textContent = fitHT(full, availPx, font) || "(空)";
