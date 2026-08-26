@@ -1297,6 +1297,26 @@ footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
 #mm-asr-sec .asr-unset { color: var(--accent); font-size: 12px; padding: 3px 2px; line-height: 1.5; }
 #mm-asr-sec .asr-unset span { display: block; color: var(--muted); font-size: 11px; }
 #mm-asr-sec .asr-unset code { font-size: 11px; word-break: break-all; }
+/* The jump-to-request list. Anchored to the bottom right, above the float controls
+   it belongs to (.switch-menu is top-anchored, so it can't be reused as-is). */
+.asks-menu {
+  position: fixed; right: 8px; bottom: 92px; z-index: 85;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4); padding: 6px;
+  width: min(560px, 94vw); max-height: 52vh; overflow-y: auto; overflow-x: hidden;
+}
+.asks-menu .ask-row {
+  display: flex; gap: 8px; align-items: baseline; width: 100%; box-sizing: border-box;
+  background: var(--panel2); color: var(--text); border: 1px solid transparent;
+  border-radius: 6px; padding: 6px 8px; margin-bottom: 4px; cursor: pointer;
+  text-align: left; font-size: 13px;
+}
+.asks-menu .ask-row:hover { border-color: var(--accent); }
+.asks-menu .ask-row.current { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.asks-menu .ask-n { color: var(--muted); font-size: 11px; flex-shrink: 0;
+                    font-variant-numeric: tabular-nums; }
+.asks-menu .ask-t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; }
+.asks-menu .ask-empty { color: var(--muted); font-size: 12px; padding: 8px; }
 footer.hidden { display: none; }
 /* mirror of Claude's bottom status bar — one line under the input, scrolls
    horizontally if too long; "N shell(s)/monitor(s)" tokens are clickable. */
@@ -2460,10 +2480,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div id="float-controls">
       <button id="tail-screen-btn" title="Peek at the last lines of the live terminal">tail</button>
       <span class="tc-sep">|</span>
-      <button id="jump-prev-user" title="Previous user request (u)">↑</button>
-      <button id="jump-next-user" title="Next user request (U)">↓</button>
+      <!-- One button instead of ↑/↓: stepping through requests one at a time to find
+           the one you meant is worse than being shown the list. u / U still step. -->
+      <button id="jump-asks" title="列出你的提问,点一条跳过去(键盘 u / U 仍可上下逐条跳)">☰</button>
       <button id="jump-bottom" title="Jump to latest">⤓</button>
     </div>
+    <div id="asks-menu" class="asks-menu" style="display:none"></div>
     <div class="input-row">
       <input id="upload-input" type="file" accept="image/*" multiple style="display:none">
       <div class="in-btn-col">
@@ -3461,6 +3483,85 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       shouldAutoscroll = true;                  // below the last → very bottom / latest
       mainEl.scrollTop = mainEl.scrollHeight;
     }
+  }
+
+  // head…tail rather than head…: the middle of a long ask is its least identifying
+  // part — the opening says what it is about, and the actual request is usually at the
+  // end ("...所以帮我把 X 改成 Y").
+  function clampHT(str, n) {
+    const t = (str || "").replace(/\s+/g, " ").trim();
+    if (t.length <= n) return t;
+    const head = Math.ceil((n - 1) * 0.62);
+    return t.slice(0, head) + "…" + t.slice(-(n - 1 - head));
+  }
+  // Fit to PIXELS, not to a character count: a CJK glyph is about twice the width of a
+  // Latin one, so a fixed 110-char clamp fits on a laptop and overflows on a phone —
+  // and overflow here eats the TAIL, which is the half worth keeping. Measured on a
+  // canvas so it costs no layout, however many asks the session has.
+  const _fitCanvas = document.createElement("canvas").getContext("2d");
+  function fitHT(str, maxPx, font) {
+    const t = (str || "").replace(/\s+/g, " ").trim();
+    if (!t) return "";
+    _fitCanvas.font = font;
+    if (_fitCanvas.measureText(t).width <= maxPx) return t;
+    let lo = 4, hi = t.length, best = clampHT(t, lo);
+    while (lo <= hi) {                       // largest n whose head…tail still fits
+      const mid = (lo + hi) >> 1, cand = clampHT(t, mid);
+      if (_fitCanvas.measureText(cand).width <= maxPx) { best = cand; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    return best;
+  }
+  const asksMenu = document.getElementById("asks-menu");
+  const askText = (node) => {
+    const md = node.querySelector(".markdown");        // the rendered body, without the
+    return (md ? md.textContent : node.textContent) || "";   // "You" label and buttons
+  };
+  function hideAsksMenu() { asksMenu.style.display = "none"; }
+  function showAsksMenu() {
+    const nodes = [...mainEl.querySelectorAll(".msg.user")];
+    asksMenu.innerHTML = "";
+    if (!nodes.length) {
+      const e = document.createElement("div"); e.className = "ask-empty";
+      e.textContent = "这个 session 里还没有你的提问";
+      asksMenu.appendChild(e);
+    }
+    // Which one you are currently in: the last whose top is at or above the viewport.
+    const baseTop = mainEl.getBoundingClientRect().top;
+    let cur = -1;
+    nodes.forEach((n, i) => { if (n.getBoundingClientRect().top - baseTop <= 4) cur = i; });
+    // One measurement of the real box, then every label is fitted to it.
+    asksMenu.style.display = "block";
+    const probe = document.createElement("button"); probe.className = "ask-row";
+    probe.innerHTML = '<span class="ask-n">#00</span><span class="ask-t">x</span>';
+    asksMenu.appendChild(probe);
+    const pt = probe.querySelector(".ask-t");
+    const availPx = Math.max(60, pt.getBoundingClientRect().width);
+    const font = getComputedStyle(pt).font
+              || `${getComputedStyle(pt).fontSize} ${getComputedStyle(pt).fontFamily}`;
+    probe.remove();
+    nodes.forEach((n, i) => {
+      const b = document.createElement("button");
+      b.className = "ask-row" + (i === cur ? " current" : "");
+      const num = document.createElement("span"); num.className = "ask-n";
+      num.textContent = "#" + (i + 1);
+      const t = document.createElement("span"); t.className = "ask-t";
+      const full = askText(n);
+      t.textContent = fitHT(full, availPx, font) || "(空)";
+      b.title = full.slice(0, 2000);
+      b.appendChild(num); b.appendChild(t);
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        shouldAutoscroll = false;
+        mainEl.scrollTop += n.getBoundingClientRect().top - mainEl.getBoundingClientRect().top;
+        hideAsksMenu();
+      });
+      asksMenu.appendChild(b);
+    });
+    asksMenu.style.display = "block";
+    // Open on the one you're in, not at the top of a long list.
+    const curEl = asksMenu.querySelector(".ask-row.current");
+    if (curEl) curEl.scrollIntoView({ block: "center" });
   }
 
   function setReady(idle) {
@@ -8301,6 +8402,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     return null;
   }
   document.addEventListener("keydown", (e) => {
+    // Esc closes the ask list first — it's the topmost thing on screen when open.
+    if (e.key === "Escape" && asksMenu.style.display !== "none") {
+      e.preventDefault(); hideAsksMenu(); return;
+    }
     if (e.key === "Escape" && document.activeElement === inputEl) { inputEl.blur(); return; }
     // the tabs viewer is a global overlay (can be open from the home/picker where
     // the transcript view isn't shown) → don't bail before its passthrough branch.
@@ -10215,8 +10320,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       await uploadFiles(files);
     }
   });
-  document.getElementById("jump-prev-user").addEventListener("click", (e) => { e.stopPropagation(); jumpUserRequest(-1); });
-  document.getElementById("jump-next-user").addEventListener("click", (e) => { e.stopPropagation(); jumpUserRequest(1); });
+  document.getElementById("jump-asks").addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (asksMenu.style.display !== "none") hideAsksMenu(); else showAsksMenu();
+  });
+  document.addEventListener("click", (e) => {                 // outside click closes it
+    if (asksMenu.style.display !== "none" && !asksMenu.contains(e.target)
+        && e.target !== document.getElementById("jump-asks")) hideAsksMenu();
+  });
   async function jumpBottom() {
     shouldAutoscroll = true;
     // When idle, auto-refresh is slow/paused so the tail may be stale — pull the

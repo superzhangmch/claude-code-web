@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The ⚙ menu's voice section: one labelled line per choice, not one line per option.
+"""Two small popups in the transcript view: the ⚙ menu, and the jump-to-ask list.
 
 The menu used to spend two lines on every setting — a heading line, then a full-width
 button — and one whole line per speech model ("🎤 OpenAI 4o-mini", "🎤 OpenAI Whisper",
@@ -15,6 +15,16 @@ it emits:
      name stays in the tooltip;
   3. ...but only when they really all share it — otherwise the names are left alone;
   4. an unconfigured setup still explains itself instead of rendering nothing.
+
+Also pinned here: clampHT(), which labels the jump-to-ask list. Those labels replaced
+the ↑/↓ "previous/next request" buttons — stepping one at a time to find the request you
+meant is worse than being shown the list — and a long ask has to be recognisable in one
+line. Truncation is head…TAIL, because the middle is the least identifying part: the
+opening says what it is about and the actual request is usually at the end ("…所以帮我把
+A 改成 B"). Dropping the tail, which a plain head-clamp does, throws away the half worth
+keeping. (The fit is done in PIXELS at render time — a CJK glyph is twice a Latin one, so
+a fixed character count fits on a laptop and overflows on a phone; that part is measured
+in the browser, not here.)
 
     python3 tests/test_gear_menu_ui.py      # exit 0 = pass  (needs `node`)
 """
@@ -53,6 +63,7 @@ let asrConfigs = [], asrWhich = "", asrRtAvail = false, realtimeEngines = [],
     asrRtEngine = "", asrRt = false;
 
 __RENDER__
+__CLAMP__
 
 // rows the renderer produced: [label, [button texts...]]
 function rows() {
@@ -107,6 +118,21 @@ const flat = JSON.stringify(SEC.children.map(c => c.innerHTML || c.textContent |
 check("it names the config keys rather than rendering blank",
       /cc_web\.conf/.test(flat) && /asr=/.test(flat), flat.slice(0, 120));
 
+console.log("=== a long ask keeps its head AND its tail ===");
+check("a short ask is left alone", clampHT("短的一条", 40) === "短的一条", clampHT("短的一条", 40));
+check("whitespace is collapsed (a pasted block must stay one line)",
+      clampHT("  a\n\n  b   c ", 40) === "a b c", clampHT("  a\n\n  b   c ", 40));
+const long = "开头说明了背景" + "x".repeat(300) + "所以把 A 改成 B";
+const cut = clampHT(long, 30);
+check("a long one is cut to the budget", cut.length === 30, String(cut.length));
+check("...with the ellipsis in the MIDDLE, not at the end",
+      cut.indexOf("…") > 0 && cut.indexOf("…") < cut.length - 1, cut);
+check("...the head survives", cut.startsWith("开头说明了背景"), cut);
+check("...and so does the tail — that's where the request is",
+      cut.endsWith("所以把 A 改成 B"), cut);
+check("a tiny budget still produces something usable, not a crash",
+      clampHT(long, 5).length === 5 && clampHT(long, 5).includes("…"), clampHT(long, 5));
+
 console.log(_fails.length ? "\nFAILED: " + _fails.join(", ") : "\nall pass");
 process.exit(_fails.length ? 1 : 0);
 """
@@ -120,8 +146,11 @@ def main():
     m = re.search(r"\n  (function renderAsrMenu\(\) \{.*?\n  \})\n", src, re.S)
     if not m:
         print("  FAIL  could not extract renderAsrMenu() from static/index.html"); return 1
+    c = re.search(r"\n  (function clampHT\(str, n\) \{.*?\n  \})\n", src, re.S)
+    if not c:
+        print("  FAIL  could not extract clampHT() from static/index.html"); return 1
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as fh:
-        fh.write(JS.replace("__RENDER__", m.group(1)))
+        fh.write(JS.replace("__RENDER__", m.group(1)).replace("__CLAMP__", c.group(1)))
         path = fh.name
     try:
         r = subprocess.run([node, path], capture_output=True, text=True)
