@@ -1303,7 +1303,7 @@ footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
   position: fixed; right: 8px; bottom: 92px; z-index: 85;
   background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
   box-shadow: 0 6px 20px rgba(0,0,0,0.4); padding: 6px;
-  width: min(560px, 94vw); max-height: 52vh; overflow-y: auto; overflow-x: hidden;
+  width: min(560px, 94vw); max-height: 50vh; overflow-y: auto; overflow-x: hidden;   /* half the screen, then it scrolls */
 }
 .asks-menu .ask-row {
   display: flex; gap: 8px; align-items: baseline; width: 100%; box-sizing: border-box;
@@ -1317,6 +1317,10 @@ footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
                     font-variant-numeric: tabular-nums; }
 .asks-menu .ask-t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; }
 .asks-menu .ask-empty { color: var(--muted); font-size: 12px; padding: 8px; }
+/* "load more" sits at the top, where earlier history belongs, and reads as an action
+   rather than as another ask. */
+.asks-menu .ask-more { justify-content: center; color: var(--accent); font-size: 12px; }
+.asks-menu .ask-more:disabled { color: var(--muted); cursor: default; border-color: transparent; }
 footer.hidden { display: none; }
 /* mirror of Claude's bottom status bar — one line under the input, scrolls
    horizontally if too long; "N shell(s)/monitor(s)" tokens are clickable. */
@@ -3530,6 +3534,27 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const baseTop = mainEl.getBoundingClientRect().top;
     let cur = -1;
     nodes.forEach((n, i) => { if (n.getBoundingClientRect().top - baseTop <= 4) cur = i; });
+    // Earlier history, at the top where "earlier" belongs. It is the SAME fetch as the
+    // transcript's own "Load earlier rounds" — no separate endpoint, no extra round trip:
+    // pull more session, then read the asks out of what arrived.
+    if (attachedSid) {
+      const more = document.createElement("button");
+      more.className = "ask-row ask-more";
+      more.disabled = !hasMoreHistory;
+      more.textContent = hasMoreHistory ? "↑ 载入更早的对话" : "已经是最早的了";
+      more.title = hasMoreHistory
+        ? "和下面 transcript 的 Load earlier rounds 是同一个请求"
+        : "这个 session 的开头已经加载完了";
+      more.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        more.disabled = true; more.textContent = "载入中…";
+        const keep = asksMenu.scrollTop;
+        await loadEarlierRounds();
+        showAsksMenu();                       // re-read the asks from the new transcript
+        asksMenu.scrollTop = keep;            // don't yank the list out from under you
+      });
+      asksMenu.appendChild(more);
+    }
     // One measurement of the real box, then every label is fitted to it.
     asksMenu.style.display = "block";
     const probe = document.createElement("button"); probe.className = "ask-row";
@@ -3554,7 +3579,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         e.stopPropagation();
         shouldAutoscroll = false;
         mainEl.scrollTop += n.getBoundingClientRect().top - mainEl.getBoundingClientRect().top;
-        hideAsksMenu();
+        // Stay open: jumping to one ask is usually followed by jumping to another, and
+        // re-opening the list just to take the next step is the ↑/↓ hunt again. The
+        // re-render moves the "you are here" mark to where you just landed.
+        showAsksMenu();
       });
       asksMenu.appendChild(b);
     });
@@ -8129,22 +8157,27 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     hbReattach();   // keep the heartbeat line pinned below the newest message
   }
 
+  // The ONE way earlier history is fetched. The ask list's "load more" is this same
+  // call — so that button costs exactly what loading earlier rounds costs and not a
+  // byte more: the asks it then shows are read out of the transcript that just arrived.
+  async function loadEarlierRounds(rounds = 5) {
+    if (!attachedSid || earliestIdxLoaded === null) return false;
+    const params = new URLSearchParams();
+    params.set("claude_session_id", attachedSid);
+    params.set("mode", renderMode);
+    params.set("rounds", String(rounds));
+    params.set("before_idx", String(earliestIdxLoaded));
+    const resp = await authedFetch("/api/state?" + params.toString());
+    if (!resp.ok) return false;
+    const m = await resp.json();
+    ingest(m.transcript || [], "prepend");
+    hasMoreHistory = !!m.has_more_history;
+    return true;
+  }
   loadEarlierBtn.addEventListener("click", async () => {
-    if (!attachedSid || earliestIdxLoaded === null) return;
     loadEarlierBtn.disabled = true; loadEarlierBtn.textContent = "Loading…";
-    try {
-      const params = new URLSearchParams();
-      params.set("claude_session_id", attachedSid);
-      params.set("mode", renderMode);
-      params.set("rounds", "5");
-      params.set("before_idx", String(earliestIdxLoaded));
-      const resp = await authedFetch("/api/state?" + params.toString());
-      if (resp.ok) {
-        const m = await resp.json();
-        ingest(m.transcript || [], "prepend");
-        hasMoreHistory = !!m.has_more_history;
-      }
-    } finally {
+    try { await loadEarlierRounds(); }
+    finally {
       loadEarlierBtn.disabled = false; loadEarlierBtn.textContent = "Load earlier rounds";
     }
   });
