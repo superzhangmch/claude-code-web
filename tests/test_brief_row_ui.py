@@ -26,7 +26,7 @@ def main():
         print("SKIP: needs node"); return 0
 
     src = open(INDEX, encoding="utf-8").read()
-    m = re.search(r"\n  (function briefRow\(s\) \{.*?\n  \})\n", src, re.S)
+    m = re.search(r"\n  (function briefRow\(s, singleWin\) \{.*?\n  \})\n", src, re.S)
     if not m:
         print("  FAIL  could not extract briefRow() from static/index.html"); return 1
     chrome = re.search(r"\n  (function syncBriefChrome\(\) \{.*?\n  \})\n", src, re.S)
@@ -55,6 +55,12 @@ function enterTranscript(sid, label) { entered = { sid, label }; }
 function attachSession(sid, label) { attached = { sid, label }; }
 const clampU = (s, n) => (s.length > n ? s.slice(0, n) + "…" : s);
 const tabLabel = (s) => clampU(s, 24);
+// sessionLine() cleans names itself now; mirror the real stripTab closely enough that
+// the "decorations are stripped" assertions mean something.
+const stripTab = (s) => (s || "")
+  .replace(/^[\s\u2800-\u28ff✳✻✽✢✣✱●○◍•·]+/, "")
+  .replace(/\s*\((?:claude|caffeinate)\)\s*$/i, "")
+  .trim();
 let attachedSid = "";
 
 __ROW__
@@ -69,11 +75,16 @@ console.log("=== a live tab row ===");
 let s = { claude_session_id: "d585bf36-aaaa-bbbb", group: "tabs", window_index: 0, tab_index: 0,
           tab_name: "Compare Hermes and the others", user_name: "", summary_title: "本地AI Agent 对比",
           summary: "…", bound: true, last_visit: "08-17 11:38" };
-let row = briefRow(s);
-check("no wXtY chip — the names lead", !parts(row).some(p => p.startsWith("sw-wt=")), parts(row).join(" "));
-check("the 4-char session id comes first", parts(row)[0] === "sw-sid=d585", parts(row)[0]);
+let row = briefRow(s, false);
+// The layout is the ⇆ switcher's, deliberately: one shape everywhere a session is
+// listed. (An earlier revision dropped the position chip here; it came back when the
+// switcher's line became the one format for all four lists.)
+check("the tab position leads", parts(row)[0] === "sw-wt=w1t1", parts(row)[0]);
+check("...then the 4-char session id", parts(row)[1] === "sw-sid=d585", parts(row)[1]);
 check("...then the terminal tab name in brackets",
-      /^sw-tab=\[Compare Hermes/.test(parts(row)[1]), parts(row)[1]);
+      /^sw-tab=\[Compare Hermes/.test(parts(row)[2]), parts(row)[2]);
+check("a single-window machine drops the wX",
+      parts(briefRow(s, true))[0] === "sw-wt=t1", parts(briefRow(s, true))[0]);
 check("...then the session name", span(row, "sw-sess") === "本地AI Agent 对比", span(row, "sw-sess"));
 check("...and the last-use time last", parts(row).at(-1) === "br-time=08-17 11:38", parts(row).at(-1));
 check("a bound session is marked", parts(row).some(p => p.startsWith("br-dot=")), parts(row).join(" "));
@@ -81,13 +92,14 @@ check("no transcript excerpt anywhere (brief carries none)", !text(row).includes
 
 console.log("=== the tab you are in ===");
 attachedSid = "d585bf36-aaaa-bbbb";
-row = briefRow(s);
-check("is marked by the row itself, now that the * had nowhere to live",
-      / current/.test(row.className), row.className);
+row = briefRow(s, true);
+check("is marked with * on the position, like the switcher",
+      parts(row)[0] === "sw-wt=t1*", parts(row)[0]);
+check("...and by the row's accent border", / current/.test(row.className), row.className);
 attachedSid = "";
 
 console.log("=== names: user override wins, summary is the last resort ===");
-row = briefRow({ ...s, user_name: "my own name" });
+row = briefRow({ ...s, user_name: "my own name" }, true);
 check("a user-set name beats the LLM title", span(row, "sw-sess") === "my own name", span(row, "sw-sess"));
 row = briefRow({ ...s, user_name: "", summary_title: "", title: "", summary: "只有摘要" });
 check("with no name at all the summary is shown", span(row, "sw-sess") === "只有摘要", span(row, "sw-sess"));
@@ -108,6 +120,40 @@ row = briefRow({ ...s, bound: false }); row.__click();
 check("an unbound one goes through attach", attached && attached.sid === "d585bf36-aaaa-bbbb",
       JSON.stringify(attached));
 
+console.log("=== a session sitting in two tabs ===");
+// The real case: session 3982d22e ran in w1t3 AND w1t15. The row says only how many —
+// short, and right after the sid, since the sid is what is duplicated. WHICH other tabs
+// is in the tooltip (a row can only show its own position, so the count sitting next to
+// "t3" read as a contradiction when the second copy was at t15).
+const twoTabs = [{ window_index: 0, tab_index: 2 }, { window_index: 0, tab_index: 14 }];
+row = briefRow({ ...s, tab_index: 2, tab_count: 2, tab_positions: twoTabs }, true);
+check("the row still leads with its own position", span(row, "sw-wt") === "t3", span(row, "sw-wt"));
+check("the marker is just the count", span(row, "sw-dup") === "Δ×2", span(row, "sw-dup"));
+const cls = parts(row).map(p => p.split("=")[0]);
+check("...and it sits immediately after the sid",
+      cls.indexOf("sw-dup") === cls.indexOf("sw-sid") + 1, cls.join(" "));
+const dupEl = row.children.find(c => c.className.trim() === "sw-dup");
+check("...with the other tab named in the tooltip, not in the row",
+      /t15/.test(dupEl.title) && !/t15/.test(span(row, "sw-dup")), dupEl.title);
+row = briefRow({ ...s, tab_index: 14, tab_count: 2, tab_positions: twoTabs }, true);
+check("...and from t15 the tooltip points back at t3",
+      /t3/.test(row.children.find(c => c.className.trim() === "sw-dup").title),
+      row.children.find(c => c.className.trim() === "sw-dup").title);
+check("an ordinary row carries no marker at all",
+      span(briefRow({ ...s, tab_count: 1 }, true), "sw-dup") === undefined,
+      String(span(briefRow({ ...s, tab_count: 1 }, true), "sw-dup")));
+// Across windows the wN matters — "also at t1" is ambiguous with three windows open.
+row = briefRow({ ...s, tab_index: 2, tab_count: 2,
+                 tab_positions: [{ window_index: 0, tab_index: 2 },
+                                 { window_index: 1, tab_index: 0 }] }, false);
+check("with more than one window the tooltip names the window too",
+      /w2t1/.test(row.children.find(c => c.className.trim() === "sw-dup").title),
+      row.children.find(c => c.className.trim() === "sw-dup").title);
+// A list that only has the count (or an older server) must still mark it.
+row = briefRow({ ...s, tab_count: 2, tab_positions: undefined }, true);
+check("no positions available → still marked, never a crash",
+      span(row, "sw-dup") === "Δ×2", span(row, "sw-dup"));
+
 console.log("=== brief hides the search chrome ===");
 listBrief = true; syncBriefChrome();
 check("the quick filter is hidden in brief", chromeEls["picker-quickfilter"].style.display === "none");
@@ -119,7 +165,17 @@ check("...and both come back in full", chromeEls["picker-quickfilter"].style.dis
 console.log(_fails.length ? "\nFAILED: " + _fails.join(", ") : "\nall pass");
 process.exit(_fails.length ? 1 : 0);
 """
-    js = js.replace("__ROW__", m.group(1)).replace("__CHROME__", chrome.group(1))
+    # briefRow → sessionLine → tabPos: pull the whole chain so the row under test is
+    # built by exactly the shipped code.
+    deps = []
+    for pat, what in ((r"\n  (function tabPos\(p\) \{.*?\n  \})\n", "tabPos"),
+                      (r"\n  (function sessionLine\(el, p\) \{.*?\n  \})\n", "sessionLine")):
+        hit = re.search(pat, src, re.S)
+        if not hit:
+            print(f"  FAIL  could not extract {what}() — briefRow depends on it"); return 1
+        deps.append(hit.group(1))
+    js = (js.replace("__ROW__", "\n".join(deps) + "\n" + m.group(1))
+            .replace("__CHROME__", chrome.group(1)))
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as fh:
         fh.write(js)
         path = fh.name

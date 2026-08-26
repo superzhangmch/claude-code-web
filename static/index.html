@@ -115,9 +115,9 @@ body.pure button, body.pure .btn, body.pure a.btn, body.pure .mode-pick {
    (styled for the dark-accent highlight in other themes) invisible. Flip it back
    to black on pure white; mark selection with an inset ring instead of a fill. */
 body.pure #tabs-modal .tabs-list button.active { box-shadow: inset 0 0 0 2px #000; }
-body.pure #tabs-modal .tabs-list button.active .tl-wt,
-body.pure #tabs-modal .tabs-list button.active .tl-tab,
-body.pure #tabs-modal .tabs-list button.active .tl-sess { color: #000 !important; }
+body.pure #tabs-modal .tabs-list button.active .sw-wt,
+body.pure #tabs-modal .tabs-list button.active .sw-tab,
+body.pure #tabs-modal .tabs-list button.active .sw-sess { color: #000 !important; }
 * { box-sizing: border-box; }
 html, body {
   margin: 0; padding: 0;
@@ -187,15 +187,19 @@ header #picker-cfg-group { display: inline-flex; align-items: center; }
 }
 .switch-menu .sw-item:hover { border-color: var(--accent); }
 .switch-menu .sw-item.current { border-color: var(--accent); color: var(--accent); font-weight: 700; }
-.switch-menu .sw-item .sw-wt { color: var(--muted); opacity: .7; font-size: 11px; }
-.switch-menu .sw-item .sw-sid { color: var(--muted); opacity: .55; font-size: 11px; font-family: ui-monospace, Menlo, monospace; }
-.switch-menu .sw-item .sw-tab { color: var(--accent); font-weight: 700; }   /* highlight tab-name */
-.switch-menu .sw-item .sw-sess { color: var(--muted); }
+.switch-menu .sw-item .sw-sess { color: var(--muted); }   /* dimmer inside the popup */
 .switch-menu .menu-sec { font-size: 10px; color: var(--muted); margin: 6px 2px 3px; text-transform: uppercase; letter-spacing: .05em; }
 .switch-menu .menu-sec:first-child { margin-top: 0; }
-.switch-menu .menu-row { display: flex; gap: 4px; }
-.switch-menu .menu-row .sw-item { flex: 1; text-align: center; margin-bottom: 0; }
 .switch-menu .sw-empty { color: var(--muted); font-size: 12px; padding: 8px; }
+/* A .sw-item inside a .scr-cfg-row is one control among several on that line, not a
+   full-width block. Same rule for the voice models, which are rendered into a span. */
+.switch-menu .scr-cfg-row .sw-item,
+.switch-menu .asr-inline .sw-item {
+  display: inline-block; width: auto; flex: 0 0 auto;
+  margin-bottom: 0; padding: 3px 9px; font-size: 12px; text-align: center;
+}
+.switch-menu .asr-inline { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.switch-menu .scr-cfg-row { gap: 4px; }
 /* All header buttons / icons share the same height so they line up
    with the verbosity (▁▄█) picker. Each individual button keeps its
    own padding/font-size; this rule just clamps the box. */
@@ -282,23 +286,39 @@ main {
   padding: 4px 12px; font-size: 12px; cursor: pointer; line-height: 1;
 }
 #picker-font button:hover { border-color: var(--accent); color: var(--text); }
-/* Brief list rows — the ⇆ switcher's one-liner, reused as the list's default view.
-   Same spans (.sw-wt/.sw-sid/.sw-tab/.sw-sess) so the two stay visually identical. */
+/* ---- THE session line ------------------------------------------------------------
+   One row shape, used everywhere a session is listed: the brief list, the ⇆ switcher,
+   the >_ tab list and the resume-snapshot preview. Four places used to build it by
+   hand, in three different class families (sw-*, tl-*, and a private set), so they
+   drifted: different order, different clamping, and one of them quietly stopped showing
+   [tab-name] at all. Built by sessionLine() in JS; styled once here.
+   Containers only override what genuinely differs (font size, flex behaviour). */
+/* Spacing lives HERE, not in the containers: two of the four are not flex boxes
+   (the ⇆ popup's rows are display:block, the >_ list's are buttons), so a `gap` on the
+   container silently did nothing there and the spans ran together — "t5" + "9621" read
+   as t59621. A margin works the same in all four. */
+.sess-line > span { margin-right: 6px; }
+.sess-line > span:last-child { margin-right: 0; }
+.sess-line .sw-wt   { color: var(--muted); opacity: .7;  font-size: 11px; flex-shrink: 0; }
+.sess-line .sw-sid  { color: var(--muted); opacity: .55; font-size: 11px; flex-shrink: 0;
+                      font-family: ui-monospace, Menlo, monospace; }
+.sess-line .sw-tab  { color: var(--accent); font-weight: 700; flex-shrink: 0;
+                      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sess-line .sw-sess { color: var(--text); min-width: 0;
+                      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sess-line .sw-sess.dim { color: var(--muted); }
+.sess-line .sw-dup { color: #ff3b30; font-size: 11px; flex-shrink: 0; font-weight: 700; }
+.sess-line .sw-run { color: var(--muted); font-size: 11px; flex-shrink: 0; opacity: .8; }
+
+/* Brief list rows — the same line, as the session list's default view. */
 #picker-list .brief-row {
-  display: flex; align-items: baseline; gap: 6px; width: 100%; box-sizing: border-box;
+  display: flex; align-items: baseline; width: 100%; box-sizing: border-box;
   background: var(--panel2); border: 1px solid transparent; border-radius: 6px;
   padding: 7px 10px; margin-bottom: 4px; cursor: pointer; font-size: 13px;
 }
 #picker-list .brief-row:hover { border-color: var(--accent); }
 #picker-list .brief-row.current { border-color: var(--accent); }
-#picker-list .brief-row .sw-wt { color: var(--muted); opacity: .7; font-size: 11px; flex-shrink: 0; }
-#picker-list .brief-row .sw-sid { color: var(--muted); opacity: .55; font-size: 11px; flex-shrink: 0;
-  font-family: ui-monospace, Menlo, monospace; }
-#picker-list .brief-row .sw-tab { color: var(--accent); font-weight: 700; flex-shrink: 0;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#picker-list .brief-row .sw-sess { color: var(--text); flex: 1; min-width: 0;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#picker-list .brief-row .sw-sess.dim { color: var(--muted); }
+#picker-list .brief-row .sw-sess { flex: 1; }   /* takes the slack; time sits right */
 #picker-list .brief-row .br-time { color: var(--muted); font-size: 11px; flex-shrink: 0; }
 #picker-list .brief-row .br-dot { color: var(--accent); font-size: 11px; flex-shrink: 0; }
 #picker-brief { flex-shrink: 0; background: var(--panel2); color: var(--muted);
@@ -1586,14 +1606,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 }
 /* Same shape as a brief list row, so what you are about to reopen reads the way the
    session list reads: sid · [tab-name] · session name. */
-#snapdlg .sd-prev .sd-item { display: flex; gap: 6px; align-items: baseline; }
-#snapdlg .sd-prev .sw-wt { color: var(--muted); opacity: .7; font-size: 11px; flex-shrink: 0; }
-#snapdlg .sd-prev .sw-sid { color: var(--muted); opacity: .55; font-size: 11px;
-  flex-shrink: 0; font-family: ui-monospace, Menlo, monospace; }
-#snapdlg .sd-prev .sw-tab { color: var(--accent); font-weight: 700; flex-shrink: 0;
-  white-space: nowrap; }
-#snapdlg .sd-prev .sw-sess { color: var(--text); min-width: 0; overflow: hidden;
-  white-space: nowrap; text-overflow: ellipsis; }
+#snapdlg .sd-prev .sd-item { display: flex; align-items: baseline; }
+
 #candidlg.modal { padding: 4px; }
 #candidlg .modal-card { padding: 10px; }
 
@@ -1715,13 +1729,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #tabs-modal .tabs-list {
   /* Desktop: pack tabs left-to-right into as many columns as fit, wrapping down. */
   display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 6px; align-content: start;
+  /* Column gap much wider than the gap INSIDE an entry (below): with both at 6px, the
+     Attach button sat equidistant from its own title and the next one, so on a
+     multi-column desktop layout you couldn't tell which tab it would attach. */
+  column-gap: 24px; row-gap: 6px; align-content: start;
   flex-shrink: 0; max-height: 34vh; overflow-y: auto; overflow-x: hidden;   /* only up/down scroll */
 }
 /* min-width:0 lets the row shrink below its content so the label ellipsis kicks
    in (grid/flex items default to min-width:auto → they'd otherwise overflow
    sideways and push the Enter/Attach button off-screen). */
-#tabs-modal .tab-row { display: flex; gap: 6px; align-items: stretch; min-width: 0; }
+/* Tight inside an entry — the title and ITS button are one unit. */
+#tabs-modal .tab-row { display: flex; gap: 4px; align-items: stretch; min-width: 0; }
 #tabs-modal .tabs-list button {
   background: var(--panel2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
@@ -1738,14 +1756,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #tabs-modal .tabs-list button:hover { border-color: var(--accent); }
 #tabs-modal .tabs-list button.active { border-color: var(--accent); background: var(--accent); color: #fff; }
 #tabs-modal .tabs-list button .claude-dot { color: #6ee884; margin-right: 4px; }
-#tabs-modal .tabs-list .tl-wt { color: var(--muted); opacity: .7; font-size: 11px; }
-#tabs-modal .tabs-list .tl-sid { color: var(--muted); opacity: .55; font-size: 11px; font-family: ui-monospace, Menlo, monospace; }
-#tabs-modal .tabs-list .tl-tab { color: var(--accent); font-weight: 700; }   /* highlight tab-name */
-#tabs-modal .tabs-list .tl-sess { color: var(--muted); }
-#tabs-modal .tabs-list button.active .tl-wt,
-#tabs-modal .tabs-list button.active .tl-sid,
-#tabs-modal .tabs-list button.active .tl-tab,
-#tabs-modal .tabs-list button.active .tl-sess { color: #fff; }
+#tabs-modal .tabs-list button.active .sw-wt,
+#tabs-modal .tabs-list button.active .sw-sid,
+#tabs-modal .tabs-list button.active .sw-tab,
+#tabs-modal .tabs-list button.active .sw-sess { color: #fff; }
 #tabs-modal .screen-body {
   flex: 1; min-height: 0;   /* fills the rest of the full-screen card below the tab list */
   background: #000; color: var(--text);
@@ -2149,29 +2163,39 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <button id="new-btn" class="btn">+</button>
   </header>
   <div id="switch-menu" class="switch-menu" style="display:none"></div>
+  <!-- Same row style as the picker's ⚙ (.scr-cfg-row): the label sits left in grey and
+       its controls sit right, ON THE SAME LINE. This menu used to give each section a
+       heading line plus a full-width button line — two lines to say one thing, four times
+       over, plus one line per voice model. -->
   <div id="mode-menu" class="switch-menu" style="display:none">
-    <div class="menu-sec">Display detail</div>
-    <button class="sw-item mode-opt" data-mode="brief">▁ brief (default)</button>
-    <button class="sw-item mode-opt" data-mode="medium">▄ medium</button>
-    <button class="sw-item mode-opt" data-mode="all">█ all</button>
-    <div class="menu-sec">Live preview (generating)</div>
-    <div class="menu-row">
+    <div class="scr-cfg-row"><span>显示详略</span>
+      <button class="sw-item mode-opt" data-mode="brief" title="brief (the default)">brief</button>
+      <button class="sw-item mode-opt" data-mode="medium" title="medium">medium</button>
+      <button class="sw-item mode-opt" data-mode="all" title="all">all</button>
+    </div>
+    <div class="scr-cfg-row"><span>生成中预览</span>
       <button class="sw-item" id="mm-live-full">full</button>
-      <button class="sw-item" id="mm-live-2">2 lines · lite</button>
+      <button class="sw-item" id="mm-live-2" title="2 lines · lite">2 行</button>
     </div>
-    <div class="menu-sec" id="mm-asr-label" style="display:none">语音输入 Voice</div>
+    <!-- filled by renderAsrMenu with .scr-cfg-row lines of its own (mode, then model) -->
     <div id="mm-asr-sec"></div>
-    <div class="menu-sec">Font</div>
-    <div class="menu-row">
-      <button class="sw-item" id="mm-fontup">A larger</button>
-      <button class="sw-item" id="mm-fontdown">a smaller</button>
+    <div class="scr-cfg-row"><span>字号</span>
+      <button class="sw-item" id="mm-fontdown" title="smaller">a −</button>
+      <button class="sw-item" id="mm-fontup" title="bigger">A +</button>
     </div>
-    <div class="menu-sec">Theme</div>
-    <button class="sw-item" id="mm-theme">◐ theme</button>
-    <div class="menu-sec">LaTeX 公式</div>
-    <button class="sw-item" id="mm-latex">自动渲染:关</button>
-    <div class="menu-sec">输入自动翻译/批改 (send 后)</div>
-    <button class="sw-item" id="mm-autotranslate">自动翻译:关</button>
+    <div class="scr-cfg-row"><span>主题</span>
+      <button class="sw-item" id="mm-theme">◐</button>
+    </div>
+    <div class="scr-cfg-row"><span>LaTeX 公式</span>
+      <button class="sw-item" id="mm-latex">关</button>
+    </div>
+    <div class="scr-cfg-row"><span>发送后翻译</span>
+      <button class="sw-item" id="mm-autotranslate">关</button>
+    </div>
+    <div class="scr-cfg-row"><span>结束这个 session</span>
+      <button class="sw-item" id="mm-exit-close"
+              title="退出 claude 并关闭它的终端 tab(有后台作业时不关)">⏏ exit &amp; close</button>
+    </div>
   </div>
 
   <div id="cpu-modal" class="modal">
@@ -2231,6 +2255,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <button class="tk" data-cmd="jobs" title="list suspended/background jobs">jobs</button>
         <button class="tk" data-cmd="fg" title="resume a job in the foreground">fg</button>
         <button class="tk" data-cmd="bg" title="resume a job in the background">bg</button>
+        <!-- Ends the tab, unlike everything else on this row, so it confirms first: one
+             mis-tap on a phone would otherwise end a session. Goes through the shared
+             exit path rather than typing `exit` at the tab — in a claude tab that text
+             lands in claude's composer as a PROMPT, not in the shell. -->
+        <button class="tk" data-exit=""
+                title="退出并关闭选中的 tab(claude tab 会先 /exit)">exit</button>
       </div>
       <div id="tabs-input-row" class="tabs-input-row">
         <input id="tabs-input" type="text" placeholder="Send a prompt to this tab…" autocomplete="off">
@@ -2808,7 +2838,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     localStorage.setItem("cc_web_latex_auto", latexAuto ? "1" : "0");
     const mm = document.getElementById("mm-latex");
     if (mm) {
-      mm.textContent = "自动渲染:" + (latexAuto ? "开" : "关");
+      mm.textContent = latexAuto ? "自动" : "关";   // the row is labelled "LaTeX 公式"
       mm.classList.toggle("current", latexAuto);
     }
     const pk = document.getElementById("picker-latex");
@@ -2933,8 +2963,21 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const modeGroup = document.getElementById("mode-group");
   const modeBtn = document.getElementById("mode-btn");
   const modeMenu = document.getElementById("mode-menu");
+  const mmExitClose = document.getElementById("mm-exit-close");
+  if (mmExitClose) mmExitClose.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const sid = attachedSid;
+    if (!sid) { alert("当前没有 attach 的 session。"); return; }
+    modeMenu.style.display = "none";
+    mmExitClose.disabled = true;
+    // No iTerm id passed: the server resolves the tab from the binding it already holds.
+    const ok = await exitAndCloseTab(sid, "");
+    mmExitClose.disabled = false;
+    // Whether the terminal tab went or was refused, this session is no longer one we
+    // should be sitting in — drop it from the web tab bar and go back to the main page.
+    if (ok) exitToPicker(sid);
+  });
   const modeOpts = Array.from(document.querySelectorAll(".mode-opt"));
-  const MODE_ICON = { brief: "▁", medium: "▄", all: "█" };
   const backBtn = document.getElementById("back-btn");
   const closeTabBtn = document.getElementById("closetab-btn");
   closeTabBtn.addEventListener("click", () => { if (attachedSid) closeTab(attachedSid); });
@@ -3111,7 +3154,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const btn = document.getElementById("picker-mode");
     if (btn) { btn.textContent = THEME_GLYPH[t]; btn.title = `theme: ${t} (tap to cycle dark/light/pure)`; }
     const mm = document.getElementById("mm-theme");
-    if (mm) mm.textContent = `${THEME_GLYPH[t]} theme: ${t} (tap to switch)`;
+    if (mm) { mm.textContent = THEME_GLYPH[t]; mm.title = `theme: ${t} (tap to switch)`; }
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute("content", THEME_METACOLOR[t]);
   }
@@ -3273,25 +3316,25 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       return;
     }
     const single = new Set(tabs.map(t => t.window_index || 0)).size <= 1;
+    // How many tabs each session occupies — normally 1.
+    const perSid = {};
+    // Positions, not just a count: the ⚠ has to say WHERE the other copy is.
+    for (const t of tabs) if (t.sid) (perSid[t.sid] = perSid[t.sid] || [])
+      .push({ window_index: t.window_index, tab_index: t.tab_index });
     switchMenu.innerHTML = "";
     for (const t of tabs) {
       if (!t.sid) continue;                     // no sid → not enterable, skip
       const cur = t.sid === attachedSid;
-      const wt = (single ? `t${(t.tab_index || 0) + 1}`
-        : `w${(t.window_index || 0) + 1}t${(t.tab_index || 0) + 1}`) + (cur ? "*" : "");   // mark current: tX*
       const b = document.createElement("button");
       b.className = "sw-item" + (cur ? " current" : "");
       // [tab-name] session-name — tab-name highlighted + clamped (leave room for
       // the session-name); head-kept, … on overflow.
       const tn = (t.tab_name || "").trim();
       const sn = (t.session_name || "").trim();
-      const wtEl = document.createElement("span"); wtEl.className = "sw-wt"; wtEl.textContent = wt;
-      b.appendChild(wtEl);
-      // 4-char session-id (right after tX) so entries are identifiable at a glance
-      const sidEl = document.createElement("span"); sidEl.className = "sw-sid"; sidEl.textContent = " " + t.sid.slice(0, 4);
-      b.appendChild(sidEl);
-      if (tn) { const e = document.createElement("span"); e.className = "sw-tab"; e.textContent = " [" + tabLabel(tn) + "]"; b.appendChild(e); }
-      if (sn) { const e = document.createElement("span"); e.className = "sw-sess"; e.textContent = " " + clampU(sn, 40); b.appendChild(e); }
+      sessionLine(b, { windowIndex: t.window_index, tabIndex: t.tab_index,
+                       singleWindow: single, current: cur,
+                       dup: (perSid[t.sid] || []).length || 1, dupPos: perSid[t.sid],
+                       sid: t.sid, tabName: tn, sessName: sn, sessBudget: 40 });
       b.addEventListener("click", () => {
         hideSwitchMenu();
         if (t.sid !== attachedSid) enterTranscript(t.sid, sn || tn || "");
@@ -3935,6 +3978,36 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       + "&delta=1&cursor=1&ver=" + encodeURIComponent(ver),
   });
 
+  // Last-listed tabs by iTerm session id — the key row acts on a SELECTED tab, and
+  // what it must do (send `/exit` first or not) depends on that tab's kind.
+  const tabsById = {};
+
+  // A tab just ended: its row and the screen preview both describe something that no
+  // longer exists. Stop the live poll, blank the frame (its last one is a corpse) and
+  // re-list — the same thing ↻ does, once the shell has had a moment to actually go.
+  function afterTabClosed() {
+    tabsSelectedId = null;
+    tabsLive.stop(); tabsLive.reset();
+    if (tabsScreenEl) tabsScreenEl.textContent = "(tab closed)";
+    setTimeout(loadItermTabs, 800);
+    setTimeout(loadItermTabs, 2500);   // iTerm can take a beat to drop the tab
+  }
+
+  // Exit + close one tab from the tab list (its ⏏ button, or the key row's `exit`).
+  // The claude/plain distinction is the tab's own `is_claude`, not whether we happen to
+  // be bound to it: an unbound claude tab still needs `/exit` before the shell's `exit`.
+  async function exitTabFromList(t) {
+    if (!await exitAndCloseTab(t.bound_to || "", t.iterm_session_id,
+                               { isClaude: !!t.is_claude })) return;
+    if (t.bound_to) {
+      // It also had a web tab open — drop that, and if it was the one being viewed,
+      // land on the main page instead of falling through into a neighbouring session.
+      if (t.bound_to === attachedSid) exitToPicker(t.bound_to);
+      else closeTab(t.bound_to);
+    }
+    afterTabClosed();
+  }
+
   async function loadItermTabs() {
     tabsListEl.textContent = "Loading…";
     try {
@@ -3953,24 +4026,24 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (!tabs.length) { tabsListEl.textContent = "(no tabs)"; return; }
       // Totals for "wN/total·tM/total" labels: count of windows, and tabs per window.
       const totalW = new Set(tabs.map(t => t.window_index)).size;
-      const tabsPerWin = {};
-      for (const t of tabs) tabsPerWin[t.window_index] = (tabsPerWin[t.window_index] || 0) + 1;
+      // Same duplicate warning as the other two lists. Here BOTH copies get a row, so
+      // the ⚠ is what tells you the two rows are one session rather than two.
+      const posBySid = {};
+      for (const t of tabs) if (t.sid) (posBySid[t.sid] = posBySid[t.sid] || [])
+        .push({ window_index: t.window_index, tab_index: t.tab_index });
+      for (const k of Object.keys(tabsById)) delete tabsById[k];
       for (const t of tabs) {
+        tabsById[t.iterm_session_id] = t;
         const row = document.createElement("div"); row.className = "tab-row";
         const sel = document.createElement("button"); sel.className = "tab-sel";
-        const wPart = totalW > 1 ? `w${t.window_index + 1}/${totalW}·` : "";
-        const wt = `${wPart}t${t.tab_index + 1}/${tabsPerWin[t.window_index]}`;
         // [tab-name] session-name — tab-name highlighted + cleaned/clamped; no
         // green-dot emoji (saves space; claude tabs still get Attach/Enter below).
-        const tn = tabLabel(t.name || "");
         const sn = (t.session_name || "").trim();
-        const wtEl = document.createElement("span"); wtEl.className = "tl-wt"; wtEl.textContent = wt + " ";
-        sel.appendChild(wtEl);
-        // 4-char session-id right after the wN/tM label (if this tab has one)
-        if (t.sid) { const e = document.createElement("span"); e.className = "tl-sid"; e.textContent = t.sid.slice(0, 4) + " "; sel.appendChild(e); }
-        if (tn) { const e = document.createElement("span"); e.className = "tl-tab"; e.textContent = "[" + tn + "] "; sel.appendChild(e); }
-        if (sn) { const e = document.createElement("span"); e.className = "tl-sess"; e.textContent = sn; sel.appendChild(e); }
-        if (!tn && !sn) sel.appendChild(document.createTextNode(t.name || "(unnamed)"));
+        sessionLine(sel, { windowIndex: t.window_index, tabIndex: t.tab_index,
+                           singleWindow: totalW <= 1, current: t.iterm_session_id === tabsSelectedId,
+                           sid: t.sid || "", tabName: t.name || "",
+                           dup: (posBySid[t.sid] || []).length || 1, dupPos: posBySid[t.sid],
+                           sessName: sn, fallback: t.name || "(unnamed)" });
         sel.title = (t.name || "") + (sn ? "  ·  " + sn : "") + (t.tty ? "  [" + t.tty + "]" : "");
         sel.addEventListener("click", () => {
           tabsSelectedId = t.iterm_session_id;
@@ -4179,19 +4252,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const oneWin = new Set(sessions.map(x => x.window_index || 0)).size <= 1;
     for (const x of sessions) {
       const row = document.createElement("div"); row.className = "sd-item";
-      const add = (cls, txt) => {
-        if (!txt) return;
-        const e = document.createElement("span"); e.className = cls; e.textContent = txt;
-        row.appendChild(e);
-      };
-      add("sw-wt", oneWin ? `t${(x.tab_index || 0) + 1}`
-                          : `w${(x.window_index || 0) + 1}t${(x.tab_index || 0) + 1}`);
-      add("sw-sid", (x.sid || "").slice(0, 4));
-      const tn = stripTab(x.name || "");
-      if (tn) add("sw-tab", "[" + tabLabel(tn, 24) + "]");
-      const sess = (x.session_name || "").trim();
-      // Don't print the same string twice: renaming via cc-web sets both.
-      if (sess && sess !== tn) add("sw-sess", sess);
+      sessionLine(row, { windowIndex: x.window_index, tabIndex: x.tab_index,
+                         singleWindow: oneWin, sid: x.sid || "",
+                         tabName: x.name || "", sessName: x.session_name || "",
+                         running: !!x.running, tabBudget: 24 });
       snapDlgPrev.appendChild(row);
     }
   }
@@ -4359,8 +4423,21 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
   document.querySelectorAll("#tabs-keys .tk").forEach(btn => {
     btn.addEventListener("click", () => {
+      if (btn.dataset.exit != null) {
+        // Not a keystroke to send: ending a tab is the shared exit path, and which
+        // keystrokes that means depends on whether the selected tab runs claude.
+        const t = tabsSelectedId && tabsById[tabsSelectedId];
+        if (!t) { alert("先在列表里选一个 tab。"); return; }
+        btn.disabled = true;
+        exitTabFromList(t).finally(() => { btn.disabled = false; });
+        return;
+      }
       if (btn.dataset.raw != null) tabsSendInput(btn.dataset.raw, { raw: true });
-      else if (btn.dataset.cmd != null) tabsSendInput(btn.dataset.cmd, { pressEnter: true });
+      else if (btn.dataset.cmd != null) {
+        // data-confirm: for the ones that don't just poke the shell but end something.
+        if (btn.dataset.confirm && !confirm(btn.dataset.confirm)) return;
+        tabsSendInput(btn.dataset.cmd, { pressEnter: true });
+      }
     });
   });
   tabsSendBtn.addEventListener("click", () => {
@@ -5538,7 +5615,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // view keeps the management actions (rename, close tab, kill, transcript excerpts).
   // No wXtY: the numbers were noise next to the names, and the Tabs group is still SORTED
   // by tab position (the ↹/↺ toggle), so the order still carries that information.
-  function briefRow(s) {
+  function briefRow(s, singleWin) {
     const row = document.createElement("div");
     const isCur = s.claude_session_id === attachedSid;
     row.className = "brief-row" + (isCur ? " current" : "");
@@ -5548,18 +5625,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const e = document.createElement("span"); e.className = cls; e.textContent = txt;
       row.appendChild(e); return e;
     };
-    // The tab you are currently in is shown by the row's accent border (.current) —
-    // that used to be a "*" on the wXtY chip which no longer exists.
-    add("sw-sid", s.claude_session_id.slice(0, 4));
-    const tn = (s.tab_name || "").trim();
-    if (tn) add("sw-tab", "[" + tabLabel(tn) + "]");
-    // Name, in the same order the switcher uses; the LLM summary is the fallback so a
-    // never-named session is still recognisable.
-    const name = (s.user_name || s.summary_title || s.title || "").trim();
-    const txt = name || (s.summary || "").trim();
-    const nameEl = add("sw-sess", txt || "(no title yet)");
-    if (nameEl && !name) nameEl.classList.add("dim");
-    if (!nameEl) row.appendChild(document.createElement("span"));   // keep the time right-aligned
+    // The LLM summary is the last-resort name, so a never-named session is still
+    // recognisable in the list.
+    const name = (s.user_name || s.summary_title || s.title || "").trim()
+              || (s.summary || "").trim();
+    sessionLine(row, { windowIndex: s.window_index, tabIndex: s.tab_index,
+                       singleWindow: singleWin, current: isCur,
+                       noPos: s.group !== "tabs",     // recent/named rows have no tab
+                       dup: s.tab_count || 1,         // several tabs on one session
+                       dupPos: s.tab_positions,       // ...and which tabs those are
+                       sid: s.claude_session_id, tabName: s.tab_name || "",
+                       sessName: name, fallback: "(no title yet)" });
     if (s.bound) add("br-dot", "●");                                // attached to a live tab
     // ~ = the timestamp came from the file mtime because the tail held no human turn.
     add("br-time", (s.ts_approx ? "~" : "") + (s.last_visit || ""));
@@ -5650,7 +5726,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // the full card even in brief mode — their whole point is the matched text, and
       // /api/search returns it anyway.
       if (listBrief && !searching) {
-        pickerListEl.appendChild(briefRow(s));
+        pickerListEl.appendChild(briefRow(s, tabsSingleWin));
         continue;
       }
       const card = document.createElement("div");
@@ -5665,9 +5741,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // Otherwise: title / last / first msg.
       if (s.group === "tabs") {
         // Line 1: metadata — tX [sid] json_size pid create_datetime.
-        const wt = tabsSingleWin
-          ? `t${(s.tab_index || 0) + 1}`
-          : `w${(s.window_index || 0) + 1}t${(s.tab_index || 0) + 1}`;
+        const wt = tabPos({ windowIndex: s.window_index, tabIndex: s.tab_index || 0,
+                            singleWindow: tabsSingleWin });
         const parts = [wt, `[${s.claude_session_id.slice(0, 4)}]`];
         if (s.file_size) parts.push(fmtSize(s.file_size));
         if (s.proc_start) parts.push(fmtAge(s.proc_start));
@@ -5927,17 +6002,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         closeBtn.className = "detach";
         closeBtn.addEventListener("click", async (e) => {
           e.stopPropagation();
-          if (!confirm(`Close this tab? Exits claude, then closes the ${TERM} tab if no background jobs are running.`)) return;
           closeBtn.disabled = true; closeBtn.textContent = "Closing…";
-          const r = await authedFetch("/api/close-tab", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ claude_session_id: s.claude_session_id,
-                                   iterm_session_id: s.iterm_session_id }),
-          });
-          if (!r.ok) { alert("Close failed: " + await r.text()); closeBtn.disabled = false; closeBtn.textContent = "Close"; return; }
-          const j = await r.json().catch(() => ({}));
-          if (j && j.tab_closed === false && j.detail) alert(j.detail);
+          const ok = await exitAndCloseTab(s.claude_session_id, s.iterm_session_id);
+          closeBtn.disabled = false; closeBtn.textContent = "Close";
+          if (!ok) return;
+          // If this session also had a web tab open, that tab is now dead — drop it
+          // rather than leaving a card you can click back into.
+          if (openTabs.some(t => t.sid === s.claude_session_id))
+            exitToPicker(s.claude_session_id);
           refreshPicker();
         });
         attachRow.appendChild(closeBtn);
@@ -6150,8 +6222,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const t = byId[sid];
       if (!t) return;
       const single = new Set(tabs.map(x => x.window_index || 0)).size <= 1;
-      attachedTab = single ? `t${(t.tab_index || 0) + 1}`
-                           : `w${(t.window_index || 0) + 1}t${(t.tab_index || 0) + 1}`;
+      attachedTab = tabPos({ windowIndex: t.window_index, tabIndex: t.tab_index || 0,
+                             singleWindow: single });
       attachedName = t.name || t.tab_name || attachedName;
       setMeta();
     } catch {}
@@ -6325,6 +6397,78 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   function tabLabel(s, budget, ell) {
     return clampU(stripTab(s), budget || 16, ell);
   }
+  // THE position label: t7, or w2t7 when more than one window is in play, plus a
+  // trailing * for the tab you are looking at. Five places spelled this out inline; one
+  // of them is a metadata line rather than a session line, which is why this is its own
+  // function instead of living inside sessionLine().
+  function tabPos(p) {
+    if (p == null || p.tabIndex == null) return "";
+    const base = p.singleWindow ? `t${p.tabIndex + 1}`
+                                : `w${(p.windowIndex || 0) + 1}t${p.tabIndex + 1}`;
+    return base + (p.current ? "*" : "");
+  }
+  // THE session line. One function, one output, everywhere a session is listed:
+  //
+  //     t7  1a41  [llm-eval-pipelin…]  模型评测v2切换与run健康监控
+  //     pos  sid   tab-name (accent)   session-name (dim)
+  //
+  // Used by the ⇆ switcher, the >_ tab list, the brief session list and the
+  // resume-snapshot preview. All four built it by hand before: three different class
+  // families, different order, different clamping, different position labels — and one
+  // had quietly stopped showing [tab-name] at all.
+  //
+  // Callers pass RAW fields only (indices, ids, names). Every formatting decision —
+  // t7 vs w1t7, the * on the current tab, which name wins, how much gets clamped —
+  // lives here, so there is exactly one place to change it.
+  //
+  //   windowIndex / tabIndex   0-based, as the API reports them
+  //   singleWindow             true → drop the wX part (the list knows its own set)
+  //   current                  true → mark it (the tab you are looking at)
+  //   noPos                    true → no position chip at all (rows that aren't tabs)
+  function sessionLine(el, p) {
+    el.classList.add("sess-line");
+    const add = (cls, txt) => {
+      if (!txt) return null;
+      const e = document.createElement("span");
+      e.className = cls; e.textContent = txt;
+      el.appendChild(e); return e;
+    };
+    if (!p.noPos) add("sw-wt", tabPos({ ...p, tabIndex: p.tabIndex || 0 }));
+    add("sw-sid", (p.sid || "").slice(0, 4));
+    if (p.dup > 1) {
+      // Right after the sid, because that is what is duplicated — and short: the row's
+      // job is the session name, not an explanation. Which OTHER tabs they are lives in
+      // the tooltip (a row can only show its own position, so the count alone next to
+      // "t3" used to read as a contradiction when the second copy was at t15).
+      const mine = [p.windowIndex || 0, p.tabIndex || 0].join();
+      const others = (p.dupPos || [])
+        .filter(q => [q.window_index || 0, q.tab_index || 0].join() !== mine)
+        .map(q => tabPos({ windowIndex: q.window_index, tabIndex: q.tab_index,
+                           singleWindow: p.singleWindow }))
+        .filter(Boolean);
+      const d = add("sw-dup", "Δ×" + p.dup);
+      if (d) d.title = "同一个 session 开在 " + p.dup + " 个 tab 里"
+                     + (others.length ? "(另一处: " + others.join(", ") + ")" : "")
+                     + " —— 两边会写同一份记录,建议关掉多余的那个";
+    }
+    const tn = stripTab(p.tabName || "");
+    if (tn) add("sw-tab", "[" + clampU(tn, p.tabBudget || 16) + "]");
+    const sn = (p.sessName || "").trim();
+    // Never print the same string twice: renaming through cc-web sets both names.
+    const sess = (sn && stripTab(sn) !== tn) ? clampU(sn, p.sessBudget || 60) : "";
+    const shown = sess || (tn ? "" : (p.fallback || ""));
+    const sessEl = add("sw-sess", shown);
+    if (sessEl && !sess) sessEl.classList.add("dim");
+    // Two tabs running ONE session: both write the same transcript and typing in one
+    // interrupts the other, so it is worth saying out loud. It also explains a missing
+    // row — the session list is keyed on session id, so the second tab has nowhere to go.
+    // Resume will skip this one — worth knowing before pressing the button, not after.
+    if (p.running) {
+      const r = add("sw-run", "已在运行");
+      if (r) r.title = "这个 session 已经在跑,恢复时会自动跳过(不会开出重复的 tab)";
+    }
+    return el;
+  }
   // Keyed, incremental render — assume the bar is UNCHANGED and only touch what
   // actually differs (add / remove / reorder / relabel / toggle active). No
   // innerHTML teardown, so a plain switch just moves the .active highlight and
@@ -6349,9 +6493,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const mbud = disp.length >= 3 ? 10 : 15;
     const desired = disp.map(t => {
       const active = t.sid === attachedSid;
-      let tx = (t.ti != null)
-        ? (single ? `t${t.ti + 1}` : `w${(t.wi || 0) + 1}t${t.ti + 1}`) : "";
-      if (active && tx) tx += "*";   // mark the current tab: tX*
+      const tx = tabPos({ windowIndex: t.wi, tabIndex: t.ti,
+                          singleWindow: single, current: active });
       // Quick-switch bar shows the TAB-NAME only (matches iTerm/tmux).
       const full = (t.tabName && t.tabName.trim()) ? t.tabName
         : (t.name && t.name.trim()) ? t.name : t.sid.slice(0, 4);
@@ -6445,6 +6588,57 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const t = openTabs.find(x => x.sid === sid);
     if (t && name && t.name !== name) { t.name = name; saveOpenTabs(); renderTabBar(); }
   }
+  // Exit claude in its terminal and close that tab. The careful part is server-side
+  // (/api/close-tab: detach → send /exit → count background jobs → close ONLY if none),
+  // so both callers — the session card's Close button and the ⚙ menu's exit & close —
+  // come through here instead of each spelling out the request and its error handling.
+  // Returns true when the request succeeded, whether or not the tab actually closed.
+  // The ONE exit path. Four things in the UI end a tab — typing `/exit` in the
+  // composer, the ⚙ menu's ⏏, the tab list's ⏏, a picker card's Close — and all four
+  // come through here so they behave identically and there's one place to fix.
+  //
+  // opts.isClaude decides whether claude gets a `/exit` first. It defaults from `sid`
+  // but must be passable, because a tab can be running claude while unbound (never
+  // attached, so no sid) — and getting this wrong is not harmless in either direction:
+  // `exit` typed into claude's TUI is a PROMPT (claude answers it), and `/exit` in a
+  // plain shell is command-not-found.
+  async function exitAndCloseTab(sid, itermId, opts) {
+    opts = opts || {};
+    if (!sid && !itermId) return false;
+    const isClaude = opts.isClaude != null ? !!opts.isClaude : !!sid;
+    if (!opts.noConfirm) {
+      const q = isClaude
+        ? `退出这个 session 并关闭它的 ${TERM} tab?\n\n`
+          + `先给 claude 发 /exit,然后只在没有后台作业时才关掉 tab。`
+        : `在这个 tab 里执行 exit,关掉它?\n\n`
+          + `这个 tab 里没有 claude,所以不发 /exit;只在没有后台作业时才关。`;
+      if (!confirm(q)) return false;
+    }
+    let r;
+    try {
+      r = await authedFetch("/api/close-tab", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ claude_session_id: sid || "",
+                               iterm_session_id: itermId || "",
+                               send_exit: isClaude }),
+        timeoutMs: 30000,
+      });
+    } catch (e) { alert("Close failed: " + e); return false; }
+    if (!r.ok) { alert("Close failed: " + await r.text()); return false; }
+    const j = await r.json().catch(() => ({}));
+    // The server refuses to close a tab with work still running behind it, and says why.
+    if (j && j.tab_closed === false && j.detail) alert(j.detail);
+    return true;
+  }
+
+  // Leave a session that's just been exited: drop the web tab, then land on the main
+  // page rather than whatever tab closeTab() would fall through to — you asked to end
+  // this one, not to be dropped into the next one.
+  function exitToPicker(sid) {
+    closeTab(sid);
+    showPicker();
+  }
+
   function closeTab(sid) {
     openTabs = openTabs.filter(t => t.sid !== sid);
     delete tabState[sid];
@@ -7915,7 +8109,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   });
   // Toggle the existing auto correct/translate-on-send (fireGrammar). Default OFF.
   const mmAutoTr = document.getElementById("mm-autotranslate");
-  function refreshAutoTr() { mmAutoTr.textContent = "自动翻译:" + (autoTranslate ? "开" : "关"); mmAutoTr.classList.toggle("current", autoTranslate); }
+  function refreshAutoTr() { mmAutoTr.textContent = autoTranslate ? "开" : "关"; mmAutoTr.classList.toggle("current", autoTranslate); }
   refreshAutoTr();
   mmAutoTr.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -8621,6 +8815,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   async function send() {
     const text = inputEl.value;
     if (!attachedSid) return;
+    // `/exit` (or `/quit`) typed here means the same thing as the ⏏ buttons, so run the
+    // same path instead of posting it as a prompt: claude would quit either way, but
+    // then the tab would sit at a shell prompt and this web tab would keep polling a
+    // session that no longer exists. Only when it's the WHOLE message — `/exit` inside
+    // a sentence is text.
+    if (/^\/(exit|quit)$/i.test(text.trim()) && !pendingUploads.length) {
+      const sid = attachedSid;
+      sendBtn.disabled = true;
+      const ok = await exitAndCloseTab(sid, "");
+      sendBtn.disabled = false;
+      if (ok) { inputEl.value = ""; exitToPicker(sid); }
+      return;
+    }
     // Splice pending image attachments as `@<path>` tokens at the start of
     // the body. claude-code's TUI parses `@<path>` as a file attachment;
     // for image files this becomes inline image input.
@@ -8867,16 +9074,26 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // Two-level Voice menu: first pick a mode (⚡实时 / 🎤非实时), then the model for that mode.
   function renderAsrMenu() {
     const sec = document.getElementById("mm-asr-sec");
-    const lab = document.getElementById("mm-asr-label");
     if (!sec) return;
-    lab.style.display = "";
     sec.innerHTML = "";
+    // One labelled line per thing, in the same shape as the rest of this menu: the label
+    // grey on the left, its buttons on the right. The models used to be one full-width
+    // button each — three lines to choose one thing.
+    const line = (label) => {
+      const r = document.createElement("div"); r.className = "scr-cfg-row";
+      const sp = document.createElement("span"); sp.textContent = label; r.appendChild(sp);
+      const box = document.createElement("span"); box.className = "asr-inline";
+      r.appendChild(box); sec.appendChild(r);
+      return box;
+    };
     // Nothing configured: say so. The mic button is hidden in that case, and
     // silently hiding BOTH it and this section left no way to find out that voice
     // input exists at all, let alone what to set. Name the exact keys + file.
     if (!asrConfigs.length && !asrRtAvail) {
       const p = document.createElement("div");
       p.className = "asr-unset";
+      sec.appendChild(Object.assign(document.createElement("div"),
+                                    {className: "menu-sec", textContent: "语音输入 Voice"}));
       p.innerHTML = "not configured yet · 未配置<span>在 <code>~/.claude/cc_web.conf</code> 里加 "
         + "<code>asr=</code>(批量) 或 <code>soniox=</code> / <code>openai_realtime=</code>(实时)，"
         + "重启服务生效。录音还需要通过 HTTPS 打开本页(getUserMedia 要 secure context)。</span>";
@@ -8885,33 +9102,45 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     }
     // 1) mode selector (only shown when a realtime engine exists)
     if (asrRtAvail) {
-      const row = document.createElement("div"); row.className = "menu-row";
+      const box = line("语音输入");
       const mk = (on, title) => {
         const b = document.createElement("button"); b.className = "sw-item"; b.textContent = title;
         if (asrRt === on) b.classList.add("current");
         b.addEventListener("click", (e) => { e.stopPropagation(); asrRt = on; localStorage.setItem("cc_asr_rt", on ? "1" : "0"); renderAsrMenu(); });
         return b;
       };
-      row.appendChild(mk(true, "⚡ realtime"));
-      row.appendChild(mk(false, "🎤 batch"));
-      sec.appendChild(row);
+      box.appendChild(mk(true, "⚡ 实时"));
+      box.appendChild(mk(false, "🎤 批量"));
     }
     // 2) model for the chosen mode (display names only — real model names stay server-side)
+    // Every option here is prefixed with the same vendor ("OpenAI 4o-mini", "OpenAI
+    // Whisper", …). On one line that prefix is the only thing there's no room for, and
+    // it carries no information — the full name stays in the tooltip.
+    const shorten = (names) => {
+      const first = (names[0] || "").split(" ")[0];
+      const common = names.length > 1 && first
+                     && names.every(n => n.split(" ")[0] === first && n.includes(" "));
+      return (n) => common ? n.slice(first.length + 1) : n;
+    };
     if (asrRt && asrRtAvail) {   // realtime: pick the streaming engine (Soniox / OpenAI / …)
+      const box = line("模型");
+      const cut = shorten(realtimeEngines.map(e => e.display || ""));
       for (const e of realtimeEngines) {
         const b = document.createElement("button"); b.className = "sw-item"; b.dataset.engine = e.id;
-        b.textContent = "🎧 " + e.display;
+        b.textContent = cut(e.display); b.title = e.display;
         if (e.id === asrRtEngine) b.classList.add("current");
         b.addEventListener("click", (ev) => { ev.stopPropagation(); asrRtEngine = e.id; localStorage.setItem("cc_asr_rt_engine", e.id); renderAsrMenu(); });
-        sec.appendChild(b);
+        box.appendChild(b);
       }
     } else {   // non-realtime: pick the batch engine
+      const box = line("模型");
+      const cut = shorten(asrConfigs.map(c => c.display || c.label));
       for (const c of asrConfigs) {
         const b = document.createElement("button"); b.className = "sw-item asr-opt"; b.dataset.label = c.label;
-        b.textContent = "🎤 " + (c.display || c.label);
+        b.textContent = cut(c.display || c.label); b.title = c.display || c.label;
         if (c.label === asrWhich) b.classList.add("current");
         b.addEventListener("click", (e) => { e.stopPropagation(); asrWhich = c.label; localStorage.setItem("cc_asr_which", asrWhich); renderAsrMenu(); });
-        sec.appendChild(b);
+        box.appendChild(b);
       }
     }
   }

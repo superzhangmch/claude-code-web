@@ -24,6 +24,7 @@ Skips (exit 0) when geckodriver or firefox isn't installed.
 """
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -90,6 +91,18 @@ async def _ready(timeout=20.0):
 def _drop():
     (HERE / "reset_calls").write_text(str(int((HERE / "reset_calls").read_text() or 0) + 1))
 
+async def _list_all():
+    if mode() == "wedged":
+        return []
+    out = [{"iterm_session_id": t.iterm_session_id, "window_index": t.window_index,
+            "tab_index": t.tab_index, "name": t.name, "tty": "s%03d" % t.tab_index,
+            "is_claude": True, "pid": t.pid} for t in TABS]
+    # a plain shell, so the >_ list is exercised with a non-claude row too
+    out.append({"iterm_session_id": "stub-shell", "window_index": 1, "tab_index": 1,
+                "name": "zsh", "tty": "s099", "is_claude": False, "pid": None})
+    return out
+
+cc_web.bridge.list_all_tabs = _list_all
 cc_web.bridge.list_claude_tabs = _list
 cc_web.bridge.ensure_connected = _ensure
 cc_web.bridge.wait_ready = _ready
@@ -275,7 +288,10 @@ def main():
         check("...the last-use column is a real timestamp read from the transcript",
               all(len(r.split("br-time=")[1]) >= 5 and "~" not in r.split("br-time=")[1]
                   for r in rows), rows[0].split("br-time=")[-1])
-        check("...with no wXtY chip", not any("sw-wt=" in r for r in rows), rows[0])
+        # The position chip is deliberately back: all three lists use the ⇆ switcher's
+        # line, and that includes it.
+        check("...with the position chip, like the ⇆ switcher",
+              all("sw-wt=" in r for r in rows), rows[0])
         check("...the tab name stripped of iTerm's decorations",
               "✳" not in " ".join(rows) and "(claude)" not in " ".join(rows), rows[0])
         hidden = drv.js("return [getComputedStyle(document.getElementById('picker-quickfilter')).display,"
@@ -292,9 +308,83 @@ def main():
         drv.js("document.getElementById('picker-brief').click()")
         check("back to brief", drv.wait("document.querySelectorAll('#picker-list .brief-row').length") == 3)
 
-        print("=== the resume chooser ===")
+        print("=== nothing in the ⚙ menu's button rows is clipped ===")
+        # brief/medium/all sit three-across in a 200px menu. With the old ▁▄█ icons and
+        # 10px side padding there wasn't room for the words: the menu read "▁ br… ▄ m…
+        # █ all". Measured, not eyeballed — a label that says "m…" is not a label.
+        clipped = drv.js("""
+          const m = document.getElementById('mode-menu');
+          const prev = m.style.display; m.style.display = 'block';
+          const bad = [...document.querySelectorAll('.switch-menu .scr-cfg-row .sw-item')]
+            .filter(b => b.scrollWidth > b.clientWidth + 1)
+            .map(b => b.textContent + ' needs ' + b.scrollWidth + 'px in ' + b.clientWidth + 'px');
+          m.style.display = prev;
+          return bad;
+        """)
+        check("every label in a menu row fits its button", clipped == [], str(clipped))
+        # Each setting is one line: its label and its controls share a row. This menu
+        # used to spend a heading line plus a full-width button line on every one of
+        # them, and a whole line per speech model.
+        rowinfo = drv.js("""
+          const m = document.getElementById('mode-menu');
+          const prev = m.style.display; m.style.display = 'block';
+          const rows = [...m.querySelectorAll('.scr-cfg-row')];
+          // "one line" = the row's controls all sit at the same y, AND the row is no
+          // taller than one control (i.e. the label isn't stacked above them). The label
+          // span's own top differs by a pixel or two from a padded button's, so compare
+          // buttons to buttons and use the height for the label.
+          const multi = rows.filter(r => {
+            const bs = [...r.querySelectorAll('button')].filter(e => e.offsetHeight > 0);
+            if (!bs.length) return false;
+            const tops = new Set(bs.map(e => Math.round(e.getBoundingClientRect().top)));
+            const h = r.getBoundingClientRect().height;
+            const bh = bs[0].getBoundingClientRect().height;
+            return tops.size > 1 || h > bh + 14;
+          }).map(r => r.textContent.trim().replace(/\s+/g, " ").slice(0, 26));
+          const res = [rows.length, multi];
+          m.style.display = prev;
+          return res;
+        """)
+        check("the ⚙ menu is all label+controls rows", rowinfo[0] >= 6, str(rowinfo[0]))
+        check("...and none of them wraps onto a second line", rowinfo[1] == [], str(rowinfo[1]))
+        check("...and the ▁▄█ icons are gone from the labels",
+              drv.js("return [...document.querySelectorAll('.mode-opt')].map(b=>b.textContent)")
+              == ["brief", "medium", "all"],
+              str(drv.js("return [...document.querySelectorAll('.mode-opt')].map(b=>b.textContent)")))
+
+        print("=== the >_ tab list uses the same line as the others ===")
         drv.js("document.getElementById('tabs-btn').click()")
-        time.sleep(0.5)
+        time.sleep(0.6)
+        js_rows = ("[...document.querySelectorAll('#tabs-modal .tabs-list .tab-sel')]"
+                   ".map(r=>[...r.children].map(c=>c.className+'='+c.textContent).join('|'))")
+        rows = drv.wait(js_rows)
+        check("it lists every tab, claude or not", len(rows) == 4, f"{len(rows)} rows")
+        check("...including the plain shell", any("zsh" in r for r in rows), str(rows[-1]))
+        check("...each row is a .sess-line",
+              drv.js("return document.querySelectorAll('#tabs-modal .tabs-list .sess-line').length") == 4)
+        check("...with the same spans as the brief list (pos · sid · [tab] · name)",
+              all("sw-wt=" in r for r in rows)
+              and all("sw-tab=" in r for r in rows[:3]), str(rows[0]))
+        check("...and no private tl-* classes left", not any("tl-" in r for r in rows))
+        check("the position label matches the switcher's form (tN / wXtY, no totals)",
+              all(re.match(r"sw-wt=w?\d*t\d+\*?$", r.split("|")[0]) for r in rows),
+              str([r.split("|")[0] for r in rows]))
+        # On a multi-column desktop layout the entries sit side by side, so the gap
+        # between them has to be clearly wider than the gap inside one. At 6px both ways
+        # an Attach button was equidistant from its own title and the next tab's — you
+        # couldn't tell which tab it would attach.
+        gaps = drv.js("""
+          const list = document.querySelector('#tabs-modal .tabs-list');
+          const row = document.querySelector('#tabs-modal .tab-row');
+          const px = v => parseFloat(v) || 0;
+          return [px(getComputedStyle(list).columnGap), px(getComputedStyle(row).gap
+                  || getComputedStyle(row).columnGap)];
+        """)
+        check("an entry's own button is much closer to it than the next entry is",
+              gaps[0] >= gaps[1] * 3, f"between={gaps[0]}px inside={gaps[1]}px")
+        drv.shot(os.path.join(smoke, "tabs_list.png"))
+
+        print("=== the resume chooser ===")
         drv.js("document.getElementById('tabs-snap-resume').click()")
         n = drv.wait("document.querySelectorAll('#snapdlg.show .sd-row').length")
         check("it opens with one row per snapshot", n >= 3, f"{n} rows")

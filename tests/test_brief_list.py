@@ -162,6 +162,34 @@ def main():
                                        "summary_title", "last_visit", "mtime", "bound", "cwd"))
                   for r in rows))
 
+        print("=== a session in two tabs gets a row for EACH tab ===")
+        # This list is headed "TABS (n)" and sits beside two others that are per-tab. It
+        # used to be keyed on the SESSION, so the second tab of a twice-started session
+        # had no row: visible in iTerm and in both other lists, absent here. That is the
+        # real 3982d22e case (w1t3 and w1t15).
+        dup_tabs = tabs + [{"sid": tabs[0]["sid"], "name": "proj-a again", "window_index": 0,
+                            "tab_index": 14, "pid": 999, "cwd": "/tmp/proj-a"}]
+        drows = cc_web.brief_picker_sessions(live_tabs=dup_tabs)
+        # Assert on the LIST: an earlier version of this test indexed the rows by session
+        # id, so the duplicate collapsed in the dict and the assertion passed either way.
+        check("four tabs → four rows", len(drows) == 4, str(len(drows)))
+        check("...at every tab position, none dropped",
+              sorted((r["window_index"], r["tab_index"]) for r in drows)
+              == [(0, 0), (0, 1), (0, 14), (1, 0)],
+              str(sorted((r["window_index"], r["tab_index"]) for r in drows)))
+        both = [r for r in drows if r["claude_session_id"] == tabs[0]["sid"]]
+        check("the twice-started session appears twice", len(both) == 2, str(len(both)))
+        check("...both rows say it's in 2 tabs",
+              [r["tab_count"] for r in both] == [2, 2], str([r["tab_count"] for r in both]))
+        check("...and both carry WHERE, in tab order",
+              all([(p["window_index"], p["tab_index"]) for p in r["tab_positions"]]
+                  == [(0, 1), (0, 14)] for r in both),
+              str([r["tab_positions"] for r in both]))
+        others = [r for r in drows if r["claude_session_id"] != tabs[0]["sid"]]
+        check("an ordinary tab carries no positions (brief stays small)",
+              all(r["tab_count"] == 1 and r["tab_positions"] == [] for r in others),
+              str([(r["tab_count"], r["tab_positions"]) for r in others]))
+
         print("=== 'last used' is the last human message, not the file mtime ===")
         want_a = local(now - datetime.timedelta(hours=2))
         check("a normal session reports its last human turn",

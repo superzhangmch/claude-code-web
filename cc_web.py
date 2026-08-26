@@ -33,7 +33,7 @@ import time as _time
 import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import Optional
 
@@ -599,9 +599,18 @@ def _claude_store_health(n_claude_tabs: int) -> dict:
 
 
 def _pids_for_session(sid: str) -> list[int]:
-    """Reverse-scan claude's session store for pid(s) running `sid`, most
-    recently-updated first (a session can have several — parent + current).
-    Empty if the session isn't currently running (→ caller resumes)."""
+    """LIVE pid(s) running `sid`, most recently-updated first (a session can have
+    several — parent + current). Empty if the session isn't running.
+
+    Resume treats a non-empty result as "already running, skip", so a stale entry here
+    means a session silently never gets restored. The store keeps one <pid>.json per
+    session and a claude that was killed rather than asked to quit (exactly what happens
+    when a terminal dies, which is when you reach for resume) leaves its file behind — so
+    the file existing is not evidence the process does. Check.
+
+    The start time from the store is used when present, so a recycled pid now belonging to
+    something unrelated can't be mistaken for the session either.
+    """
     out: list[tuple[float, int]] = []
     try:
         files = list(CLAUDE_SESSIONS_DIR.glob("*.json"))
@@ -612,8 +621,21 @@ def _pids_for_session(sid: str) -> list[int]:
             d = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if isinstance(d, dict) and d.get("sessionId") == sid and isinstance(d.get("pid"), int):
-            out.append((d.get("updatedAt", 0) or 0, d["pid"]))
+        if not (isinstance(d, dict) and d.get("sessionId") == sid
+                and isinstance(d.get("pid"), int)):
+            continue
+        pid = d["pid"]
+        started = d.get("startedAt")
+        if isinstance(started, (int, float)) and started > 0:
+            # startedAt is ms since epoch; _pid_alive_with_start wants seconds.
+            if not _pid_alive_with_start(pid, started / 1000.0, tolerance=5.0):
+                continue
+        else:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                continue
+        out.append((d.get("updatedAt", 0) or 0, pid))
     out.sort(reverse=True)
     return [pid for _, pid in out]
 
@@ -1137,12 +1159,20 @@ class Binding:
 # deploy/kickstart wipes them and every attached tab reverts to "Attach").
 # Lives in ~/.claude (NOT under ~/Desktop — launchd can't read TCC dirs).
 BINDINGS_FILE = Path.home() / ".claude" / "cc_web_bindings.json"
+# Cap on the attached list. Only reached by someone who opens hundreds of distinct
+# sessions; the oldest fall off, and being dropped from it costs one Attach click.
+ATTACHED_MAX = 300
 
 
 class BindingTable:
     def __init__(self) -> None:
+        # Live, in-memory: pid + terminal handle + tab position. Rebuilt on demand.
         self._by_session: dict[str, Binding] = {}
         self._by_pid: dict[int, Binding] = {}
+        # The only thing that goes to disk: which sessions the user attached to, oldest
+        # first. A list rather than a set so it can be capped — it is append-only
+        # otherwise, and "every session I ever opened" grows without limit.
+        self._attached: list[str] = []
 
     def get_by_session(self, sid: str) -> Optional[Binding]:
         return self._by_session.get(sid)
@@ -1161,12 +1191,24 @@ class BindingTable:
             self._by_session.pop(old_by_pid.claude_session_id, None)
         self._by_session[b.claude_session_id] = b
         self._by_pid[b.pid] = b
-        self._persist()
+        if b.claude_session_id not in self._attached:
+            self._attached.append(b.claude_session_id)
+            del self._attached[:-ATTACHED_MAX]      # oldest fall off
+            self._persist()
 
     def remove_session(self, sid: str) -> None:
+        """Forget the live handle. Does NOT un-attach: the caller is usually discarding a
+        handle it just found to be stale, and a session must not stop being "yours"
+        because its tab id changed under it. Detach uses forget() for that."""
         b = self._by_session.pop(sid, None)
         if b:
             self._by_pid.pop(b.pid, None)
+
+    def forget(self, sid: str) -> None:
+        """Detach for real: drop the handle AND stop listing it as attached."""
+        self.remove_session(sid)
+        if sid in self._attached:
+            self._attached.remove(sid)
             self._persist()
 
     def all(self) -> list[Binding]:
@@ -1176,15 +1218,24 @@ class BindingTable:
         return set(self._by_session.keys())
 
     def _persist(self) -> None:
+        """Write the SESSION IDS only — nothing perishable.
+
+        This file used to hold the whole binding: the iTerm session id, the pid, its start
+        time, the window/tab index. All of those die while the session lives on. The iTerm
+        handle dies when iTerm2 recreates the session (any window it restores gets new
+        ids); the pid dies the moment a session /exits and is RESUMED — same session, new
+        pid, possibly a new tab; the tab index moves whenever any earlier tab is closed.
+        Persisting them was from an era when pid↔session could not be looked up, so a
+        stored handle was the only way back to a tab. claude writes that mapping itself
+        now (~/.claude/sessions/<pid>.json), which _try_autobind reads, so the handle is
+        derivable at any moment and storing it only creates a way to be wrong: five
+        sessions spent six days answering 404 "iterm session vanished" from an id that
+        had not existed since a window restore, while being perfectly readable.
+
+        What survives a restart is therefore just "these are the sessions you attached
+        to". Everything else is resolved on first use and kept in memory."""
         try:
-            data = [{
-                "claude_session_id": b.claude_session_id,
-                "iterm_session_id": b.iterm_session_id,
-                "pid": b.pid, "pid_start": b.pid_start, "cwd": b.cwd,
-                "jsonl_path": str(b.jsonl_path),
-                "window_index": b.window_index, "tab_index": b.tab_index,
-                "bound_at": b.bound_at,
-            } for b in self._by_session.values()]
+            data = {"sessions": self._attached[-ATTACHED_MAX:]}
             tmp = BINDINGS_FILE.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(data), encoding="utf-8")
             tmp.replace(BINDINGS_FILE)
@@ -1192,39 +1243,31 @@ class BindingTable:
             log.info("bindings persist failed: %s", e)
 
     def load_persisted(self) -> int:
-        """Reload bindings from disk on startup, keeping only those whose pid is
-        still alive with a matching start time (verify_binding). Drops stale
-        ones (claude exited / pid reused). Returns the count kept."""
+        """Reload the attached SESSION IDS. No pid, no terminal handle, no tab index —
+        those are resolved on first use (see _try_autobind) rather than trusted from a
+        file that outlives them. Accepts the old whole-binding format too, keeping only
+        the session ids out of it. Returns the count."""
         try:
-            raw = BINDINGS_FILE.read_text(encoding="utf-8")
-        except OSError:
+            data = json.loads(BINDINGS_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
             return 0
-        try:
-            data = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            return 0
-        kept = 0
-        for d in data:
-            try:
-                b = Binding(
-                    claude_session_id=d["claude_session_id"],
-                    iterm_session_id=d["iterm_session_id"],
-                    pid=int(d["pid"]), pid_start=float(d["pid_start"]),
-                    cwd=d.get("cwd", ""), jsonl_path=Path(d["jsonl_path"]),
-                    window_index=int(d.get("window_index", 0)),
-                    tab_index=int(d.get("tab_index", 0)),
-                    bound_at=float(d.get("bound_at", _time.time())),
-                )
-            except (KeyError, ValueError, TypeError):
-                continue
-            if verify_binding(b):
-                self._by_session[b.claude_session_id] = b
-                self._by_pid[b.pid] = b
-                kept += 1
-        if kept != len(data):
-            self._persist()  # rewrite without the stale ones
-        return kept
+        ids: list[str] = []
+        if isinstance(data, dict):
+            ids = [x for x in (data.get("sessions") or []) if isinstance(x, str)]
+        elif isinstance(data, list):        # legacy: full binding records
+            ids = [d["claude_session_id"] for d in data
+                   if isinstance(d, dict) and isinstance(d.get("claude_session_id"), str)]
+        self._attached = ids[-ATTACHED_MAX:]
+        if not isinstance(data, dict):
+            self._persist()                 # migrate the file to ids-only
+        return len(self._attached)
 
+    def attached(self) -> set[str]:
+        """Sessions the user has attached to. Durable; says nothing about reachability."""
+        return set(self._attached)
+
+    def attached_count(self) -> int:
+        return len(self._attached)
 
 bindings = BindingTable()
 
@@ -2062,7 +2105,8 @@ def _session_dict(jsonl: Path, mtime: float, named: Optional[dict],
         st = None
         file_size = 0
     binding_info = bindings.get_by_session(sid)
-    is_bound = binding_info is not None and verify_binding(binding_info)
+    is_bound = (sid in bindings.attached()
+                or (binding_info is not None and verify_binding(binding_info)))
     s_title, s_summary = _summary_of(sid)
     views = _session_views(jsonl, st)
     exs = views["user"] if card_mode == "user" else views["both"]
@@ -2297,13 +2341,32 @@ def brief_picker_sessions(live_tabs: Optional[list[dict]] = None) -> list[dict]:
 
     import datetime as _dt
     out: list[dict] = []
-    seen: set[str] = set()
+    # A session can occupy more than one tab: start `claude` twice in the same directory
+    # and claude's own store maps both pids to one sessionId. This list is keyed on the
+    # SESSION, so the extra tab has nowhere to go and simply vanishes — which reads as
+    # "cc-web lost a tab". Count them so the row can say so instead.
+    # The count alone raises the question it doesn't answer: the row shows ONE position
+    # (this entry's) while saying there are two, so "⚠×2" on a row labelled t3 reads as
+    # a contradiction when the other copy is at t15. Carry the positions.
+    per_sid: dict[str, list[dict]] = {}
+    for lt in sorted(live_tabs, key=lambda x: (x.get("window_index", 0),
+                                               x.get("tab_index", 0))):
+        if lt.get("sid"):
+            per_sid.setdefault(lt["sid"], []).append(
+                {"window_index": lt.get("window_index", 0),
+                 "tab_index": lt.get("tab_index", 0)})
+
+    # ONE ROW PER TAB, not per session. This list is headed "TABS (n)" and sits beside
+    # two others (the ⇆ switcher and the >_ tab list) that are both per-tab — and it used
+    # to drop the second tab of a session that had been started twice. So a tab you could
+    # see in iTerm, and in the other two lists, simply had no row here: "the main page
+    # doesn't have it, this one does". A session in two tabs is worth seeing twice; each
+    # row carries the ⚠ naming the other one.
     for lt in sorted(live_tabs, key=lambda x: (x.get("window_index", 0),
                                                x.get("tab_index", 0))):
         sid = lt.get("sid")
-        if not sid or sid in seen:
+        if not sid:
             continue
-        seen.add(sid)
         used, exact, size = 0.0, True, 0
         jsonl = files.get(sid)
         if jsonl is not None:
@@ -2326,11 +2389,18 @@ def brief_picker_sessions(live_tabs: Optional[list[dict]] = None) -> list[dict]:
             "ts_approx": not exact,    # no human turn in the tail → mtime, flagged
             "file_size": size,
             "named": named is not None,
-            "bound": binding_info is not None and verify_binding(binding_info),
+            # Attached-ness is durable; the handle is not. This row only exists for a
+            # live tab, so "attached" is the whole answer — and it no longer reverts to
+            # Attach after every deploy, which is what persisting the record was for.
+            "bound": sid in bindings.attached(),
             "summary": s_summary,
             "summary_title": s_title,
             "user_name": _user_name_of(sid),
             "brief": True,             # the frontend must not present this as a full card
+            # >1 → this session is open in several tabs; the positions come along only
+            # then (brief exists to be small, and on a normal row they'd say nothing).
+            "tab_count": len(per_sid.get(sid) or [1]),
+            "tab_positions": per_sid[sid] if len(per_sid.get(sid) or []) > 1 else [],
             "tab_name": lt.get("name", ""),
             "window_index": lt.get("window_index", 0),
             "tab_index": lt.get("tab_index", 0),
@@ -2995,8 +3065,15 @@ def _last_n_rounds(entries: list[dict], n: int) -> list[dict]:
 # ---------- the FastAPI app ----------
 
 async def _binding_reaper(interval_sec: float = 30.0) -> None:
-    """Periodically drop bindings whose pid is dead (or whose start time has
-    drifted, indicating pid reuse). Runs forever; cancelled on shutdown."""
+    """Periodically drop bindings whose pid is dead (or whose start time drifted,
+    indicating pid reuse). Runs forever; cancelled on shutdown.
+
+    It does NOT go looking for stale terminal handles. Nothing perishable is stored any
+    more (see BindingTable._persist) and the handle is re-resolved by session id at the
+    point of use — in /api/input and /api/screen, where a bad handle actually shows up.
+    An earlier version of this loop enumerated every 30s to repair handles proactively,
+    which meant a fresh iTerm2 connection every 30s to fix something the next request
+    fixes for free."""
     while True:
         try:
             await asyncio.sleep(interval_sec)
@@ -3555,8 +3632,12 @@ class DetachPayload(BaseModel):
 
 
 class CloseTabPayload(BaseModel):
-    claude_session_id: str
+    claude_session_id: str = ""            # "" for a tab with no bound claude session
     iterm_session_id: Optional[str] = None
+    # Whether to send `/exit` first. Defaults to "yes if there is a session id", but a
+    # tab can run claude WITHOUT being bound to us (never attached), and a plain shell
+    # tab must NOT be sent a `/exit` — so the caller may state which kind of tab it is.
+    send_exit: Optional[bool] = None
 
 
 class InputPayload(BaseModel):
@@ -4087,10 +4168,14 @@ async def get_sessions(card: str = "both", brief: int = 0):
         # path) but never make the brief list pay for it.
         if not brief:
             await bridge.ensure_connected()
+        no_sid = []
         for t in await bridge.list_claude_tabs():
             meta = _claude_session_meta(t.pid)
             sid = (meta or {}).get("sessionId") or (t.claude_session_id or "")
             if not sid:
+                # The other silent drop: a live claude tab whose session id we can't
+                # resolve is left out of the list entirely. Say so.
+                no_sid.append(f"w{t.window_index + 1}t{t.tab_index + 1}(pid={t.pid})")
                 continue
             live_tabs.append({
                 "sid": sid,
@@ -4102,6 +4187,9 @@ async def get_sessions(card: str = "both", brief: int = 0):
                 "window_index": t.window_index,
                 "tab_index": t.tab_index,
             })
+        log.info("/api/sessions%s: %d live tab(s)%s",
+                 "?brief=1" if brief else "", len(live_tabs),
+                 (" — no session id for " + ", ".join(no_sid)) if no_sid else "")
     except Exception as e:
         bridge_err = _bridge_reason(e)
     n_claude_tabs = len(live_tabs)
@@ -4961,7 +5049,7 @@ async def post_tab_attach(payload: TabAttachPayload):
 
 @app.post("/api/detach", dependencies=[Depends(require_token)])
 async def post_detach(payload: DetachPayload):
-    bindings.remove_session(payload.claude_session_id)
+    bindings.forget(payload.claude_session_id)     # a real detach, not a stale handle
     return {"ok": True}
 
 
@@ -4999,28 +5087,40 @@ async def post_tab_name(payload: TabNamePayload):
 
 @app.post("/api/close-tab", dependencies=[Depends(require_token)])
 async def post_close_tab(payload: CloseTabPayload):
-    """Close the iTerm2 tab for a session, the safe way:
-      1. detach (drop our binding);
-      2. send `/exit`+Enter so claude tears down cleanly -> back to the shell;
+    """Close a terminal tab, the safe way — the ONE exit path behind every trigger
+    in the UI (typing `/exit`, the mode menu, the tab list's ⏏, a picker card's Close):
+      1. detach (drop our binding), if the tab has a bound session;
+      2. if the tab runs claude, send `/exit`+Enter so it tears down cleanly (and
+         writes out its transcript) -> back to the shell;
       3. ask the shell for its background-job count (sentinel echo);
       4. only if there are NO background jobs, send `exit` to close the tab.
     If we can't read the job count, or jobs remain, we leave the tab open and
-    say so — never close a tab that still has work running behind it."""
+    say so — never close a tab that still has work running behind it.
+
+    A tab with no claude in it skips step 2: `exit` typed into claude's TUI is a
+    PROMPT, not a shell command, and `/exit` in a plain shell is a command-not-found.
+    Which one this is comes from the caller (`send_exit`), because "we have a bound
+    session id" and "there's a claude running here" are not the same question — an
+    unbound tab can still be running claude."""
     sid = payload.claude_session_id
-    b = bindings.get_by_session(sid)
+    b = bindings.get_by_session(sid) if sid else None
     iterm_id = payload.iterm_session_id or (b.iterm_session_id if b else None)
+    send_exit = bool(sid) if payload.send_exit is None else bool(payload.send_exit)
 
     # 1. detach
-    bindings.remove_session(sid)
+    if sid:
+        bindings.forget(sid)
     if not iterm_id:
-        return {"ok": True, "detached": True, "tab_closed": False,
-                "detail": "no iTerm session id — detached only"}
+        return {"ok": True, "detached": bool(sid), "tab_closed": False,
+                "detail": "no iTerm session id — detached only" if sid
+                          else "no iTerm session id — nothing to close"}
 
     try:
         await bridge.ensure_connected()
         # 2. exit claude -> shell prompt
-        await bridge.send_text_to(iterm_id, "/exit\r")
-        await asyncio.sleep(1.3)  # let claude tear down and the shell redraw
+        if send_exit:
+            await bridge.send_text_to(iterm_id, "/exit\r")
+            await asyncio.sleep(1.3)  # let claude tear down and the shell redraw
 
         # 3. background-job count via a sentinel the echo'd command can't match
         #    (command line shows `=$(...)`, the OUTPUT line shows `=<digits>`).
@@ -5039,18 +5139,23 @@ async def post_close_tab(payload: CloseTabPayload):
                 njobs = int(m.group(1)); break
 
         if njobs is None:
-            return {"ok": True, "detached": True, "tab_closed": False,
-                    "detail": "claude exited; couldn't read job count — tab left open"}
+            return {"ok": True, "detached": bool(sid), "claude_exited": send_exit,
+                    "tab_closed": False,
+                    "detail": ("claude exited; " if send_exit else "")
+                              + "couldn't read job count — tab left open"}
         if njobs > 0:
-            return {"ok": True, "detached": True, "tab_closed": False, "jobs": njobs,
+            return {"ok": True, "detached": bool(sid), "claude_exited": send_exit,
+                    "tab_closed": False, "jobs": njobs,
                     "detail": f"{njobs} background job(s) running — tab left open"}
 
         # 4. clean shell, no jobs -> close the tab
         await bridge.send_text_to(iterm_id, "exit\r")
-        return {"ok": True, "detached": True, "tab_closed": True, "jobs": 0}
+        return {"ok": True, "detached": bool(sid), "claude_exited": send_exit,
+                "tab_closed": True, "jobs": 0}
     except Exception as e:
-        return {"ok": True, "detached": True, "tab_closed": False,
-                "detail": f"detached; close failed: {e}"}
+        return {"ok": True, "detached": bool(sid), "claude_exited": send_exit,
+                "tab_closed": False,
+                "detail": ("detached; " if sid else "") + f"close failed: {e}"}
 
 
 @app.post("/api/reverify", dependencies=[Depends(require_token)])
@@ -5059,6 +5164,32 @@ async def post_reverify(payload: AttachPayload):
     next /api/attach do a fresh pairing."""
     bindings.remove_session(payload.claude_session_id)
     return {"ok": True}
+
+
+# Last time we re-resolved a session's terminal handle, per session. The re-resolve costs
+# a full enumeration (a fresh iTerm2 connection), and /api/screen is POLLED — a tab whose
+# screen legitimately comes back empty would otherwise trigger one on every poll, which is
+# the same load pattern that had concurrent enumerations closing each other's sockets.
+_last_reresolve: dict[str, float] = {}
+RERESOLVE_MIN_GAP = 20.0
+
+
+async def _reresolve_handle(sid: str, old_handle: str, why: str):
+    """Drop a handle that just failed and resolve the session again from ground truth.
+
+    Returns the new Binding if it is genuinely different, else None. Rate-limited per
+    session: a broken tab must not turn a polling endpoint into an enumeration loop."""
+    now = _time.monotonic()
+    if now - _last_reresolve.get(sid, -1e9) < RERESOLVE_MIN_GAP:
+        return None
+    _last_reresolve[sid] = now
+    bindings.remove_session(sid)
+    b = await _try_autobind(sid)
+    if b is None or b.iterm_session_id == old_handle:
+        return None
+    log.info("%s: handle %s was stale, re-resolved sid=%s to %s",
+             why, old_handle[:8], sid[:8], b.iterm_session_id[:8])
+    return b
 
 
 async def _try_autobind(sid: str):
@@ -5342,8 +5473,14 @@ async def post_input(payload: InputPayload):
     if b is None:
         raise HTTPException(status_code=409, detail="session not bound")
     if not verify_binding(b):
+        # The pid died — which is what `/exit` then `resume` looks like: same session,
+        # NEW pid. Re-resolve from ground truth (claude's own pid↔session store, then
+        # --resume argv) before giving up, or the first call after every resume fails and
+        # only the second one works.
         bindings.remove_session(payload.claude_session_id)
-        raise HTTPException(status_code=410, detail="tab/pid is gone")
+        b = await _try_autobind(payload.claude_session_id)
+        if b is None:
+            raise HTTPException(status_code=410, detail="tab/pid is gone")
     try:
         await bridge.ensure_connected()
     except Exception as e:
@@ -5390,6 +5527,17 @@ async def post_input(payload: InputPayload):
             ok = await bridge.send_text_to(b.iterm_session_id, "\r")
     else:
         ok = await bridge.send_text_to(b.iterm_session_id, final)
+    if not ok:
+        # The handle didn't work. It is a STORED id for a live terminal object, and those
+        # don't outlive everything the file they're stored in outlives: iTerm2 issues new
+        # ids for windows it restores, and a session that exited and was resumed is a new
+        # pid in possibly a new tab. So re-resolve by SESSION ID — the only durable key —
+        # and send once more. Five sessions spent six days answering 404 here while being
+        # perfectly readable, because nothing ever re-checked the handle.
+        b2 = await _reresolve_handle(payload.claude_session_id, b.iterm_session_id, "input")
+        if b2 is not None:
+            ok = await bridge.send_text_to(b2.iterm_session_id, final)
+            b = b2
     if not ok:
         raise HTTPException(status_code=404, detail="iterm session vanished")
     _last_input_ts[b.claude_session_id] = now
@@ -5932,8 +6080,12 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
     if b is None:
         raise HTTPException(status_code=409, detail="session not bound")
     if not verify_binding(b):
+        # Same as /api/input: a dead pid is what `/exit` + resume looks like, so
+        # re-resolve by session id before reporting it gone.
         bindings.remove_session(claude_session_id)
-        raise HTTPException(status_code=410, detail="tab/pid is gone")
+        b = await _try_autobind(claude_session_id)
+        if b is None:
+            raise HTTPException(status_code=410, detail="tab/pid is gone")
     want_cursor = (tail == 0)   # the cursor marker only applies to the full-screen view
     try:
         # Send Ctrl+L before reading so claude's TUI redraws and we get
@@ -5949,6 +6101,20 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"cannot reach iTerm2: {e}")
     screen, raw_cursor = res if want_cursor else (res, None)
+    if not screen:
+        # An empty screen from a live tab is not a thing. The handle is stale (a restored
+        # window's new id, or a resumed session's new tab) — re-resolve by session id and
+        # read again. This is what returned 0 characters for six days while the session
+        # was fine.
+        b2 = await _reresolve_handle(claude_session_id, b.iterm_session_id, "screen")
+        if b2 is not None:
+            try:
+                res = await bridge.get_screen_for(b2.iterm_session_id, max_lines=200,
+                                                  refresh=refresh, strip_input=False,
+                                                  with_cursor=want_cursor)
+                screen, raw_cursor = res if want_cursor else (res, None)
+            except Exception:
+                pass
     if tail > 0:
         ttext = _screen_tail(screen or "", tail)
         # tail peek: same delta scheme, independent baseline (tail text ≠ full
@@ -6017,7 +6183,14 @@ async def get_iterm_tabs():
     for t in tabs:
         it = t.get("iterm_session_id")
         t["bound_to"] = bound_by_iterm.get(it)
+        # Three ways to know which session a tab runs, in order of directness. The pid
+        # one matters: list_all_tabs now reports the claude pid per tab, and claude's own
+        # store maps pid → sessionId, so a tab whose sid the cross-map missed (started as
+        # plain `claude`, so there is no --resume id to fall back on) still gets one. That
+        # is why one tab in the >_ list showed no sid at all.
         sid = bound_by_iterm.get(it) or sid_by_iterm.get(it)
+        if not sid and t.get("pid"):
+            sid = (_claude_session_meta(t["pid"]) or {}).get("sessionId") or ""
         if sid:
             t["sid"] = sid            # claude session id (bound OR live tab) → shown after the wN/tM label
             title, _ = _summary_of(sid)
@@ -6279,7 +6452,11 @@ def _snap_enrich(sessions: list[dict]) -> list[dict]:
     for e in sessions or []:
         sid = e.get("sid") or ""
         title, _ = _summary_of(sid)
-        out.append({**e, "session_name": _user_name_of(sid) or title or idx.get(sid, "")})
+        out.append({**e, "session_name": _user_name_of(sid) or title or idx.get(sid, ""),
+                    # Resume skips a session that is already up; showing which ones those
+                    # are turns "why did it only open 3 of 15" into something you knew
+                    # before you pressed the button.
+                    "running": bool(_pids_for_session(sid))})
     return out
 
 
@@ -7176,18 +7353,46 @@ def _auto_snap_read(name: str) -> Optional[dict]:
         return None
 
 
+def _snap_norm_name(name: str) -> str:
+    """A name reduced to what a human would call "the same name".
+
+    Tab titles pick up and drop decoration on their own: claude's spinner glyph while it
+    works ("✳ "), a " (claude)" process suffix, an emoji someone put in the title. None of
+    that is a change worth a history entry, so the comparison ignores it — letters,
+    digits and CJK only.
+    """
+    n = _clean_tab_name(name or "")
+    n = re.sub(r"[^\w\u4e00-\u9fff]+", " ", n, flags=re.UNICODE)
+    return " ".join(n.split()).lower()
+
+
+def _snap_degraded_name(name: str) -> bool:
+    """True if this name carries no information — the state iTerm2 leaves a tab in after
+    restoring a window, where every title comes back as a bare "claude"."""
+    return _snap_norm_name(name) in ("", "claude")
+
+
+def _snap_key(sessions: list[dict]) -> list[tuple]:
+    """What "the same snapshot" means: same sessions, same order, same dirs, same names
+    up to decoration."""
+    return [(e.get("sid", ""), e.get("cwd", ""), _snap_norm_name(e.get("name", "")))
+            for e in sessions or []]
+
+
 def _auto_snap_save(sessions: list[dict]) -> Optional[dict]:
     """Record the live list. History is keyed on WHICH SESSIONS were open, not on the
     exact bytes:
 
-      * same session-id set as the newest entry → write the new one, then delete the one
-        it supersedes. One entry per set, always refreshed to the latest observation.
-        Comparing whole entries instead meant a tab rename (or a reordering) left a
-        near-duplicate behind, and the 100 slots filled up with the same set over and
-        over — pushing out the genuinely different snapshots that are the point.
-      * different set → keep both. That is the history worth having.
+      * nothing meaningfully changed → write NOTHING. "Meaningfully" ignores decoration:
+        claude's spinner glyph, a " (claude)" suffix, an emoji in a title. That is what
+        keeps an idle machine from filling the history with near-duplicates.
+      * anything else changed → write a new entry and KEEP the old one. An earlier version
+        deleted the previous entry whenever the session SET matched, and that is exactly
+        how the good titles for 15 sessions were destroyed: iTerm2 restored them all as
+        "claude", the set was unchanged, and the degraded record replaced the good one.
+      * a name that degraded to nothing is carried forward from the previous entry per
+        sid, so a restoration like that now usually produces no write at all.
 
-    Write-then-delete, in that order: there is never a moment with no snapshot on disk.
     Returns the snapshot written, or None if nothing was written.
     """
     import datetime as _dt
@@ -7197,16 +7402,30 @@ def _auto_snap_save(sessions: list[dict]) -> Optional[dict]:
         log.warning("auto snapshot dir: %s", e)
         return None
     newest = _auto_snap_list()
-    supersedes, first_seen = None, ""
-    if newest:
-        prev = _auto_snap_read(newest[0]["file"]) or {}
-        prev_sids = {e.get("sid") for e in (prev.get("sessions") or [])}
-        if prev_sids == {e.get("sid") for e in sessions}:
-            supersedes = newest[0]["file"]
-            # Keep WHEN this set first appeared: with replace semantics the old file (and
-            # its timestamp) goes away, and "these 15 have been open since 09:00" is worth
-            # more than "observed again at 19:00".
-            first_seen = prev.get("first_seen") or prev.get("saved_at") or ""
+    first_seen = ""
+    prev = (_auto_snap_read(newest[0]["file"]) or {}) if newest else {}
+    prev_sessions = prev.get("sessions") or []
+    prev_by_sid = {e.get("sid"): e for e in prev_sessions}
+
+    # Carry a real name forward when THIS observation lost it. iTerm2's window restoration
+    # brings the sessions back with every tab titled a bare "claude", and recording that
+    # over a good record is how the names for 15 sessions were nearly lost for real.
+    merged: list[dict] = []
+    for e in sessions:
+        e = dict(e)
+        if _snap_degraded_name(e.get("name", "")):
+            old = (prev_by_sid.get(e.get("sid")) or {}).get("name", "")
+            if old and not _snap_degraded_name(old):
+                e["name"] = old
+        merged.append(e)
+    sessions = merged
+
+    if prev_sessions and _snap_key(sessions) == _snap_key(prev_sessions):
+        return None          # nothing meaningfully changed → write nothing, keep what's there
+    if {e.get("sid") for e in sessions} == {e.get("sid") for e in prev_sessions}:
+        # Same sessions, something else moved (a rename, a reorder). Keep the old entry —
+        # deleting it is what cost us the good titles — but remember when this set began.
+        first_seen = prev.get("first_seen") or prev.get("saved_at") or ""
     now = _dt.datetime.now()
     snap = {"saved_at": now.isoformat(timespec="seconds"), "auto": True,
             "first_seen": first_seen or now.isoformat(timespec="seconds"),
@@ -7217,12 +7436,10 @@ def _auto_snap_save(sessions: list[dict]) -> Optional[dict]:
     tmp = f.with_name(f.name + ".tmp")
     tmp.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(f)
-    # Only now that the new file is on disk: drop the one it replaces.
-    if supersedes and supersedes != f.name:
-        try:
-            (AUTO_SNAP_DIR / supersedes).unlink(missing_ok=True)
-        except OSError as e:
-            log.warning("auto snapshot: could not remove superseded %s: %s", supersedes, e)
+    # Nothing is deleted here on purpose. An earlier version replaced the previous entry
+    # whenever the session set matched, which threw away the only copy of 15 tab titles
+    # the moment iTerm2 restored them all as "claude". Identical states are skipped above
+    # instead, so history only grows when something actually changed.
     # Prune oldest beyond the cap (filenames sort chronologically by construction).
     try:
         olds = sorted(AUTO_SNAP_DIR.glob("auto-*.json"), reverse=True)[AUTO_SNAP_MAX:]
@@ -7309,8 +7526,16 @@ async def _snapshot_autosave(interval_sec: float, first_delay: float = 120.0) ->
                 why = "just finished resuming"
             else:
                 sessions = await _live_tab_entries()
+                blind = int(getattr(bridge, "last_probe_blind", 0) or 0)
                 if not sessions:
                     why = (getattr(bridge, "last_error", "") or "no live claude tab")
+                elif blind:
+                    # Some tabs answered neither of the two keys that identify a claude
+                    # session, so they are missing from this list — and a list that is
+                    # short a session is not a snapshot worth having: resuming from it
+                    # restores everything EXCEPT that one, silently. Wait for a clean
+                    # enumeration instead; the previous entry is still there.
+                    why = f"{blind} tab(s) unreadable — enumeration incomplete"
                 else:
                     snap = _auto_snap_save(sessions)   # None → identical to the last one
                     if snap:

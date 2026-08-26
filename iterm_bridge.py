@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
 import os
 import re
 import subprocess
@@ -17,11 +19,14 @@ from typing import Optional
 # changes: the import succeeds and ItermBridge works exactly as before.
 try:
     import iterm2
+    import iterm2.app   # for invalidate_app (see list_claude_tabs)
 except Exception:  # pragma: no cover - Linux / iterm2 not installed
     iterm2 = None
 
 # iTerm2 RPC hard timeout: a hung/half-open websocket await must never wedge the
 # asyncio event loop (which would freeze every concurrent request).
+log = logging.getLogger("ccweb")   # same logger cc_web uses, so these land in its log
+
 _RPC_TIMEOUT = 5
 _CONNECT_TRIES = 4          # a just-restarted iTerm2 needs a moment before its API listens
 
@@ -53,26 +58,87 @@ def bridge_reason(exc, term: str = "iTerm2") -> str:
     return f"{term} bridge 出错: {name}"
 
 
-async def _gv(session, var, timeout=5):
-    """Read an iTerm2 session variable with a hard timeout; None on any failure."""
-    try:
-        return await asyncio.wait_for(session.async_get_variable(var), timeout)
-    except Exception:
-        return None
+# Session-variable reads that failed outright. Not cosmetic: while this is climbing, the
+# tab list — and every snapshot taken from it — is quietly incomplete.
+_gv_fail = 0
+
+
+async def _gv(session, var, timeout=5, tries=2):
+    """Read an iTerm2 session variable with a hard timeout; None on any failure.
+
+    Retried, and the failure COUNTED, because None here is indistinguishable from a real
+    answer while the consequence is silent: `tty` and `jobPid` are the only two ways a tab
+    is recognised as running claude, so one hiccup on one session demotes a live claude tab
+    to a plain shell — it drops out of the session list and out of the periodic snapshot,
+    with nothing logged anywhere. That is how a tab whose claude had been running since
+    Aug 20 came and went from the list three times in one morning, and why pinning it down
+    needed process start times instead of a log line.
+    """
+    global _gv_fail
+    for attempt in range(tries):
+        try:
+            return await asyncio.wait_for(session.async_get_variable(var), timeout)
+        except Exception as e:
+            if attempt == tries - 1:
+                _gv_fail += 1
+                log.warning("iTerm2 session variable %r unreadable after %d tries: %s",
+                            var, tries, e)
+    return None
+
+
+# Connections we opened minus connections we actually closed. list_claude_tabs() opens a
+# fresh one per call, so a close that silently does nothing is invisible until something
+# far away falls over — which is exactly what happened: see _close_conn.
+_conn_open = 0
+_conn_closed = 0
 
 
 async def _close_conn(old, current) -> None:
-    """Close a superseded iTerm2 connection so its websocket/background task
-    doesn't leak (enumeration builds a fresh connection each call). Guarded —
-    iterm2's close API/behaviour varies across versions."""
+    """Really close a superseded iTerm2 connection: cancel its tasks, close its socket.
+
+    The previous version probed for `async_close` and skipped if absent — and iterm2
+    2.19's Connection has NO close method at all, not even a private one. So every
+    superseded connection stayed open, one per enumeration (~48/day from the snapshot
+    timer alone, plus every picker load, ⇆ click and attach). After five days that was
+    ~500 live unix sockets on each side, and iTerm2's API server had accumulated enough
+    per-connection state to deadlock the whole app — twice, once needing every claude
+    session restarted. The leaked dispatchers were also the source of the
+    _async_dispatch_forever/ConnectionClosedError traceback spam in the log.
+
+    Connection exposes no API for this, so reach into what it does have: the futures it
+    keeps (the forever-dispatcher and its helper tasks) and `websocket`. Found by type
+    rather than by name so name mangling and version renames can't quietly turn this
+    back into a no-op.
+    """
+    global _conn_closed
     if old is None or old is current:
         return
+    # Cancel first: closing the socket underneath a running dispatcher is what makes it
+    # raise ConnectionClosed into the log.
+    for val in list(vars(old).values()):
+        if isinstance(val, asyncio.Future) and not val.done():
+            val.cancel()
+        elif isinstance(val, list):
+            for t in val:
+                if isinstance(t, asyncio.Future) and not t.done():
+                    t.cancel()
+    ws = getattr(old, "websocket", None)
+    closer = getattr(ws, "close", None)
+    if closer is None:
+        log.warning("iTerm2 connection has no websocket to close (%r) — leaking it", type(old))
+        return
     try:
-        close = getattr(old, "async_close", None)
-        if close:
-            await asyncio.wait_for(close(), _RPC_TIMEOUT)
-    except Exception:
-        pass
+        res = closer()
+        if inspect.isawaitable(res):
+            await asyncio.wait_for(res, _RPC_TIMEOUT)
+        _conn_closed += 1
+    except Exception as e:
+        log.warning("closing a superseded iTerm2 connection failed: %s", e)
+    live = _conn_open - _conn_closed
+    if live > 5:
+        # One per in-flight call is normal; a growing count means the close path broke
+        # again, and this is the only place that would notice before iTerm2 dies.
+        log.warning("iTerm2 connections opened but not closed: %d — leaking", live)
 
 
 @dataclass
@@ -94,10 +160,20 @@ class ItermBridge:
         self.app: Optional[iterm2.App] = None
         self._lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
+        # Held for a WHOLE enumeration, not just the connection swap. _fresh_app takes
+        # _lock, swaps self.connection and CLOSES the old one, then releases — while the
+        # caller goes on reading session variables over the connection it was handed. A
+        # second enumeration arriving in that window closes that connection mid-read, the
+        # reads fail, and the tabs they belonged to are reported as not running claude.
+        # See _gv: that is how live claude tabs came and went from the list.
+        self._enum_lock = asyncio.Lock()
         # Why the last connection attempt failed, "" when the last one worked. The
         # endpoints report it, because an unreachable iTerm2 and "no claude tab open"
         # both produce an empty tab list and used to be indistinguishable on screen.
         self.last_error: str = ""
+        # Tabs the LAST enumeration could not read either key for. >0 means the tab list
+        # it returned is incomplete in a way that looks exactly like "fewer claude tabs".
+        self.last_probe_blind: int = 0
 
     async def connect(self) -> None:
         self.connection = await iterm2.Connection.async_create()
@@ -177,6 +253,155 @@ class ItermBridge:
                     self.app = None
             await self._connect_retry()
 
+    async def _claude_by_session(self, flat) -> dict[int, tuple[str, int, str]]:
+        """{index into flat: (tty, pid, resume_sid)} for the sessions running a claude.
+
+        TWO keys, and the second one is not optional: after iTerm2 restores a window
+        (its crash-recovery path, which runs after any hard restart) the restored
+        sessions report `tty` = None — not an error, just empty — while ps still shows
+        every claude on its original tty. tty-only matching then finds NOTHING, which is
+        how cc_web came to report "no claude tab" with 15 working tabs on screen, and how
+        the >_ list came to show 14 of 15 claude tabs as plain shells.
+
+        `jobPid` is the session's foreground job, matched by identity rather than by a
+        string iTerm2 may or may not fill in — but the foreground job is not always
+        claude ITSELF — while it works, claude keeps a `caffeinate -i -t 300` child in
+        the foreground — so an unmatched job is traced up the process tree to its parent
+        (see claude_above).
+        """
+        procs, parent, pid_tty = await asyncio.to_thread(_ps_scan)
+        by_pid = {pid: (tty, pid, sid) for tty, (pid, sid) in procs.items()}
+
+        def claude_above(pid: Optional[int]) -> Optional[tuple[str, int, str]]:
+            """The claude at or above `pid` in the process tree.
+
+            jobPid is the tab's foreground JOB, and while claude works that is usually
+            not claude itself but a child it spawned — `caffeinate -i -t 300`, whose ppid
+            IS claude. Matching by identity missed it, and on a restored window (no tty)
+            jobPid is the only key, so the tab dropped off the list for as long as the
+            child lived. A few hops, because the job can be a grandchild. It can only
+            ever return a pid that IS a live foreground claude, so it cannot invent a
+            match, and the hop limit means a broken parent chain can't spin.
+            """
+            hops = 0
+            while pid and hops < 8:
+                if pid in by_pid:
+                    return by_pid[pid]
+                nxt = parent.get(pid)
+                if nxt is None or nxt == pid or nxt <= 1:
+                    return None
+                pid, hops = nxt, hops + 1
+            return None
+
+        def claude_on_job_tty(pid: Optional[int]) -> Optional[tuple[str, int, str]]:
+            """The claude sharing a TERMINAL with `pid`, whatever `pid` is.
+
+            The backstop for when walking up doesn't get there: a job that is not a
+            descendant of claude, or whose parent chain `ps` didn't capture. Every line of
+            `ps` carries the terminal the process is on, and one terminal is one tab — so
+            the job's own tty leads back to the tab regardless of how it's related. Safe
+            by construction: `procs` only holds claudes that are in the FOREGROUND on
+            their terminal, so a Ctrl+Z'd claude is not claimed here.
+            """
+            t = pid_tty.get(pid) if pid else None
+            if t and t in procs:
+                cpid, sid = procs[t]
+                return (t, cpid, sid)
+            return None
+
+        ttys, jobpids = await asyncio.gather(
+            asyncio.gather(*[_gv(s, "tty") for _, _, s in flat]),
+            asyncio.gather(*[_gv(s, "jobPid") for _, _, s in flat]),
+        )
+        hits: dict[int, tuple[str, int, str]] = {}
+        blind: list[int] = []
+        unmatched: list[str] = []
+        for i, (tty, jp) in enumerate(zip(ttys, jobpids)):
+            key = _norm_tty(tty or "")
+            if tty and key in procs:
+                pid, sid = procs[key]
+                hits[i] = (tty, pid, sid)
+                continue
+            try:
+                jp = int(jp) if jp is not None else None
+            except (TypeError, ValueError):
+                jp = None
+            # jobPid IS claude, usually. When it isn't — a caffeinate, a tool call's
+            # child — claude is above it in the tree; failing that, claude is at least on
+            # the same terminal, which is the same tab.
+            found = claude_above(jp) or claude_on_job_tty(jp)
+            if found:
+                tty_key, pid, sid = found
+                hits[i] = (tty or tty_key, pid, sid)
+                continue
+            if tty is None and jp is None:
+                # Neither key readable: this tab is UNKNOWN, not "a plain shell". Saying
+                # nothing here is what made a dropped tab look like a tab without claude.
+                blind.append(i)
+            else:
+                unmatched.append("w%dt%d(tty=%s,jobPid=%s,known_to_ps=%s)"
+                                 % (flat[i][0] + 1, flat[i][1] + 1, tty, jp,
+                                    jp in parent if jp else "n/a"))
+        # Only meaningful together with the answer: N tabs we could not ask about, out of
+        # M. A snapshot taken from a degraded enumeration is short a session, and resuming
+        # from it silently doesn't restore that one.
+        self.last_probe_blind = len(blind)
+        if blind:
+            log.warning("iTerm2: %d/%d tabs answered neither tty nor jobPid — "
+                        "they are reported as non-claude, which may be wrong "
+                        "(window/tab: %s)",
+                        len(blind), len(flat),
+                        # 1-based, so it reads as the same wXtY the UI shows.
+                        ", ".join("w%dt%d" % (flat[i][0] + 1, flat[i][1] + 1)
+                                  for i in blind))
+        if unmatched:
+            # A tab that answered, but whose answer led nowhere. Distinct from `blind`
+            # (couldn't ask) and from a plain shell (answered, and it really is a shell).
+            log.info("iTerm2: not claude, per its own answer: %s", ", ".join(unmatched))
+        return hits
+
+    async def _fresh_app(self) -> None:
+        """Point self.connection/self.app at a brand-new connection, and close the old one.
+
+        Both enumerations need this and both used to inline it — which is how the second
+        copy silently kept the bug the first one had fixed. Three steps that only work
+        together:
+
+          1. a new connection, because a long-lived one's App goes stale (its layout
+             subscription misses tab creation and async_refresh() doesn't un-stick it);
+          2. invalidate_app() BEFORE async_get_app(), because iterm2 caches App as a
+             global singleton bound to the connection it was built on — without this,
+             step 1 gets you the old App refreshed over a socket we are about to close,
+             so enumeration answers once and then returns nothing;
+          3. close the superseded connection (see _close_conn), or one websocket leaks
+             per call — ~500 in five days, which deadlocked iTerm2 outright, twice.
+
+        Leaves self.app None if any of it fails; callers treat that as "no tabs".
+        """
+        global _conn_open
+        async with self._lock:
+            old = self.connection
+            try:
+                _conn_open += 1
+                self.connection = await asyncio.wait_for(
+                    iterm2.Connection.async_create(), _RPC_TIMEOUT)
+                iterm2.app.invalidate_app()
+                self.app = await asyncio.wait_for(
+                    iterm2.async_get_app(self.connection), _RPC_TIMEOUT)
+                # Force a full layout fetch — in some event-loop contexts async_get_app
+                # returns before the window model is fully populated, yielding a partial
+                # tab list.
+                await asyncio.wait_for(self.app.async_refresh(), _RPC_TIMEOUT)
+            except Exception as e:
+                self.connection = None
+                self.app = None
+                # Remember WHY: callers can only see an empty list, and an unreachable
+                # iTerm2 must not read as "you have no tabs open".
+                self.last_error = bridge_reason(e)
+            await _close_conn(old, self.connection)
+        if self.app is not None:
+            self.last_error = ""
+
     async def list_claude_tabs(self) -> list[ClaudeSessionRef]:
         """Enumerate all iTerm2 tabs with a live foreground `claude` process.
 
@@ -187,28 +412,20 @@ class ItermBridge:
         singleton goes stale — its layout subscription silently misses
         tab-creation events and app.async_refresh() does NOT un-stick it once
         established (observed: a server that connected while 3 tabs existed kept
-        reporting 3 even after 2 more tabs opened). A brand-new connection
-        always reflects the current window/tab hierarchy. Enumeration is only
-        triggered by user actions (attach / sessions list / resume / new tab),
-        so the extra connect (~100-200 ms) is fine here."""
-        async with self._lock:
-            old = self.connection
-            try:
-                self.connection = await asyncio.wait_for(
-                    iterm2.Connection.async_create(), _RPC_TIMEOUT)
-                self.app = await asyncio.wait_for(
-                    iterm2.async_get_app(self.connection), _RPC_TIMEOUT)
-                # Force a full layout fetch — in some event-loop contexts
-                # async_get_app returns before the window model is fully
-                # populated, yielding a partial tab list.
-                await asyncio.wait_for(self.app.async_refresh(), _RPC_TIMEOUT)
-            except Exception as e:
-                self.connection = None
-                self.app = None
-                # Remember WHY: the callers below can only see an empty list, and an
-                # unreachable iTerm2 must not read as "you have no tabs open".
-                self.last_error = bridge_reason(e)
-            await _close_conn(old, self.connection)   # don't leak the previous websocket
+        reporting 3 even after 2 more tabs opened). Enumeration is only triggered
+        by user actions (attach / sessions list / resume / new tab), so the extra
+        connect (~100-200 ms) is fine here.
+
+        Getting a usable App on that new connection is subtler than it looks — see
+        _fresh_app(), which both enumerations share for exactly that reason.
+
+        Serialized end-to-end (_enum_lock): the connection this reads from is shared
+        mutable state, and a concurrent enumeration closes it out from under us."""
+        async with self._enum_lock:
+            return await self._list_claude_tabs_locked()
+
+    async def _list_claude_tabs_locked(self) -> list[ClaudeSessionRef]:
+        await self._fresh_app()
         if self.app is None:
             return []
         self.last_error = ""
@@ -218,11 +435,10 @@ class ItermBridge:
                 for ti, tab in enumerate(window.tabs)
                 for session in tab.sessions]
 
-        # tty for every session, concurrently; keep only those with a claude.
-        ttys = await asyncio.gather(*[_gv(s, "tty") for _, _, s in flat])
-        hits = [(wi, ti, s, tty, procs[_norm_tty(tty)])
-                for (wi, ti, s), tty in zip(flat, ttys)
-                if tty and _norm_tty(tty) in procs]
+        # Which sessions run a claude — see _claude_by_session (tty, then jobPid).
+        found = await self._claude_by_session(flat)
+        hits = [(wi, ti, s, found[i][0], (found[i][1], found[i][2]))
+                for i, (wi, ti, s) in enumerate(flat) if i in found]
         # tab.title = what iTerm shows on the TAB STRIP (a manual "Edit Tab
         # Title" override like "SAS-eval", else it falls back to session.name /
         # claude's OSC title). That's the label the user recognizes, so use it as
@@ -233,8 +449,13 @@ class ItermBridge:
         # lsof (cwd) off the loop AND concurrently, not one-at-a-time.
         cwds = await asyncio.gather(*[asyncio.to_thread(_pid_cwd, h[4][0]) for h in hits])
         refs: list[ClaudeSessionRef] = []
+        dropped: list[str] = []
         for (wi, ti, session, tty, (pid, resume_sid)), name, cwd in zip(hits, names, cwds):
             if not cwd:
+                # Every drop here is a live claude tab that will be absent from the
+                # session list, the brief list and the snapshot. Silent until now, which
+                # is why "why did t6 disappear" cost an afternoon of black-box probing.
+                dropped.append("w%dt%d(pid=%s,tty=%s)" % (wi + 1, ti + 1, pid, tty))
                 continue
             refs.append(ClaudeSessionRef(
                 iterm_session_id=session.session_id,
@@ -246,6 +467,12 @@ class ItermBridge:
                 tab_index=ti,
                 claude_session_id=resume_sid,   # ground truth from --resume argv
             ))
+        # One line per enumeration, so "the list is short" can be traced to WHERE it got
+        # short — sessions seen, claude matched, tabs dropped — instead of inferred from
+        # process start times hours later.
+        log.info("enum claude tabs: %d session(s), %d matched, %d returned%s",
+                 len(flat), len(hits), len(refs),
+                 (" — DROPPED (no cwd): " + ", ".join(dropped)) if dropped else "")
         return refs
 
     # Backward-compat shim — old code still calls this name.
@@ -256,19 +483,15 @@ class ItermBridge:
         """Enumerate EVERY iTerm2 tab/session (not just claude ones), for the
         'iTerm2 tabs' viewer. Fresh connection for the same staleness reason
         as list_claude_tabs. Each entry: window/tab index, session id, name,
-        tty, and whether a foreground claude is running on it."""
-        async with self._lock:
-            old = self.connection
-            try:
-                self.connection = await asyncio.wait_for(
-                    iterm2.Connection.async_create(), _RPC_TIMEOUT)
-                self.app = await asyncio.wait_for(
-                    iterm2.async_get_app(self.connection), _RPC_TIMEOUT)
-                await asyncio.wait_for(self.app.async_refresh(), _RPC_TIMEOUT)
-            except Exception:
-                self.connection = None
-                self.app = None
-            await _close_conn(old, self.connection)   # don't leak the previous websocket
+        tty, and whether a foreground claude is running on it.
+
+        Serialized with list_claude_tabs (_enum_lock) — they share the connection, and
+        whichever one arrives second used to close it under the first."""
+        async with self._enum_lock:
+            return await self._list_all_tabs_locked()
+
+    async def _list_all_tabs_locked(self) -> list[dict]:
+        await self._fresh_app()
         if self.app is None:
             return []
         # Flatten to (wi, ti, session), then fetch tty+name for ALL sessions
@@ -279,24 +502,28 @@ class ItermBridge:
                 for ti, tab in enumerate(window.tabs)
                 for session in tab.sessions]
 
-        async def _vars(session):
+        async def _name(session):
             # tab.title = tab-strip label (see list_claude_tabs); fall back to
             # session.name when a tab has no override.
-            return (await _gv(session, "tty"),
-                    (await _gv(session, "tab.title"))
+            return ((await _gv(session, "tab.title"))
                     or (await _gv(session, "session.name")) or "")
 
-        infos = await asyncio.gather(*[_vars(s) for _, _, s in flat])
-        claude_ttys = await asyncio.to_thread(_claude_ttys)
+        names = await asyncio.gather(*[_name(s) for _, _, s in flat])
+        # Same matcher as list_claude_tabs. It used to test tty membership on its own,
+        # so after a window restoration (tty = None) 14 of 15 claude tabs showed up here
+        # as plain shells — no sid, no Attach/Enter.
+        found = await self._claude_by_session(flat)
         out: list[dict] = []
-        for (wi, ti, session), (tty, name) in zip(flat, infos):
+        for i, ((wi, ti, session), name) in enumerate(zip(flat, names)):
+            hit = found.get(i)
             out.append({
                 "iterm_session_id": session.session_id,
                 "window_index": wi,
                 "tab_index": ti,
                 "name": name,
-                "tty": tty or "",
-                "is_claude": bool(tty and _norm_tty(tty) in claude_ttys),
+                "tty": (hit[0] if hit else "") or "",
+                "is_claude": hit is not None,
+                "pid": hit[1] if hit else None,
             })
         return out
 
@@ -737,29 +964,46 @@ def _claude_procs_by_tty() -> dict[str, tuple[int, str]]:
     """ONE `ps` over all processes → {normalized_tty: (pid, resume_sid)} for
     FOREGROUND claudes. Replaces the N per-tty `ps -t` calls in
     list_claude_tabs (cwd is still resolved per hit by the caller)."""
+    return _ps_scan()[0]
+
+
+def _ps_scan() -> tuple[dict[str, tuple[int, str]], dict[int, int], dict[int, str]]:
+    """One `ps -A` → (foreground claudes by tty, pid→ppid, pid→tty) for everything.
+
+    The last two both exist to get from iTerm2's `jobPid` back to claude. jobPid is the
+    tab's FOREGROUND JOB, which while claude works is usually a child it spawned
+    (`caffeinate -i -t 300`): the parent map walks up to claude, and the tty map asks the
+    other way round — which terminal is that job on, and is claude on it. See
+    claude_above / claude_on_job_tty.
+    """
     try:
         out = subprocess.run(
-            ["ps", "-A", "-o", "tty=,pid=,stat=,command="],
+            ["ps", "-A", "-o", "tty=,pid=,ppid=,stat=,command="],
             capture_output=True, text=True, timeout=3,
         ).stdout
     except Exception:
-        return {}
+        return {}, {}, {}
     res: dict[str, tuple[int, str]] = {}
+    parent: dict[int, int] = {}
+    pid_tty: dict[int, str] = {}
     for line in out.splitlines():
-        parts = line.split(None, 3)   # tty, pid, stat, command
-        if len(parts) != 4:
+        parts = line.split(None, 4)   # tty, pid, ppid, stat, command
+        if len(parts) != 5:
             continue
-        tty, pid_str, stat, cmd = parts
+        tty, pid_str, ppid_str, stat, cmd = parts
+        try:
+            pid, ppid = int(pid_str), int(ppid_str)
+        except ValueError:
+            continue
+        parent[pid] = ppid
+        if tty and tty != "??":
+            pid_tty[pid] = _norm_tty(tty)
         if "+" not in stat:           # foreground process group only
             continue
         if not _is_claude_cmd(cmd):
             continue
-        try:
-            pid = int(pid_str)
-        except ValueError:
-            continue
         res.setdefault(_norm_tty(tty), (pid, _resume_sid_from_cmd(cmd)))
-    return res
+    return res, parent, pid_tty
 
 
 def _claude_on_tty(tty_path: str) -> Optional[tuple[int, str, str]]:

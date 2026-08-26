@@ -77,6 +77,14 @@ class FakeBridge:
 
     async def list_claude_tabs(self):
         self.connects += 1
+        if getattr(self, "degrade", False):      # what a window restoration leaves behind
+            self.last_error = ""
+            return [Ref(f"{chr(97+i)*8}-1111-2222-3333-444444444444", i, "claude")
+                    for i in range(self.n)]
+        if getattr(self, "decorate", False):     # spinner glyph / process suffix only
+            self.last_error = ""
+            return [Ref(f"{chr(97+i)*8}-1111-2222-3333-444444444444", i, "✳ tab%d" % i)
+                    for i in range(self.n)]
         if getattr(self, "rename", False):
             self.last_error = ""
             return [Ref(f"{chr(97+i)*8}-1111-2222-3333-444444444444", i, "renamed%d" % i)
@@ -211,6 +219,22 @@ async def main():
     cc_web._resume_ended_mono = cc_web._time.monotonic()
     check("right after a resume → still nothing (claude is still starting in each tab)",
           await tick() == [])
+    cc_web._resume_ended_mono = -1e9          # long enough ago to be irrelevant again
+    # A tab whose tty AND jobPid both came back unreadable is missing from the list, and
+    # the list is what gets recorded. On 2026-08-26 that dropped w1t6 and w1t8 from three
+    # of the day's snapshots while both claudes had been running since Aug 20 — resuming
+    # from one of those would have restored 13 of 15 and said nothing about the other two.
+    fake.last_probe_blind = 2
+    check("an incomplete enumeration → nothing recorded", await tick() == [])
+    check("...and it says the tabs were unreadable, not that they were absent",
+          "unreadable" in cc_web._snapshot_auto["skipped"], cc_web._snapshot_auto["skipped"])
+    fake.last_probe_blind = 0
+    check("a clean enumeration right after → recorded normally (the skip isn't sticky)",
+          len(await tick()) == 1)
+    # Hand the history back empty: the section below counts entries from zero, and a
+    # borrowed fixture that isn't returned has already broken assertions here once.
+    for f in cc_web.AUTO_SNAP_DIR.glob("auto-*.json"):
+        f.unlink()
     check("through all of that, the manual 15 were never touched", len(manual_now()) == 15)
 
     cc_web._resume_ended_mono = cc_web._time.monotonic() - (cc_web.SNAPSHOT_QUIET_AFTER_RESUME + 5)
@@ -219,22 +243,35 @@ async def main():
     check("...in the auto directory, leaving the manual file alone", len(manual_now()) == 15)
     was = hist[0]
     hist = await tick()
-    check("same sessions again → still ONE entry (no file per hour)", len(hist) == 1, str(len(hist)))
-    check("...refreshed to the newer observation, the old one deleted",
-          hist[0]["file"] != was["file"] and hist[0]["saved_at"] >= was["saved_at"],
-          f'{was["file"]} -> {hist[0]["file"]}')
-    check("...while remembering when this set first appeared",
-          hist[0]["first_seen"] == was["first_seen"],
-          f'{hist[0]["first_seen"]} vs {was["first_seen"]}')
-    check("...and never leaving the directory empty in between",
-          len(list(cc_web.AUTO_SNAP_DIR.glob("auto-*.json"))) == 1)
+    check("nothing changed → NOTHING is written (no file per period)",
+          len(hist) == 1 and hist[0]["file"] == was["file"], str([h["file"] for h in hist]))
 
-    # A rename (same sessions, different tab name) must NOT cost a history slot: that is
-    # what filled the 100 with near-duplicates when whole entries were compared.
+    # THE incident this rule exists for: iTerm2 restores a window and every tab comes back
+    # titled a bare "claude". The session set is unchanged, so an earlier version replaced
+    # the good entry with the degraded one — and the only copy of 15 tab titles was gone.
+    # The real names are carried forward now, which makes it a no-op instead.
+    fake.degrade = True
+    hist = await tick()
+    check("names degrading to 'claude' → still nothing written",
+          len(hist) == 1 and hist[0]["file"] == was["file"], str([h["file"] for h in hist]))
+    kept = cc_web._auto_snap_read(hist[0]["file"])
+    check("...and the real names survive",
+          all(n and n != "claude" for n in [x["name"] for x in kept["sessions"]]),
+          str([x["name"] for x in kept["sessions"]][:2]))
+    fake.degrade = False
+
+    # Decoration is not a change either: the spinner glyph and the " (claude)" suffix come
+    # and go on their own.
+    fake.decorate = True
+    check("decoration-only differences → nothing written", len(await tick()) == 1)
+    fake.decorate = False
+
+    # A real rename IS a change — and the old entry is KEPT. Deleting it is what cost us
+    # the titles.
     fake.rename = True
     hist = await tick()
-    check("a tab RENAME with the same sessions replaces, it does not accumulate",
-          len(hist) == 1, str(len(hist)))
+    check("a real rename → a new entry, the old one KEPT",
+          len(hist) == 2 and hist[1]["file"] == was["file"], str([h["file"] for h in hist]))
     newest = cc_web._auto_snap_read(hist[0]["file"])
     check("...and the new name is what got stored",
           newest["sessions"][0]["name"].startswith("renamed"), newest["sessions"][0]["name"])
@@ -242,9 +279,8 @@ async def main():
 
     fake.n = 5
     hist = await tick()
-    check("a DIFFERENT session set → keep both, newest first",
-          len(hist) == 2 and hist[0]["count"] == 5 and hist[1]["count"] == 3,
-          str([h["count"] for h in hist]))
+    check("a DIFFERENT session set → another entry on top, older ones still there",
+          len(hist) == 3 and hist[0]["count"] == 5, str([h["count"] for h in hist]))
     # Compared against its OWN saved_at, not against the other entry: both files can be
     # written inside the same second, and these timestamps only have second resolution.
     check("...and the new set's first_seen starts fresh rather than being inherited",
@@ -263,6 +299,7 @@ async def main():
 
     print("=== resume asks which store, and both are reachable ===")
     real_resume = cc_web._run_resume          # keep the genuine one for the tests below
+    real_pids = cc_web._pids_for_session      # the resume tests stub this one out
     async def _noop(*a, **k):
         return None
     called = {}
@@ -361,6 +398,46 @@ async def main():
     r = await cc_web.post_resume_cancel()
     check("cancelling when nothing is running just says so", r["ok"] is False, str(r))
 
+    print("=== 'already running' must mean RUNNING, not 'the store still has a file' ===")
+    cc_web._pids_for_session = real_pids      # the resume section above stubbed it
+    # Resume reads this as "skip", so a stale entry means a session silently never comes
+    # back — and a claude that was killed (which is when you reach for resume) leaves its
+    # store file behind.
+    store = Path(home) / ".claude" / "sessions"
+    store.mkdir(parents=True, exist_ok=True)
+    cc_web.CLAUDE_SESSIONS_DIR = store
+    (store / "999999.json").write_text(json.dumps(
+        {"pid": 999999, "sessionId": "dead-session", "startedAt": 1}))
+    check("a store entry for a dead pid is NOT 'running'",
+          cc_web._pids_for_session("dead-session") == [],
+          str(cc_web._pids_for_session("dead-session")))
+    (store / f"{os.getpid()}.json").write_text(json.dumps(
+        {"pid": os.getpid(), "sessionId": "live-session"}))
+    check("...and a live one still is",
+          cc_web._pids_for_session("live-session") == [os.getpid()],
+          str(cc_web._pids_for_session("live-session")))
+    # Pid reuse: right pid, wrong process — the start time gives it away.
+    (store / f"{os.getpid()}.json").write_text(json.dumps(
+        {"pid": os.getpid(), "sessionId": "recycled", "startedAt": 1000}))
+    check("...and a recycled pid isn't mistaken for the session",
+          cc_web._pids_for_session("recycled") == [],
+          str(cc_web._pids_for_session("recycled")))
+
+    print("=== the resume list says which entries will be skipped ===")
+    # Borrow the manual snapshot file, then put it back: later assertions still expect
+    # the 15 sessions that were saved into it earlier.
+    manual_backup = cc_web.SNAPSHOT_FILE.read_text()
+    cc_web.SNAPSHOT_FILE.write_text(json.dumps({"saved_at": "x", "sessions": [
+        {"sid": "live-session", "cwd": "/tmp", "name": "up", "window_index": 0, "tab_index": 0},
+        {"sid": "dead-session", "cwd": "/tmp", "name": "down", "window_index": 0, "tab_index": 1}]}))
+    (store / f"{os.getpid()}.json").write_text(json.dumps(
+        {"pid": os.getpid(), "sessionId": "live-session"}))
+    d = await cc_web.get_snapshot()
+    flags = {x["sid"]: x.get("running") for x in d["sessions"]}
+    check("a running session is flagged", flags.get("live-session") is True, str(flags))
+    check("...and a dead one is not", flags.get("dead-session") is False, str(flags))
+    cc_web.SNAPSHOT_FILE.write_text(manual_backup)
+
     print("=== the picker's data: both stores in one payload ===")
     d = await cc_web.get_snapshot()
     check("manual sessions at the top level", len(d["sessions"]) == 15)
@@ -400,6 +477,142 @@ async def main():
     check("a failing reconnect explains itself", r["ok"] is False and bool(r["error"]), str(r)[:70])
 
     shutil.rmtree(home, ignore_errors=True)
+    print("=== a stored handle is a HINT, verified at the point of use ===")
+    # What the bindings file stores: the session id (durable), plus an iTerm session id,
+    # a pid and a tab index — all three of which perish. The handle dies when iTerm2
+    # recreates the session (restored window); the pid dies when the session /exits and
+    # is RESUMED, which is the same session at a new pid in possibly a new tab. It is
+    # persisted so bindings survive a cc_web restart, which is fine — trusting it
+    # afterwards is not. Both paths must fall back to resolving by SESSION ID.
+    import ast as _ast
+    src = open(os.path.join(ROOT, "cc_web.py"), encoding="utf-8").read()
+    tree = _ast.parse(src)
+    def fn(name):
+        return next(n for n in _ast.walk(tree)
+                    if isinstance(n, (_ast.AsyncFunctionDef, _ast.FunctionDef)) and n.name == name)
+    def calls(node, target):
+        return [c for c in _ast.walk(node) if isinstance(c, _ast.Call)
+                and ((isinstance(c.func, _ast.Name) and c.func.id == target)
+                     or (isinstance(c.func, _ast.Attribute) and c.func.attr == target))]
+    for h in ("post_input", "get_screen"):
+        node = fn(h)
+        check(f"{h} re-resolves by session id rather than reporting it gone",
+              len(calls(node, "_try_autobind")) >= 2,
+              f"{len(calls(node, '_try_autobind'))} call(s)")
+    # _try_autobind is the by-session-id resolver: claude's own pid↔session store first,
+    # then --resume argv. Neither is the stored handle, which is the point.
+    ab = fn("_try_autobind")
+    check("...and that resolver uses claude's store, not the stored handle",
+          bool(calls(ab, "_pids_for_session")) and bool(calls(ab, "list_claude_tabs")),
+          "")
+    check("...it never reads iterm_session_id from the old binding",
+          "iterm_session_id" not in _ast.dump(ab), "")
+
+    print("=== the bindings file stores NOTHING perishable ===")
+    # It used to store the iTerm session id, the pid, its start time and the tab index.
+    # Each of those dies while the session lives: the handle when iTerm2 recreates the
+    # session (any restored window), the pid the moment a session /exits and is RESUMED,
+    # the tab index whenever an earlier tab closes. That design is from before claude
+    # published pid↔session itself; it now does, so the handle is derivable and storing
+    # it only creates a way to be wrong — five sessions answered 404 for six days from an
+    # id that hadn't existed since a window restore.
+    bf = Path(home) / ".claude" / "cc_web_bindings.json"
+    bf.parent.mkdir(parents=True, exist_ok=True)   # an earlier section removes this dir
+    cc_web.BINDINGS_FILE = bf
+    tbl = cc_web.BindingTable()
+    from pathlib import Path as _P2
+    tbl.insert(cc_web.Binding(claude_session_id="sid-keep", iterm_session_id="HANDLE-1",
+                              pid=4242, pid_start=1.0, cwd="/tmp",
+                              jsonl_path=_P2("/tmp/k.jsonl"), window_index=0, tab_index=7))
+    on_disk = json.loads(bf.read_text())
+    blob = json.dumps(on_disk)
+    for perishable in ("HANDLE-1", "4242", "iterm_session_id", "pid", "tab_index"):
+        check(f"{perishable!r} is not written to disk", perishable not in blob, blob[:120])
+    check("the session id IS", on_disk == {"sessions": ["sid-keep"]}, blob[:120])
+
+    print("=== a restart keeps 'attached', re-derives everything else ===")
+    fresh = cc_web.BindingTable()
+    check("the attached set survives", fresh.load_persisted() == 1 and fresh.attached() == {"sid-keep"},
+          str(fresh.attached()))
+    check("...but no handle is resurrected — it is resolved on first use",
+          fresh.get_by_session("sid-keep") is None, str(fresh.get_by_session("sid-keep")))
+
+    print("=== the legacy whole-record file is read and migrated ===")
+    bf.write_text(json.dumps([{"claude_session_id": "sid-old", "iterm_session_id": "OLD",
+                               "pid": 1, "pid_start": 1.0, "cwd": "/tmp",
+                               "jsonl_path": "/tmp/o.jsonl"}]))
+    legacy = cc_web.BindingTable()
+    check("old files still say who was attached", legacy.load_persisted() == 1
+          and legacy.attached() == {"sid-old"}, str(legacy.attached()))
+    check("...and the file is rewritten without the perishable fields",
+          json.loads(bf.read_text()) == {"sessions": ["sid-old"]}, bf.read_text()[:120])
+
+    print("=== dropping a stale handle is not detaching ===")
+    tbl2 = cc_web.BindingTable()
+    tbl2.insert(cc_web.Binding(claude_session_id="sid-x", iterm_session_id="H", pid=7,
+                               pid_start=1.0, cwd="/tmp", jsonl_path=_P2("/tmp/x.jsonl")))
+    tbl2.remove_session("sid-x")
+    check("a session stays yours when only its handle went bad",
+          tbl2.attached() == {"sid-x"} and tbl2.get_by_session("sid-x") is None,
+          str(tbl2.attached()))
+    tbl2.forget("sid-x")
+    check("an explicit detach really detaches", tbl2.attached() == set(), str(tbl2.attached()))
+
+    print("=== re-resolving is rate-limited (it costs a whole enumeration) ===")
+    # /api/screen is POLLED. Re-resolving costs an enumeration — a fresh iTerm2
+    # connection — so a tab whose screen legitimately comes back empty must not turn a
+    # polling endpoint into an enumeration loop. That is the same load pattern that had
+    # concurrent enumerations closing each other's sockets this morning.
+    calls = []
+    real_ab = cc_web._try_autobind
+    class NB:
+        def __init__(self, h): self.iterm_session_id = h; self.claude_session_id = "sid-rr"
+    async def fake_ab(sid):
+        calls.append(sid)
+        return NB("NEW")
+    cc_web._try_autobind = fake_ab
+    cc_web._last_reresolve.clear()
+    try:
+        first = await cc_web._reresolve_handle("sid-rr", "OLD", "test")
+        second = await cc_web._reresolve_handle("sid-rr", "OLD", "test")
+        check("the first attempt resolves", first is not None and first.iterm_session_id == "NEW",
+              str(first))
+        check("...an immediate second one does NOT enumerate again",
+              second is None and len(calls) == 1, f"{len(calls)} enumeration(s)")
+        # ...and it lets go once the gap has passed.
+        cc_web._last_reresolve["sid-rr"] = cc_web._time.monotonic() - (cc_web.RERESOLVE_MIN_GAP + 1)
+        third = await cc_web._reresolve_handle("sid-rr", "OLD", "test")
+        check("...but a later one is allowed", third is not None and len(calls) == 2,
+              f"{len(calls)} enumeration(s)")
+        # A resolve that lands on the SAME handle is not reported as a fix.
+        cc_web._last_reresolve.clear()
+        async def same_ab(sid):
+            calls.append(sid); return NB("OLD")
+        cc_web._try_autobind = same_ab
+        check("resolving to the same handle reports nothing to retry",
+              await cc_web._reresolve_handle("sid-rr", "OLD", "test") is None, "")
+    finally:
+        cc_web._try_autobind = real_ab
+
+    print("=== the attached list is bounded ===")
+    from pathlib import Path as _P3
+    bf2 = Path(home) / ".claude" / "cc_web_bindings.json"
+    bf2.parent.mkdir(parents=True, exist_ok=True)
+    cc_web.BINDINGS_FILE = bf2
+    big = cc_web.BindingTable()
+    n = cc_web.ATTACHED_MAX + 5
+    for i in range(n):
+        big.insert(cc_web.Binding(claude_session_id=f"s{i:04d}", iterm_session_id=f"h{i}",
+                                  pid=10000 + i, pid_start=1.0, cwd="/tmp",
+                                  jsonl_path=_P3("/tmp/b.jsonl")))
+    check("it stops growing at the cap", big.attached_count() == cc_web.ATTACHED_MAX,
+          str(big.attached_count()))
+    check("...dropping the OLDEST, keeping the newest",
+          "s0000" not in big.attached() and f"s{n-1:04d}" in big.attached(), "")
+    check("...and the file agrees",
+          len(json.loads(bf2.read_text())["sessions"]) == cc_web.ATTACHED_MAX,
+          str(len(json.loads(bf2.read_text())["sessions"])))
+
     print(("\nFAILED: " + ", ".join(_fails)) if _fails else "\nall pass")
     return 1 if _fails else 0
 
