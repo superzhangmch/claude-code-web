@@ -3692,7 +3692,7 @@ def _favicon_slug() -> str:
     no restart.
     """
     want = (_load_conf().get("icon") or "").strip().lower()
-    return want if want in ("pro", "air", "linux", "win") else ""
+    return want if want in ("pro", "air", "linux", "win", "az") else ""
 
 
 @app.get("/favicon.svg")
