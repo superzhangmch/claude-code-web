@@ -62,6 +62,17 @@ const stripTab = (s) => (s || "")
   .replace(/\s*\((?:claude|caffeinate)\)\s*$/i, "")
   .trim();
 let attachedSid = "";
+// briefRow consults these when organise mode is on; the row itself is what's under test
+// here, so they are stubbed off rather than exercised (forestPlan below is the part of
+// the folder feature that carries the logic).
+let organising = false;
+const visibleSessions = () => [];
+// The two lookups forestPlan works through, driven straight from this table so the test
+// states the grouping instead of going through the server cache.
+let FOLDERS = {};
+const folderCollapsed = {};
+const folderOf = (sid) => (FOLDERS[sid] || {}).folder || "";
+const parentOf = (sid) => (FOLDERS[sid] || {}).parent || "";
 
 __ROW__
 __CHROME__
@@ -154,6 +165,44 @@ row = briefRow({ ...s, tab_count: 2, tab_positions: undefined }, true);
 check("no positions available → still marked, never a crash",
       span(row, "sw-dup") === "Δ×2", span(row, "sw-dup"));
 
+console.log("=== the folder forest: order and depth ===");
+// forestPlan is what all THREE lists get their order and depth from — the rule this
+// codebase spent a day learning is that three lists must not each compute their own.
+// Folders keep the caller's sort inside them; a nested session follows its root; and
+// ungrouped sessions come last with no header, so an empty forest costs nothing.
+FOLDERS = { a: {folder: "SAS", parent: ""}, b: {folder: "SAS", parent: "a"},
+            c: {folder: "SAS", parent: "a"}, d: {folder: "eval", parent: ""},
+            e: {folder: "", parent: ""} };
+const items = ["a","b","c","d","e"].map(id => ({ sid: id }));
+let plan = forestPlan(items, x => x.sid);
+const shape = plan.map(p => p.folder !== undefined
+  ? "HDR:" + p.folder + "/" + p.n : "  ".repeat(p.depth) + p.item.sid);
+check("folders first, ungrouped last with no header",
+      JSON.stringify(shape) === JSON.stringify(["HDR:SAS/3","a","  b","  c","HDR:eval/1","d","e"]),
+      JSON.stringify(shape));
+check("a nested session is depth 1, never deeper",
+      plan.filter(p => p.item).every(p => p.depth <= 1), "");
+check("the header counts everything in the folder, nested included",
+      plan.find(p => p.folder === "SAS").n === 3, "");
+
+// A parent that isn't in this list (filtered out, other window, gone) must not swallow
+// its child: the child shows as a root rather than disappearing.
+plan = forestPlan(items.filter(x => x.sid !== "a"), x => x.sid);
+check("a child whose parent is absent is shown as a root, not hidden",
+      plan.filter(p => p.item).map(p => p.item.sid).join(",") === "b,c,d,e",
+      JSON.stringify(plan.filter(p => p.item).map(p => [p.item.sid, p.depth])));
+
+// Collapsed: the header stays (so you can reopen it), its rows go.
+folderCollapsed.SAS = true;
+plan = forestPlan(items, x => x.sid);
+check("a collapsed folder keeps its header and drops its rows",
+      JSON.stringify(plan.map(p => p.folder !== undefined ? "HDR:" + p.folder : p.item.sid))
+      === JSON.stringify(["HDR:SAS","HDR:eval","d","e"]),
+      JSON.stringify(plan.map(p => p.folder || p.item.sid)));
+check("...and says it is collapsed so the caller can draw the caret",
+      plan.find(p => p.folder === "SAS").collapsed === true, "");
+delete folderCollapsed.SAS;
+
 console.log("=== brief hides the search chrome ===");
 listBrief = true; syncBriefChrome();
 check("the quick filter is hidden in brief", chromeEls["picker-quickfilter"].style.display === "none");
@@ -169,7 +218,8 @@ process.exit(_fails.length ? 1 : 0);
     # built by exactly the shipped code.
     deps = []
     for pat, what in ((r"\n  (function tabPos\(p\) \{.*?\n  \})\n", "tabPos"),
-                      (r"\n  (function sessionLine\(el, p\) \{.*?\n  \})\n", "sessionLine")):
+                      (r"\n  (function sessionLine\(el, p\) \{.*?\n  \})\n", "sessionLine"),
+                      (r"\n  (function forestPlan\(items, getSid\) \{.*?\n  \})\n", "forestPlan")):
         hit = re.search(pat, src, re.S)
         if not hit:
             print(f"  FAIL  could not extract {what}() — briefRow depends on it"); return 1

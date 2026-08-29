@@ -321,6 +321,14 @@ main {
 #picker-list .brief-row .sw-sess { flex: 1; }   /* takes the slack; time sits right */
 #picker-list .brief-row .br-time { color: var(--muted); font-size: 11px; flex-shrink: 0; }
 #picker-list .brief-row .br-dot { color: var(--accent); font-size: 11px; flex-shrink: 0; }
+/* Organise mode's per-row destination picker. Sits at the end so it never shifts the
+   columns you read; only visible while organising. */
+#picker-list .brief-row .br-folder {
+  flex-shrink: 0; max-width: 42%; font-size: 11px; margin-left: 6px;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 2px 4px;
+}
+#picker-organise.on { border-color: var(--accent); color: var(--accent); }
 #picker-brief { flex-shrink: 0; background: var(--panel2); color: var(--muted);
   border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px;
   font-size: 12px; cursor: pointer; line-height: 1; }
@@ -1321,6 +1329,20 @@ footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
    rather than as another ask. */
 .asks-menu .ask-more { justify-content: center; color: var(--accent); font-size: 12px; }
 .asks-menu .ask-more:disabled { color: var(--muted); cursor: default; border-color: transparent; }
+/* Folder header + the single indent step for a nested session. Only depth 1 pays any
+   horizontal space, which is the whole reason the nesting is capped at one level: the
+   rest of this UI spent a day RECLAIMING that space (icons dropped, labels shortened,
+   labels fitted in pixels), and a general forest would have spent it again. */
+.folder-hdr {
+  display: flex; align-items: center; gap: 6px; cursor: pointer;
+  font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em;
+  padding: 6px 4px 3px; border-bottom: 1px solid var(--border); margin: 4px 0 3px;
+}
+.folder-hdr .fh-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                       white-space: nowrap; }
+.folder-hdr .fh-n { flex-shrink: 0; opacity: .7; }
+.folder-hdr:hover .fh-name { color: var(--accent); }
+.nested-1 { margin-left: 14px; }
 footer.hidden { display: none; }
 /* mirror of Claude's bottom status bar — one line under the input, scrolls
    horizontally if too long; "N shell(s)/monitor(s)" tokens are clickable. */
@@ -2414,6 +2436,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <div id="picker-head">
         <h2 id="picker-title">Sessions</h2>
         <button id="picker-brief" title="brief 一行式(快) / full 卡片(带对话摘录)">≣ brief</button>
+        <!-- Organise mode. A toggle rather than a drag surface: with folders one level
+             deep and folders sorting themselves, the only thing being edited per session
+             is "where does this belong" — one value, which a menu states exactly and a
+             drop-target has to be aimed at. -->
+        <button id="picker-organise" style="display:none" title="整理:给每个 session 归组">⇄ 整理</button>
       </div>
       <div id="picker-runaway" style="display:none"></div>
       <!-- Terminal bridge unreachable. Separate from #picker-warn (claude's session
@@ -3125,6 +3152,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     e.stopPropagation(); bridgeReset(pickerBridgeResetBtn);
   });
   const pickerBriefBtn = document.getElementById("picker-brief");
+  const organiseBtn = document.getElementById("picker-organise");
+  organiseBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    organising = !organising;
+    organiseBtn.textContent = organising ? "✓ 完成" : "⇄ 整理";
+    organiseBtn.classList.toggle("on", organising);
+    renderPicker();
+  });
   // brief lists the live tabs only and they fit on one screen, so the quick filter and the
   // full-search panel are dead weight there. Hiding them also removes a trap: a filter you
   // cannot see is a filter that silently hides rows. Looked up by id rather than through
@@ -3348,11 +3383,16 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     for (const t of tabs) if (t.sid) (perSid[t.sid] = perSid[t.sid] || [])
       .push({ window_index: t.window_index, tab_index: t.tab_index });
     switchMenu.innerHTML = "";
-    for (const t of tabs) {
-      if (!t.sid) continue;                     // no sid → not enterable, skip
+    for (const entry of forestPlan(tabs.filter(t => t.sid), t => t.sid)) {
+      if (entry.folder !== undefined) {
+        switchMenu.appendChild(folderHeaderEl(entry, openSwitchMenu));
+        continue;
+      }
+      const t = entry.item;
       const cur = t.sid === attachedSid;
       const b = document.createElement("button");
-      b.className = "sw-item" + (cur ? " current" : "");
+      b.className = "sw-item" + (cur ? " current" : "")
+                  + (entry.depth ? " nested-" + entry.depth : "");
       // [tab-name] session-name — tab-name highlighted + clamped (leave room for
       // the session-name); head-kept, … on overflow.
       const tn = (t.tab_name || "").trim();
@@ -4165,9 +4205,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       for (const t of tabs) if (t.sid) (posBySid[t.sid] = posBySid[t.sid] || [])
         .push({ window_index: t.window_index, tab_index: t.tab_index });
       for (const k of Object.keys(tabsById)) delete tabsById[k];
-      for (const t of tabs) {
-        tabsById[t.iterm_session_id] = t;
-        const row = document.createElement("div"); row.className = "tab-row";
+      for (const t of tabs) tabsById[t.iterm_session_id] = t;
+      for (const entry of forestPlan(tabs, t => t.sid || "")) {
+        if (entry.folder !== undefined) {
+          tabsListEl.appendChild(folderHeaderEl(entry, loadItermTabs));
+          continue;
+        }
+        const t = entry.item;
+        const row = document.createElement("div");
+        row.className = "tab-row" + (entry.depth ? " nested-" + entry.depth : "");
         const sel = document.createElement("button"); sel.className = "tab-sel";
         // [tab-name] session-name — tab-name highlighted + cleaned/clamped; no
         // green-dot emoji (saves space; claude tabs still get Attach/Enter below).
@@ -5567,6 +5613,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       return;
     }
     const data = await resp.json();
+    await loadSessionFolders();   // small JSON; keeps two browsers in step
     renderBattery(data.battery);
     // Surface it if claude's (undocumented) pid↔session store stopped working
     // — cc_web depends on it for binding, so a claude update changing it should
@@ -5748,11 +5795,80 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // view keeps the management actions (rename, close tab, kill, transcript excerpts).
   // No wXtY: the numbers were noise next to the names, and the Tabs group is still SORTED
   // by tab position (the ↹/↺ toggle), so the order still carries that information.
+  let organising = false;
+
+  // Every place a session can be put, flattened: a folder (→ root in it) or a specific
+  // root (→ nested under it). One pick therefore sets folder AND parent, which is why
+  // this stays two taps instead of two separate menus.
+  function folderTargets(items, getSid) {
+    getSid = getSid || (x => x.claude_session_id || x.sid || "");
+    const byFolder = new Map();
+    for (const it of items) {
+      const f = folderOf(getSid(it));
+      if (!f) continue;
+      if (!byFolder.has(f)) byFolder.set(f, []);
+      if (!parentOf(getSid(it))) byFolder.get(f).push(it);      // roots only
+    }
+    const out = [{ label: "— 无分组 —", folder: "", parent: "" }];
+    for (const [f, roots] of byFolder) {
+      out.push({ label: f, folder: f, parent: "" });
+      for (const r of roots) {
+        const nm = (r.user_name || r.summary_title || r.session_name || r.tab_name || "").trim();
+        out.push({ label: "    └ " + clampU(nm || getSid(r).slice(0, 4), 24),
+                   folder: f, parent: getSid(r) });
+      }
+    }
+    return out;
+  }
+
+  async function setSessionFolder(sid, folder, parent) {
+    try {
+      const r = await authedFetch("/api/groups", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ claude_session_id: sid, folder, parent }),
+      });
+      if (!r.ok) { alert("归组失败: " + (await r.text()).slice(0, 200)); return false; }
+      sessionFolders = (await r.json()).groups || sessionFolders;
+      renderPicker();
+      return true;
+    } catch (e) { alert("归组失败: " + e); return false; }
+  }
+
   function briefRow(s, singleWin) {
     const row = document.createElement("div");
     const isCur = s.claude_session_id === attachedSid;
     row.className = "brief-row" + (isCur ? " current" : "");
     row.dataset.sid = s.claude_session_id;
+    if (organising && s.group === "tabs") {
+      const sel = document.createElement("select");
+      sel.className = "br-folder";
+      const sid = s.claude_session_id;
+      const cur = folderOf(sid), curPar = parentOf(sid);
+      for (const t of folderTargets(visibleSessions().filter(x => x.group === "tabs"))) {
+        if (t.parent === sid) continue;                 // can't nest under yourself
+        const o = document.createElement("option");
+        o.value = JSON.stringify([t.folder, t.parent]);
+        o.textContent = t.label;
+        if (t.folder === cur && t.parent === curPar) o.selected = true;
+        sel.appendChild(o);
+      }
+      const mk = document.createElement("option");
+      mk.value = "__new__"; mk.textContent = "＋ 新建组…";
+      sel.appendChild(mk);
+      sel.addEventListener("click", (e) => e.stopPropagation());
+      sel.addEventListener("change", async (e) => {
+        e.stopPropagation();
+        if (sel.value === "__new__") {
+          const name = (prompt("新组名字:") || "").trim();
+          if (!name) { renderPicker(); return; }
+          await setSessionFolder(sid, name, "");
+          return;
+        }
+        const [f, par] = JSON.parse(sel.value);
+        await setSessionFolder(sid, f, par);
+      });
+      row.appendChild(sel);
+    }
     const add = (cls, txt) => {
       if (!txt) return null;
       const e = document.createElement("span"); e.className = cls; e.textContent = txt;
@@ -5819,8 +5935,23 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const tabWins = new Set(list.filter(s => s.group === "tabs")
       .map(s => s.window_index || 0));
     const tabsSingleWin = tabWins.size <= 1;
+    // The Tabs section gets the folder forest laid over it. Done by rewriting the
+    // iteration list rather than nesting a second loop: the existing loop already owns
+    // the Tabs/Recent/Named headers, the collapse state and the sort button, and a
+    // second loop beside it is how the three lists drifted apart the first time.
+    // A folder header rides along as a pseudo-entry so one loop still renders everything.
+    let plan = list;
+    if (listBrief && !searching) {
+      plan = [];
+      for (const e of forestPlan(list.filter(s => s.group === "tabs"),
+                                 s => s.claude_session_id)) {
+        if (e.folder !== undefined) plan.push({ group: "tabs", __folder: e });
+        else plan.push({ ...e.item, __depth: e.depth });
+      }
+      for (const s of list) if (s.group !== "tabs") plan.push(s);
+    }
     let lastGroup = null, hideCurrent = false;
-    for (const s of list) {
+    for (const s of plan) {
       if (s.group !== lastGroup) {
         lastGroup = s.group;
         const collapsible = (s.group === "recent" || s.group === "named");
@@ -5854,12 +5985,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         }
         pickerListEl.appendChild(hdr);
       }
+      if (s.__folder) {                       // folder header inside Tabs
+        if (!hideCurrent) pickerListEl.appendChild(folderHeaderEl(s.__folder, renderPicker));
+        continue;
+      }
       if (hideCurrent) continue;   // collapsed group → skip its cards
       // Brief view: one compact line, same shape as the ⇆ switcher. Search results keep
       // the full card even in brief mode — their whole point is the matched text, and
       // /api/search returns it anyway.
       if (listBrief && !searching) {
-        pickerListEl.appendChild(briefRow(s, tabsSingleWin));
+        const row = briefRow(s, tabsSingleWin);
+        if (s.__depth) row.classList.add("nested-" + s.__depth);
+        pickerListEl.appendChild(row);
         continue;
       }
       const card = document.createElement("div");
@@ -6558,6 +6695,77 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   //   singleWindow             true → drop the wX part (the list knows its own set)
   //   current                  true → mark it (the tab you are looking at)
   //   noPos                    true → no position chip at all (rows that aren't tabs)
+  // ---------- the forest: folders, and one level of nesting inside them ----------
+  // sid -> {folder, parent}, mirrored from /api/groups so the three lists agree without
+  // three fetches. The server owns it; this is a cache refreshed on load and after edits.
+  let sessionFolders = {};
+  let folderCollapsed = {};
+  try { folderCollapsed = JSON.parse(localStorage.getItem("cc_web_folder_collapsed") || "{}"); } catch {}
+
+  async function loadSessionFolders() {
+    try {
+      const r = await authedFetch("/api/groups");
+      if (r.ok) sessionFolders = (await r.json()).groups || {};
+    } catch {}
+  }
+  const folderOf = (sid) => (sessionFolders[sid] || {}).folder || "";
+  const parentOf = (sid) => (sessionFolders[sid] || {}).parent || "";
+
+  // THE one place that decides order and depth. Takes the list already sorted the way
+  // the caller wants and returns a flat render plan — [{folder, n} | {item, depth}] — so
+  // all three lists show the same shape from the same code. (Three lists that each built
+  // their own line is what this codebase spent a day undoing.)
+  function forestPlan(items, getSid) {
+    getSid = getSid || (x => x.sid || x.claude_session_id || "");
+    const plan = [];
+    const byFolder = new Map();          // folder -> items, in the caller's order
+    const loose = [];
+    for (const it of items) {
+      const f = folderOf(getSid(it));
+      if (!f) { loose.push(it); continue; }
+      if (!byFolder.has(f)) byFolder.set(f, []);
+      byFolder.get(f).push(it);
+    }
+    for (const [folder, list] of byFolder) {
+      plan.push({ folder, n: list.length, collapsed: !!folderCollapsed[folder] });
+      if (folderCollapsed[folder]) continue;
+      const kidsOf = new Map();
+      const roots = [];
+      for (const it of list) {
+        const par = parentOf(getSid(it));
+        // A parent outside this folder (or missing from the current list) cannot be
+        // rendered as a parent here, so its child is shown as a root rather than hidden.
+        if (par && list.some(x => getSid(x) === par)) {
+          if (!kidsOf.has(par)) kidsOf.set(par, []);
+          kidsOf.get(par).push(it);
+        } else roots.push(it);
+      }
+      for (const r of roots) {
+        plan.push({ item: r, depth: 0 });
+        for (const k of (kidsOf.get(getSid(r)) || [])) plan.push({ item: k, depth: 1 });
+      }
+    }
+    // Ungrouped last, with no header — an empty forest then costs nothing at all.
+    for (const it of loose) plan.push({ item: it, depth: 0 });
+    return plan;
+  }
+
+  function folderHeaderEl(entry, onToggle) {
+    const h = document.createElement("div");
+    h.className = "folder-hdr" + (entry.collapsed ? " collapsed" : "");
+    const t = document.createElement("span"); t.className = "fh-name";
+    t.textContent = (entry.collapsed ? "▸ " : "▾ ") + entry.folder;
+    const n = document.createElement("span"); n.className = "fh-n"; n.textContent = entry.n;
+    h.appendChild(t); h.appendChild(n);
+    h.addEventListener("click", (e) => {
+      e.stopPropagation();
+      folderCollapsed[entry.folder] = !folderCollapsed[entry.folder];
+      try { localStorage.setItem("cc_web_folder_collapsed", JSON.stringify(folderCollapsed)); } catch {}
+      onToggle();
+    });
+    return h;
+  }
+
   function sessionLine(el, p) {
     el.classList.add("sess-line");
     const add = (cls, txt) => {
