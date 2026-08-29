@@ -1159,6 +1159,52 @@ class Binding:
 # deploy/kickstart wipes them and every attached tab reverts to "Attach").
 # Lives in ~/.claude (NOT under ~/Desktop — launchd can't read TCC dirs).
 BINDINGS_FILE = Path.home() / ".claude" / "cc_web_bindings.json"
+
+# ---------- the session tree ----------
+# {child_sid: parent_sid}. One field, because that is all a forest needs: a session with
+# no entry here is a root, and the depth you see is how far up the chain goes. No folder
+# labels (nothing to spell two ways, nothing to name, nothing to collapse).
+#
+# Server-side so every frontend shares it — phone and laptop must not each hold their own
+# idea of the shape. Keyed on session id, the only durable key (see BindingTable._persist
+# for where that lesson came from), and NOTHING else writes this file: the name shown in
+# the lists is mostly LLM-generated and gets regenerated as a conversation moves, so a
+# structure encoded in names would evaporate.
+TREE_FILE = Path.home() / ".claude" / "cc_web_tree.json"
+
+
+def _load_tree() -> dict:
+    try:
+        d = json.loads(TREE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    return {k: v for k, v in d.items()
+            if isinstance(k, str) and isinstance(v, str) and v and v != k}
+
+
+def _save_tree(t: dict) -> None:
+    tmp = TREE_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(t, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(TREE_FILE)
+
+
+def _tree_would_cycle(tree: dict, sid: str, parent: str) -> bool:
+    """True if making `parent` the parent of `sid` closes a loop.
+
+    The only structural rule there is. Depth is deliberately NOT capped: a cap is a
+    refusal the user has to learn, and indentation already shows whatever depth exists.
+    """
+    seen, cur = {sid}, parent
+    while cur:
+        if cur in seen:
+            return True
+        seen.add(cur)
+        cur = tree.get(cur, "")
+    return False
+
+
 # Cap on the attached list. Only reached by someone who opens hundreds of distinct
 # sessions; the oldest fall off, and being dropped from it costs one Attach click.
 ATTACHED_MAX = 300
@@ -2340,6 +2386,7 @@ def brief_picker_sessions(live_tabs: Optional[list[dict]] = None) -> list[dict]:
                     files[jsonl.stem] = jsonl
 
     import datetime as _dt
+    tree = _load_tree()               # one read for the whole list
     out: list[dict] = []
     # A session can occupy more than one tab: start `claude` twice in the same directory
     # and claude's own store maps both pids to one sessionId. This list is keyed on the
@@ -2399,6 +2446,7 @@ def brief_picker_sessions(live_tabs: Optional[list[dict]] = None) -> list[dict]:
             "brief": True,             # the frontend must not present this as a full card
             # >1 → this session is open in several tabs; the positions come along only
             # then (brief exists to be small, and on a normal row they'd say nothing).
+            "parent": tree.get(sid, ""),
             "tab_count": len(per_sid.get(sid) or [1]),
             "tab_positions": per_sid[sid] if len(per_sid.get(sid) or []) > 1 else [],
             "tab_name": lt.get("name", ""),
@@ -4257,6 +4305,7 @@ async def get_tabs():
     Files popup's "prj" shortcut jumps to — the bridge already resolves it per tab."""
     out: list[dict] = []
     err = ""
+    tree = _load_tree()
     try:
         # No ensure_connected() here — list_claude_tabs() builds its own fresh
         # connection, so a prior connect+refresh is wasted (~100-200ms/click).
@@ -4268,6 +4317,7 @@ async def get_tabs():
             title, _ = _summary_of(sid)
             out.append({
                 "sid": sid,
+                "parent": tree.get(sid, ""),
                 "window_index": t.window_index,
                 "tab_index": t.tab_index,
                 "tab_name": t.name or "",                       # raw terminal tab name
@@ -6180,6 +6230,7 @@ async def get_iterm_tabs():
                 sid_by_iterm[r.iterm_session_id] = sid
     except Exception:
         pass
+    tree = _load_tree()
     for t in tabs:
         it = t.get("iterm_session_id")
         t["bound_to"] = bound_by_iterm.get(it)
@@ -6195,6 +6246,7 @@ async def get_iterm_tabs():
             t["sid"] = sid            # claude session id (bound OR live tab) → shown after the wN/tM label
             title, _ = _summary_of(sid)
             t["session_name"] = _user_name_of(sid) or title or ""
+            t["parent"] = tree.get(sid, "")
     return {"tabs": tabs}
 
 
@@ -7727,6 +7779,37 @@ async def post_resume_cancel():
 @app.get("/api/sessions-snapshot/resume-status", dependencies=[Depends(require_token)])
 async def get_resume_status():
     return {"ok": True, **_resume_progress}
+
+
+class TreePayload(BaseModel):
+    claude_session_id: str
+    parent: str = ""            # "" → detach (become a root)
+
+
+@app.get("/api/tree", dependencies=[Depends(require_token)])
+async def get_tree():
+    return {"tree": _load_tree()}
+
+
+@app.post("/api/tree", dependencies=[Depends(require_token)])
+async def post_tree(payload: TreePayload):
+    """Set or clear one session's parent. Everything else about the shape follows."""
+    sid = payload.claude_session_id
+    if not sid:
+        raise HTTPException(status_code=400, detail="claude_session_id required")
+    parent = payload.parent.strip()
+    t = _load_tree()
+    if not parent:
+        t.pop(sid, None)                     # detach; its own children stay attached to it
+    else:
+        if parent == sid:
+            raise HTTPException(status_code=400, detail="a session cannot be its own parent")
+        if _tree_would_cycle(t, sid, parent):
+            raise HTTPException(status_code=400,
+                                detail="that would make a loop (it is already below this one)")
+        t[sid] = parent
+    _save_tree(t)
+    return {"ok": True, "tree": t}
 
 
 @app.get("/api/cwds", dependencies=[Depends(require_token)])

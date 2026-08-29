@@ -1321,6 +1321,14 @@ footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
    rather than as another ask. */
 .asks-menu .ask-more { justify-content: center; color: var(--accent); font-size: 12px; }
 .asks-menu .ask-more:disabled { color: var(--muted); cursor: default; border-color: transparent; }
+/* One step per level of the session tree. Capped at 4 steps: depth is not limited in
+   the data (a cap there is a refusal the user has to learn), but the layout must not be
+   destroyed by a pathological chain — and horizontal space is the scarce one on a phone.
+   Depth is the ONLY thing drawn: no folder labels, no headers, no collapse. */
+.tree-d1 { margin-left: 14px; }
+.tree-d2 { margin-left: 28px; }
+.tree-d3 { margin-left: 42px; }
+.tree-d4 { margin-left: 56px; }
 footer.hidden { display: none; }
 /* mirror of Claude's bottom status bar — one line under the input, scrolls
    horizontally if too long; "N shell(s)/monitor(s)" tokens are clickable. */
@@ -1611,6 +1619,27 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
    snapshot had to live in a dropdown next to the button — separate from the action, and
    easy to read as a status label rather than a control. This puts the choice in the same
    place as the decision. */
+#treedlg .modal-card { padding: 12px; max-width: 560px; width: 92vw; }
+#treedlg h2 { margin: 0 0 6px; font-size: 15px; }
+#treedlg .td-note { color: var(--muted); font-size: 11px; margin-bottom: 8px; line-height: 1.5; }
+#treedlg .td-list { max-height: 46vh; overflow-y: auto; margin-bottom: 8px; }
+#treedlg .td-row {
+  display: block; width: 100%; box-sizing: border-box; text-align: left; cursor: pointer;
+  background: var(--panel2); color: var(--text); border: 1px solid transparent;
+  border-radius: 6px; padding: 6px 8px; margin-bottom: 4px; font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#treedlg .td-row:hover { border-color: var(--accent); }
+#treedlg .td-row.top { color: var(--accent); }
+/* Forbidden targets stay VISIBLE and say why. Hiding them would leave you asking where
+   a session went; greying it out answers that in place. */
+#treedlg .td-row.no { opacity: .45; cursor: default; }
+#treedlg .td-row.no:hover { border-color: transparent; }
+#treedlg .td-row .td-why { color: var(--muted); font-size: 11px; margin-left: 6px; }
+/* sessionLine lays its spans out with margins, not flex gap — the row is a plain
+   block button here, same as in the >_ list. */
+#treedlg .td-row.sess-line { white-space: nowrap; }
+#treedlg .td-row.self { border-color: var(--border); font-weight: 700; }
 #snapdlg .modal-card { padding: 12px; max-width: 560px; width: 92vw; }
 #snapdlg h2 { margin: 0 0 8px; font-size: 15px; }
 #snapdlg .sd-list { max-height: 34vh; overflow-y: auto; margin-bottom: 8px; }
@@ -2216,6 +2245,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div class="scr-cfg-row"><span>发送后翻译</span>
       <button class="sw-item" id="mm-autotranslate">关</button>
     </div>
+    <!-- Maintaining the tree happens HERE, from inside the session being moved: the
+         context ("who should this sit under?") is already on screen, so it needs no
+         organise mode, no per-row widgets in the lists, and no drag surface. -->
+    <div class="scr-cfg-row"><span>层级</span>
+      <button class="sw-item" id="mm-set-parent" title="把当前 session 挂到另一个 session 下面">⤵ 设为…的子</button>
+      <button class="sw-item" id="mm-detach-parent" title="脱离父级,成为顶层">⤴ 脱离</button>
+    </div>
     <div class="scr-cfg-row"><span>结束这个 session</span>
       <button class="sw-item" id="mm-exit-close"
               title="退出 claude 并关闭它的终端 tab(有后台作业时不关)">⏏ exit &amp; close</button>
@@ -2554,6 +2590,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <div class="modal-actions">
         <button id="snapdlg-cancel">取消</button>
         <button id="snapdlg-go" class="primary">↻ 开始恢复</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Parent picker. Shows the CURRENT tree, laid out by the same treePlan the lists use,
+       so what you pick from looks like what you have been reading. -->
+  <div id="treedlg" class="modal">
+    <div class="modal-card">
+      <h2 id="treedlg-title">挂到谁下面?</h2>
+      <div id="treedlg-note" class="td-note"></div>
+      <div id="treedlg-list" class="td-list"></div>
+      <div class="modal-actions">
+        <button id="treedlg-cancel">取消</button>
       </div>
     </div>
   </div>
@@ -3003,6 +3052,118 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // should be sitting in — drop it from the web tab bar and go back to the main page.
     if (ok) exitToPicker(sid);
   });
+  // ⤵ / ⤴ — the whole tree editor, in the ⚙ of the session being moved: the context
+  // ("under whom?") is already on screen, so this needs no organise mode and no widgets
+  // in the lists.
+  const setParentBtn = document.getElementById("mm-set-parent");
+  const detachBtn = document.getElementById("mm-detach-parent");
+
+  const treeDlg = document.getElementById("treedlg");
+  document.getElementById("treedlg-cancel").addEventListener("click",
+    () => treeDlg.classList.remove("show"));
+
+  // Everything at or below `sid` — the set you may not move it into. Computed from the
+  // parent pointers, so it covers grandchildren and deeper without special cases.
+  function descendantsOf(sid, tabs) {
+    const kids = new Map();
+    for (const t of tabs) {
+      const par = parentOf(t.sid);
+      if (par) { if (!kids.has(par)) kids.set(par, []); kids.get(par).push(t.sid); }
+    }
+    const out = new Set([sid]);
+    const stack = [sid];
+    while (stack.length) for (const k of (kids.get(stack.pop()) || [])) {
+      if (!out.has(k)) { out.add(k); stack.push(k); }
+    }
+    return out;
+  }
+  const childrenOf = (sid, tabs) => tabs.filter(t => parentOf(t.sid) === sid);
+
+  async function openParentPicker(sid) {
+    let tabs = [];
+    try {
+      const r = await authedFetch("/api/tabs");
+      if (r.ok) tabs = (await r.json()).tabs || [];
+    } catch {}
+    await loadSessionTree();
+    tabs = tabs.filter(t => t.sid);
+    const banned = descendantsOf(sid, tabs);        // itself + its whole subtree
+    const kids = childrenOf(sid, tabs);
+    const me = tabs.find(t => t.sid === sid);
+    const single = new Set(tabs.map(t => t.window_index || 0)).size <= 1;
+    // Same shape as the lists: [tab-name] then the session name. A bare session name
+    // was ambiguous — several of them start with the same words, and the tab name is
+    // what tells you which one you are actually looking at.
+    const labelOf = (t) => {
+      const tn = stripTab(t.tab_name || t.name || "");
+      const sn = (t.session_name || "").trim();
+      return (tn ? "[" + clampU(tn, 16) + "] " : "") + clampU(sn || t.sid.slice(0, 8), 26);
+    };
+
+    document.getElementById("treedlg-title").textContent =
+      "把 " + (me ? labelOf(me) : sid.slice(0, 8)) + " 挂到谁下面?";
+    // Say the two things that are easy to get wrong before you tap, not after.
+    document.getElementById("treedlg-note").innerHTML =
+      (kids.length
+        ? "它带着 <b>" + kids.length + "</b> 个子 session 一起过去,仍然是它的子。<br>"
+        : "")
+      + "灰掉的是它自己和它的后代 —— 挂进去会成环,所以禁止。";
+
+    const listEl = document.getElementById("treedlg-list");
+    listEl.innerHTML = "";
+    const top = document.createElement("button");
+    top.className = "td-row top";
+    top.textContent = "⤴ 顶层(脱离父级)";
+    top.addEventListener("click", async () => {
+      treeDlg.classList.remove("show");
+      if (await setSessionParent(sid, "")) { renderTabBar(); refreshPicker(); }
+    });
+    listEl.appendChild(top);
+
+    // The current tree, in the same shape the lists draw it.
+    for (const { item: t, depth } of treePlan(tabs, x => x.sid)) {
+      const b = document.createElement("button");
+      const isSelf = t.sid === sid, no = banned.has(t.sid);
+      b.className = "td-row" + (no ? " no" : "") + (isSelf ? " self" : "") + treeCls(depth);
+      // The SAME renderer the three lists use, so what you pick from is what you read:
+      // wXtY · sid · [tab-name] · session-name.
+      sessionLine(b, { windowIndex: t.window_index, tabIndex: t.tab_index,
+                       singleWindow: single, sid: t.sid,
+                       tabName: t.tab_name || t.name || "",
+                       sessName: (t.session_name || "").trim(), sessBudget: 30 });
+      if (no) {
+        const w = document.createElement("span"); w.className = "td-why";
+        w.textContent = isSelf ? "← 就是它自己" : "← 它的后代";
+        b.appendChild(w);
+        b.disabled = true;
+      } else {
+        b.addEventListener("click", async () => {
+          treeDlg.classList.remove("show");
+          if (await setSessionParent(sid, t.sid)) { renderTabBar(); refreshPicker(); }
+        });
+      }
+      listEl.appendChild(b);
+    }
+    treeDlg.classList.add("show");
+  }
+
+  if (setParentBtn) setParentBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
+    modeMenu.style.display = "none";
+    await openParentPicker(attachedSid);
+  });
+
+  if (detachBtn) detachBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const sid = attachedSid;
+    if (!sid) { alert("当前没有 attach 的 session。"); return; }
+    modeMenu.style.display = "none";
+    await loadSessionTree();
+    if (!parentOf(sid)) { alert("这个 session 本来就是顶层。"); return; }
+    if (await setSessionParent(sid, "")) { renderTabBar(); refreshPicker(); }
+  });
+
   const modeOpts = Array.from(document.querySelectorAll(".mode-opt"));
   const backBtn = document.getElementById("back-btn");
   const closeTabBtn = document.getElementById("closetab-btn");
@@ -3326,6 +3487,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const switchMenu = document.getElementById("switch-menu");
   function hideSwitchMenu() { switchMenu.style.display = "none"; }
   async function openSwitchMenu() {
+    await loadSessionTree();
     if (switchMenu.style.display !== "none") { hideSwitchMenu(); return; }
     switchMenu.innerHTML = "<div class='sw-empty'>loading…</div>";
     switchMenu.style.display = "";
@@ -3348,11 +3510,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     for (const t of tabs) if (t.sid) (perSid[t.sid] = perSid[t.sid] || [])
       .push({ window_index: t.window_index, tab_index: t.tab_index });
     switchMenu.innerHTML = "";
-    for (const t of tabs) {
-      if (!t.sid) continue;                     // no sid → not enterable, skip
+    for (const { item: t, depth } of treePlan(tabs.filter(x => x.sid), x => x.sid)) {
       const cur = t.sid === attachedSid;
       const b = document.createElement("button");
-      b.className = "sw-item" + (cur ? " current" : "");
+      b.className = "sw-item" + (cur ? " current" : "") + treeCls(depth);
       // [tab-name] session-name — tab-name highlighted + clamped (leave room for
       // the session-name); head-kept, … on overflow.
       const tn = (t.tab_name || "").trim();
@@ -4165,9 +4326,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       for (const t of tabs) if (t.sid) (posBySid[t.sid] = posBySid[t.sid] || [])
         .push({ window_index: t.window_index, tab_index: t.tab_index });
       for (const k of Object.keys(tabsById)) delete tabsById[k];
-      for (const t of tabs) {
-        tabsById[t.iterm_session_id] = t;
-        const row = document.createElement("div"); row.className = "tab-row";
+      for (const t of tabs) tabsById[t.iterm_session_id] = t;
+      for (const { item: t, depth } of treePlan(tabs, x => x.sid || "")) {
+        const row = document.createElement("div");
+        row.className = "tab-row" + treeCls(depth);
         const sel = document.createElement("button"); sel.className = "tab-sel";
         // [tab-name] session-name — tab-name highlighted + cleaned/clamped; no
         // green-dot emoji (saves space; claude tabs still get Attach/Enter below).
@@ -5567,6 +5729,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       return;
     }
     const data = await resp.json();
+    await loadSessionTree();     // server owns the shape; keep every frontend in step
     renderBattery(data.battery);
     // Surface it if claude's (undocumented) pid↔session store stopped working
     // — cc_web depends on it for binding, so a claude update changing it should
@@ -5819,8 +5982,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const tabWins = new Set(list.filter(s => s.group === "tabs")
       .map(s => s.window_index || 0));
     const tabsSingleWin = tabWins.size <= 1;
+    // The Tabs section is laid out as a tree. Done by reordering the iteration list
+    // rather than nesting a second loop, because the existing loop already owns the
+    // Tabs/Recent/Named headers, the collapse state and the sort button.
+    let plan = list;
+    if (listBrief && !searching) {
+      plan = [];
+      for (const e of treePlan(list.filter(x => x.group === "tabs"),
+                               x => x.claude_session_id))
+        plan.push({ ...e.item, __depth: e.depth });
+      for (const x of list) if (x.group !== "tabs") plan.push(x);
+    }
     let lastGroup = null, hideCurrent = false;
-    for (const s of list) {
+    for (const s of plan) {
       if (s.group !== lastGroup) {
         lastGroup = s.group;
         const collapsible = (s.group === "recent" || s.group === "named");
@@ -5859,7 +6033,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // the full card even in brief mode — their whole point is the matched text, and
       // /api/search returns it anyway.
       if (listBrief && !searching) {
-        pickerListEl.appendChild(briefRow(s, tabsSingleWin));
+        const row = briefRow(s, tabsSingleWin);
+        row.className += treeCls(s.__depth || 0);
+        pickerListEl.appendChild(row);
         continue;
       }
       const card = document.createElement("div");
@@ -6558,6 +6734,67 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   //   singleWindow             true → drop the wX part (the list knows its own set)
   //   current                  true → mark it (the tab you are looking at)
   //   noPos                    true → no position chip at all (rows that aren't tabs)
+  // ---------- the session tree ----------
+  // child sid -> parent sid, mirrored from the server so every frontend shows the same
+  // shape (the server owns it; this is a cache refreshed on load and after each edit).
+  let sessionTree = {};
+  const parentOf = (sid) => sessionTree[sid] || "";
+
+  async function loadSessionTree() {
+    try {
+      const r = await authedFetch("/api/tree");
+      if (r.ok) sessionTree = (await r.json()).tree || {};
+    } catch {}
+  }
+  async function setSessionParent(sid, parent) {
+    try {
+      const r = await authedFetch("/api/tree", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ claude_session_id: sid, parent }),
+      });
+      if (!r.ok) { alert((await r.text()).slice(0, 200)); return false; }
+      sessionTree = (await r.json()).tree || sessionTree;
+      return true;
+    } catch (e) { alert("失败: " + e); return false; }
+  }
+
+  // THE one place order and depth come from, for all three lists. Takes the list already
+  // sorted the way the caller wants; returns [{item, depth}] with each child right under
+  // its parent. A session whose parent is not in this list is shown as a root rather than
+  // hidden — filtering, another window, or a closed parent must never make a row vanish.
+const treeCls = (d) => d ? " tree-d" + Math.min(d, 4) : "";
+
+  function treePlan(items, getSid) {
+    getSid = getSid || (x => x.sid || x.claude_session_id || "");
+    const present = new Set(items.map(getSid));
+    const kids = new Map();
+    const roots = [];
+    for (const it of items) {
+      const par = parentOf(getSid(it));
+      if (par && present.has(par) && par !== getSid(it)) {
+        if (!kids.has(par)) kids.set(par, []);
+        kids.get(par).push(it);
+      } else roots.push(it);
+    }
+    const out = [];
+    const emitted = new Set();
+    const walk = (it, depth) => {
+      const sid = getSid(it);
+      if (emitted.has(sid)) return;
+      emitted.add(sid);
+      out.push({ item: it, depth });
+      for (const k of (kids.get(sid) || [])) walk(k, depth + 1);
+    };
+    for (const r of roots) walk(r, 0);
+    // INVARIANT: every input row comes out, exactly once. A cycle in the data (the server
+    // refuses one, but a hand-edited file or a stale cache could still hold one) leaves
+    // those rows with no root to hang off, and dropping them would make live sessions
+    // vanish from the list — the exact failure this project spent a week hunting. Anything
+    // the walk didn't reach is emitted as a root.
+    for (const it of items) if (!emitted.has(getSid(it))) walk(it, 0);
+    return out;
+  }
+
   function sessionLine(el, p) {
     el.classList.add("sess-line");
     const add = (cls, txt) => {

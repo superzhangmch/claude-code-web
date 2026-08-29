@@ -62,6 +62,9 @@ const stripTab = (s) => (s || "")
   .replace(/\s*\((?:claude|caffeinate)\)\s*$/i, "")
   .trim();
 let attachedSid = "";
+// treePlan works through this one lookup; the test states the shape directly.
+let TREE = {};
+const parentOf = (sid) => TREE[sid] || "";
 
 __ROW__
 __CHROME__
@@ -154,6 +157,53 @@ row = briefRow({ ...s, tab_count: 2, tab_positions: undefined }, true);
 check("no positions available → still marked, never a crash",
       span(row, "sw-dup") === "Δ×2", span(row, "sw-dup"));
 
+console.log("=== the session tree: order and depth ===");
+// treePlan is where all THREE lists get order and depth from — three lists each
+// computing their own line is what this codebase spent a day undoing. One field
+// (a parent pointer) is the whole structure: no folders to name, no headers, no
+// collapse state. Depth is what gets drawn, and only that.
+const T = (ids) => ids.map(id => ({ sid: id }));
+const shape = (items) => treePlan(items, x => x.sid)
+  .map(p => "  ".repeat(p.depth) + p.item.sid);
+
+TREE = { b: "a", c: "b", d: "a" };
+check("a child sits directly under its parent, at depth+1",
+      JSON.stringify(shape(T(["a","b","c","d","e"]))) === JSON.stringify(["a","  b","    c","  d","e"]),
+      JSON.stringify(shape(T(["a","b","c","d","e"]))));
+check("roots keep the order they came in",
+      shape(T(["e","a"])).join(",") === "e,a," + "  b,    c,  d".split(",").join(",") ||
+      shape(T(["e","a","b","c","d"]))[0] === "e",
+      JSON.stringify(shape(T(["e","a","b","c","d"]))));
+
+// The row must never disappear because its parent is filtered out / in another window /
+// no longer listed. It becomes a root instead.
+check("a child whose parent is absent is shown as a root, not hidden",
+      JSON.stringify(shape(T(["b","c","d"]))) === JSON.stringify(["b","  c","d"]),
+      JSON.stringify(shape(T(["b","c","d"]))));
+
+// Depth is not capped in the data (the CSS caps the indent). A long chain still renders.
+TREE = { b: "a", c: "b", d: "c", e: "d" };
+check("a deep chain keeps going", shape(T(["a","b","c","d","e"])).at(-1) === "        e",
+      JSON.stringify(shape(T(["a","b","c","d","e"]))));
+
+// The server refuses loops, but a corrupt file must not hang the browser.
+// THE invariant: every row that goes in comes out, exactly once. A cycle leaves its
+// members with no root to hang off, and dropping them would make live sessions vanish
+// from the list — the exact failure this project spent a week hunting.
+TREE = { a: "b", b: "a" };
+check("a cycle in the data still renders both rows (never drops one)",
+      shape(T(["a","b"])).length === 2, JSON.stringify(shape(T(["a","b"]))));
+TREE = { b: "a", c: "b", d: "a", x: "y" };
+for (const ids of [["a","b","c","d"], ["b","c"], ["d"], ["x"], ["a","b","c","d","x","e"]]) {
+  const got = treePlan(T(ids), z => z.sid);
+  check("in=" + ids.length + " out=" + got.length + " for [" + ids + "]",
+        got.length === ids.length
+        && new Set(got.map(g => g.item.sid)).size === ids.length, "");
+}
+TREE = {};
+check("no tree at all → a flat list, unchanged",
+      JSON.stringify(shape(T(["a","b","c"]))) === JSON.stringify(["a","b","c"]), "");
+
 console.log("=== brief hides the search chrome ===");
 listBrief = true; syncBriefChrome();
 check("the quick filter is hidden in brief", chromeEls["picker-quickfilter"].style.display === "none");
@@ -169,7 +219,8 @@ process.exit(_fails.length ? 1 : 0);
     # built by exactly the shipped code.
     deps = []
     for pat, what in ((r"\n  (function tabPos\(p\) \{.*?\n  \})\n", "tabPos"),
-                      (r"\n  (function sessionLine\(el, p\) \{.*?\n  \})\n", "sessionLine")):
+                      (r"\n  (function sessionLine\(el, p\) \{.*?\n  \})\n", "sessionLine"),
+                      (r"\n  (function treePlan\(items, getSid\) \{.*?\n  \})\n", "treePlan")):
         hit = re.search(pat, src, re.S)
         if not hit:
             print(f"  FAIL  could not extract {what}() — briefRow depends on it"); return 1
