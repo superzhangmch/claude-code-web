@@ -6798,17 +6798,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // sorted the way the caller wants; returns [{item, depth}] with each child right under
   // its parent. A session whose parent is not in this list is shown as a root rather than
   // hidden — filtering, another window, or a closed parent must never make a row vanish.
-// The guide lines, drawn in the MARGIN to the left of the row — not inside it. The row
-// itself is indented (margin-left), which is what makes the nesting obvious at a glance;
-// a line drawn inside the box would start 14px right of the parent's box and so would not
-// visually connect to it. Borders rather than └ ├ │ characters: glyph widths differ per
-// font and platform, and a text elbow would also have to fit inside the row's text budget.
-const TG_STEP = 14, TG_MAX = 4;
-const CLS = { t: "tg-t", l: "tg-l", v: "tg-v", " ": "tg-e" };
-function treeIndent(guides) {
+  // The guide lines, drawn in the MARGIN to the left of the row — not inside it. The row
+  // itself is indented (margin-left), which is what makes the nesting obvious at a glance;
+  // a line drawn inside the box would start 14px right of the parent's box and so would not
+  // visually connect to it. Borders rather than └ ├ │ characters: glyph widths differ per
+  // font and platform, and a text elbow would also have to fit inside the row's text budget.
+  const TG_STEP = 14, TG_MAX = 4;
+  const CLS = { t: "tg-t", l: "tg-l", v: "tg-v", " ": "tg-e" };
+  function treeIndent(guides) {
   return Math.min((guides || []).length, TG_MAX) * TG_STEP;
-}
-function treeGuides(guides) {
+  }
+  function treeGuides(guides) {
   const g = (guides || []).slice(0, TG_MAX);
   const f = document.createDocumentFragment();
   g.forEach((sym, k) => {
@@ -6819,9 +6819,9 @@ function treeGuides(guides) {
     f.appendChild(c);
   });
   return f;
-}
+  }
 
-function treePlan(items, getSid) {
+  function treePlan(items, getSid) {
     getSid = getSid || (x => x.sid || x.claude_session_id || "");
     const present = new Set(items.map(getSid));
     const kids = new Map();
