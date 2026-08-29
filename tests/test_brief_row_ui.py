@@ -166,6 +166,25 @@ const T = (ids) => ids.map(id => ({ sid: id }));
 const shape = (items) => treePlan(items, x => x.sid)
   .map(p => "  ".repeat(p.depth) + p.item.sid);
 
+// The guide symbols: what the ├ └ │ cells are drawn from. One per level.
+TREE = { b: "a", c: "b", d: "a" };
+const guides = (ids) => treePlan(T(ids), x => x.sid)
+  .map(p => p.item.sid + ":" + (p.guides.join("") || "-"));
+check("a child with siblings below gets a tee, the last one an elbow",
+      JSON.stringify(guides(["a","b","c","d"])) ===
+      JSON.stringify(["a:-", "b:t", "c:vl", "d:l"]),
+      JSON.stringify(guides(["a","b","c","d"])));
+// b is NOT the last child of a (d follows), so b's own children must have a vertical
+// passing through their first column — otherwise the line under b just stops in mid-air.
+check("an ancestor with siblings below keeps its line running through deeper rows",
+      guides(["a","b","c","d"])[2] === "c:vl", JSON.stringify(guides(["a","b","c","d"])));
+TREE = { b: "a", c: "b", d: "b" };
+check("...and when the ancestor IS last, the column is blank instead",
+      JSON.stringify(guides(["a","b","c","d"])) ===
+      JSON.stringify(["a:-", "b:l", "c:" + " t", "d:" + " l"]),
+      JSON.stringify(guides(["a","b","c","d"])));
+check("a root has no guides at all", guides(["a"])[0] === "a:-", "");
+
 TREE = { b: "a", c: "b", d: "a" };
 check("a child sits directly under its parent, at depth+1",
       JSON.stringify(shape(T(["a","b","c","d","e"]))) === JSON.stringify(["a","  b","    c","  d","e"]),

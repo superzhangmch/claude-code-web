@@ -1321,14 +1321,36 @@ footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
    rather than as another ask. */
 .asks-menu .ask-more { justify-content: center; color: var(--accent); font-size: 12px; }
 .asks-menu .ask-more:disabled { color: var(--muted); cursor: default; border-color: transparent; }
-/* One step per level of the session tree. Capped at 4 steps: depth is not limited in
-   the data (a cap there is a refusal the user has to learn), but the layout must not be
-   destroyed by a pathological chain — and horizontal space is the scarce one on a phone.
-   Depth is the ONLY thing drawn: no folder labels, no headers, no collapse. */
-.tree-d1 { margin-left: 14px; }
-.tree-d2 { margin-left: 28px; }
-.tree-d3 { margin-left: 42px; }
-.tree-d4 { margin-left: 56px; }
+/* Tree guides, absolutely positioned in the row's left margin (see treeGuides). The row
+   is what indents; these only draw the connection back to the parent.
+     tg-v  │  an ancestor's line passing through this row
+     tg-t  ├  this row, with siblings below it — the line continues past it
+     tg-l  └  this row, last of its siblings — the line stops at the elbow
+     tg-e     blank: that ancestor had no more siblings */
+.tg { position: absolute; width: 14px; top: 0; bottom: 0; pointer-events: none; }
+/* --muted, not --border: in the light theme --border is #e2d8bc against a #ece3c8 row —
+   the line was technically there and effectively invisible. --muted (#7c6f64) is the
+   colour secondary text already uses, so it reads as structure without shouting. */
+.tg-v::before, .tg-t::before, .tg-l::before {
+  content: ""; position: absolute; left: 6px; width: 0;
+  border-left: 1px solid var(--muted);
+}
+.tg-v::before, .tg-t::before { top: -5px; bottom: -5px; }   /* through, and on down */
+.tg-l::before { top: -5px; height: calc(50% + 5px); }       /* stops at the elbow */
+.tg-t::after, .tg-l::after {
+  content: ""; position: absolute; left: 6px; top: 50%; width: 8px;
+  border-top: 1px solid var(--muted);
+}
+/* The indent itself. width:auto is the point — these rows are `width:100%` +
+   border-box, so a left margin alone pushed the whole box (and the ● and the timestamp
+   with it) out past the container. Letting the width go auto means indenting eats from
+   the left and every column on the right stays put. Id-scoped to outrank that width
+   rather than reaching for !important. overflow:visible so the guides, which live outside
+   the box, are not clipped — the text inside is already clamped in JS, so the CSS
+   ellipsis was only ever a backstop. */
+#picker-list .brief-row.tg-row,
+.switch-menu .sw-item.tg-row,
+#treedlg .td-row.tg-row { width: auto; position: relative; overflow: visible; }
 footer.hidden { display: none; }
 /* mirror of Claude's bottom status bar — one line under the input, scrolls
    horizontally if too long; "N shell(s)/monitor(s)" tokens are clickable. */
@@ -3112,10 +3134,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     listEl.appendChild(top);
 
     // The current tree, in the same shape the lists draw it.
-    for (const { item: t, depth } of treePlan(tabs, x => x.sid)) {
+    for (const { item: t, guides } of treePlan(tabs, x => x.sid)) {
       const b = document.createElement("button");
       const isSelf = t.sid === sid, no = banned.has(t.sid);
-      b.className = "td-row" + (no ? " no" : "") + (isSelf ? " self" : "") + treeCls(depth);
+      b.className = "td-row" + (no ? " no" : "") + (isSelf ? " self" : "")
+                  + (guides.length ? " tg-row" : "");
+      if (guides.length) { b.style.marginLeft = treeIndent(guides) + "px";
+                           b.appendChild(treeGuides(guides)); }
       // The SAME renderer the three lists use, so what you pick from is what you read:
       // wXtY · sid · [tab-name] · session-name.
       sessionLine(b, { windowIndex: t.window_index, tabIndex: t.tab_index,
@@ -3506,10 +3531,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     for (const t of tabs) if (t.sid) (perSid[t.sid] = perSid[t.sid] || [])
       .push({ window_index: t.window_index, tab_index: t.tab_index });
     switchMenu.innerHTML = "";
-    for (const { item: t, depth } of treePlan(tabs.filter(x => x.sid), x => x.sid)) {
+    for (const { item: t, guides } of treePlan(tabs.filter(x => x.sid), x => x.sid)) {
       const cur = t.sid === attachedSid;
       const b = document.createElement("button");
-      b.className = "sw-item" + (cur ? " current" : "") + treeCls(depth);
+      b.className = "sw-item" + (cur ? " current" : "") + (guides.length ? " tg-row" : "");
+      if (guides.length) { b.style.marginLeft = treeIndent(guides) + "px";
+                           b.appendChild(treeGuides(guides)); }
       // [tab-name] session-name — tab-name highlighted + clamped (leave room for
       // the session-name); head-kept, … on overflow.
       const tn = (t.tab_name || "").trim();
@@ -4322,10 +4349,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       for (const t of tabs) if (t.sid) (posBySid[t.sid] = posBySid[t.sid] || [])
         .push({ window_index: t.window_index, tab_index: t.tab_index });
       for (const k of Object.keys(tabsById)) delete tabsById[k];
-      for (const t of tabs) tabsById[t.iterm_session_id] = t;
-      for (const { item: t, depth } of treePlan(tabs, x => x.sid || "")) {
+      // NO tree here, not even the ordering. This list answers "which tab is which",
+      // and it is read in wXtY order — reordering it by parentage without drawing the
+      // indent would just look shuffled. The hierarchy lives in the two lists that are
+      // about sessions (the ⇆ switcher and the main-page brief list).
+      for (const t of tabs) {
+        tabsById[t.iterm_session_id] = t;
         const row = document.createElement("div");
-        row.className = "tab-row" + treeCls(depth);
+        row.className = "tab-row";
         const sel = document.createElement("button"); sel.className = "tab-sel";
         // [tab-name] session-name — tab-name highlighted + cleaned/clamped; no
         // green-dot emoji (saves space; claude tabs still get Attach/Enter below).
@@ -5986,7 +6017,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       plan = [];
       for (const e of treePlan(list.filter(x => x.group === "tabs"),
                                x => x.claude_session_id))
-        plan.push({ ...e.item, __depth: e.depth });
+        plan.push({ ...e.item, __depth: e.depth, __guides: e.guides });
       for (const x of list) if (x.group !== "tabs") plan.push(x);
     }
     let lastGroup = null, hideCurrent = false;
@@ -6030,7 +6061,16 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // /api/search returns it anyway.
       if (listBrief && !searching) {
         const row = briefRow(s, tabsSingleWin);
-        row.className += treeCls(s.__depth || 0);
+        if (s.__guides && s.__guides.length) {
+          row.classList.add("tg-row");
+          row.style.marginLeft = treeIndent(s.__guides) + "px";
+          // PREPEND. The guides are absolutely positioned, so their position in the child
+          // list is invisible — except that appending them stole :last-child from the
+          // timestamp, which is where `margin-right: 0` lives, and every nested row's time
+          // column then sat 6px left of every root's. (The other two lists add the guides
+          // before sessionLine fills the row, so they never had it.)
+          row.prepend(treeGuides(s.__guides));
+        }
         pickerListEl.appendChild(row);
         continue;
       }
@@ -6758,9 +6798,30 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // sorted the way the caller wants; returns [{item, depth}] with each child right under
   // its parent. A session whose parent is not in this list is shown as a root rather than
   // hidden — filtering, another window, or a closed parent must never make a row vanish.
-const treeCls = (d) => d ? " tree-d" + Math.min(d, 4) : "";
+// The guide lines, drawn in the MARGIN to the left of the row — not inside it. The row
+// itself is indented (margin-left), which is what makes the nesting obvious at a glance;
+// a line drawn inside the box would start 14px right of the parent's box and so would not
+// visually connect to it. Borders rather than └ ├ │ characters: glyph widths differ per
+// font and platform, and a text elbow would also have to fit inside the row's text budget.
+const TG_STEP = 14, TG_MAX = 4;
+const CLS = { t: "tg-t", l: "tg-l", v: "tg-v", " ": "tg-e" };
+function treeIndent(guides) {
+  return Math.min((guides || []).length, TG_MAX) * TG_STEP;
+}
+function treeGuides(guides) {
+  const g = (guides || []).slice(0, TG_MAX);
+  const f = document.createDocumentFragment();
+  g.forEach((sym, k) => {
+    const c = document.createElement("span");
+    c.className = "tg " + (CLS[sym] || "tg-e");
+    // Sits in the row's own left margin: one step per level, counting back from the box.
+    c.style.left = (-(g.length - k) * TG_STEP) + "px";
+    f.appendChild(c);
+  });
+  return f;
+}
 
-  function treePlan(items, getSid) {
+function treePlan(items, getSid) {
     getSid = getSid || (x => x.sid || x.claude_session_id || "");
     const present = new Set(items.map(getSid));
     const kids = new Map();
@@ -6774,20 +6835,36 @@ const treeCls = (d) => d ? " tree-d" + Math.min(d, 4) : "";
     }
     const out = [];
     const emitted = new Set();
-    const walk = (it, depth) => {
+    // `guides` is one symbol per level, which is everything the drawing needs:
+    //   "t" a tee (├) — this row has siblings below it
+    //   "l" an elbow (└) — last child, so the line stops here
+    //   "v" a vertical (│) — an ANCESTOR at that level still has siblings below, so its
+    //       line has to pass through this row
+    //   " " blank — that ancestor was the last child, nothing to continue
+    // Computed here rather than in the renderers because it is a property of the tree,
+    // and four lists working it out separately is how they drift apart.
+    const walk = (it, depth, ancestors) => {
       const sid = getSid(it);
       if (emitted.has(sid)) return;
       emitted.add(sid);
-      out.push({ item: it, depth });
-      for (const k of (kids.get(sid) || [])) walk(k, depth + 1);
+      out.push({ item: it, depth, guides: ancestors.slice() });
+      const ks = kids.get(sid) || [];
+      ks.forEach((k, i) => {
+        const last = i === ks.length - 1;
+        // this row's own symbol, then convert it for the levels below: a tee keeps its
+        // line running (│), an elbow leaves blank space.
+        const a = ancestors.map(g => (g === "t" ? "v" : g === "l" ? " " : g));
+        a.push(last ? "l" : "t");
+        walk(k, depth + 1, a);
+      });
     };
-    for (const r of roots) walk(r, 0);
+    for (const r of roots) walk(r, 0, []);
     // INVARIANT: every input row comes out, exactly once. A cycle in the data (the server
     // refuses one, but a hand-edited file or a stale cache could still hold one) leaves
     // those rows with no root to hang off, and dropping them would make live sessions
     // vanish from the list — the exact failure this project spent a week hunting. Anything
     // the walk didn't reach is emitted as a root.
-    for (const it of items) if (!emitted.has(getSid(it))) walk(it, 0);
+    for (const it of items) if (!emitted.has(getSid(it))) walk(it, 0, []);
     return out;
   }
 
