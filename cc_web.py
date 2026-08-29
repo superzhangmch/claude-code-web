@@ -1159,48 +1159,6 @@ class Binding:
 # deploy/kickstart wipes them and every attached tab reverts to "Attach").
 # Lives in ~/.claude (NOT under ~/Desktop — launchd can't read TCC dirs).
 BINDINGS_FILE = Path.home() / ".claude" / "cc_web_bindings.json"
-
-# ---------- session folders (the forest) ----------
-# {sid: {"folder": str, "parent": sid}} — the user's own grouping of sessions, keyed on
-# the session id because that is the only durable key (see BindingTable._persist for the
-# same lesson learned the hard way). Its own file, and NOTHING else writes it: the name
-# shown in the lists is 12-of-14 LLM-generated and gets regenerated as the conversation
-# moves, so a grouping stored in the name would evaporate. `folder` is a plain label;
-# `parent` nests one session under another INSIDE that folder, and depth stops there —
-# a parent may not itself have a parent.
-GROUPS_FILE = Path.home() / ".claude" / "cc_web_groups.json"
-FOLDER_MAX = 40          # label length; long enough to read, short enough to fit a header
-
-
-def _load_groups() -> dict:
-    try:
-        d = json.loads(GROUPS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
-        return {}
-    if not isinstance(d, dict):
-        return {}
-    out = {}
-    for sid, v in d.items():
-        if not isinstance(sid, str) or not isinstance(v, dict):
-            continue
-        folder = str(v.get("folder") or "").strip()[:FOLDER_MAX]
-        parent = str(v.get("parent") or "").strip()
-        if folder or parent:
-            out[sid] = {"folder": folder, "parent": parent}
-    return out
-
-
-def _save_groups(g: dict) -> None:
-    tmp = GROUPS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(g, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp.replace(GROUPS_FILE)
-
-
-def _group_of(sid: str, g: Optional[dict] = None) -> dict:
-    """{folder, parent} for one session — {} when it is ungrouped."""
-    return (g if g is not None else _load_groups()).get(sid) or {}
-
-
 # Cap on the attached list. Only reached by someone who opens hundreds of distinct
 # sessions; the oldest fall off, and being dropped from it costs one Attach click.
 ATTACHED_MAX = 300
@@ -2382,7 +2340,6 @@ def brief_picker_sessions(live_tabs: Optional[list[dict]] = None) -> list[dict]:
                     files[jsonl.stem] = jsonl
 
     import datetime as _dt
-    groups = _load_groups()          # one read for the whole list
     out: list[dict] = []
     # A session can occupy more than one tab: start `claude` twice in the same directory
     # and claude's own store maps both pids to one sessionId. This list is keyed on the
@@ -2442,8 +2399,6 @@ def brief_picker_sessions(live_tabs: Optional[list[dict]] = None) -> list[dict]:
             "brief": True,             # the frontend must not present this as a full card
             # >1 → this session is open in several tabs; the positions come along only
             # then (brief exists to be small, and on a normal row they'd say nothing).
-            "folder": (groups.get(sid) or {}).get("folder", ""),
-            "parent": (groups.get(sid) or {}).get("parent", ""),
             "tab_count": len(per_sid.get(sid) or [1]),
             "tab_positions": per_sid[sid] if len(per_sid.get(sid) or []) > 1 else [],
             "tab_name": lt.get("name", ""),
@@ -4302,7 +4257,6 @@ async def get_tabs():
     Files popup's "prj" shortcut jumps to — the bridge already resolves it per tab."""
     out: list[dict] = []
     err = ""
-    groups = _load_groups()
     try:
         # No ensure_connected() here — list_claude_tabs() builds its own fresh
         # connection, so a prior connect+refresh is wasted (~100-200ms/click).
@@ -4312,11 +4266,8 @@ async def get_tabs():
             if not sid:
                 continue
             title, _ = _summary_of(sid)
-            gr = _group_of(sid, groups)
             out.append({
                 "sid": sid,
-                "folder": gr.get("folder", ""),
-                "parent": gr.get("parent", ""),
                 "window_index": t.window_index,
                 "tab_index": t.tab_index,
                 "tab_name": t.name or "",                       # raw terminal tab name
@@ -6229,7 +6180,6 @@ async def get_iterm_tabs():
                 sid_by_iterm[r.iterm_session_id] = sid
     except Exception:
         pass
-    groups = _load_groups()
     for t in tabs:
         it = t.get("iterm_session_id")
         t["bound_to"] = bound_by_iterm.get(it)
@@ -6245,9 +6195,6 @@ async def get_iterm_tabs():
             t["sid"] = sid            # claude session id (bound OR live tab) → shown after the wN/tM label
             title, _ = _summary_of(sid)
             t["session_name"] = _user_name_of(sid) or title or ""
-            gr = _group_of(sid, groups)
-            t["folder"] = gr.get("folder", "")
-            t["parent"] = gr.get("parent", "")
     return {"tabs": tabs}
 
 
@@ -7780,77 +7727,6 @@ async def post_resume_cancel():
 @app.get("/api/sessions-snapshot/resume-status", dependencies=[Depends(require_token)])
 async def get_resume_status():
     return {"ok": True, **_resume_progress}
-
-
-class GroupPayload(BaseModel):
-    claude_session_id: str
-    folder: str = ""            # "" → ungrouped (and parent is cleared with it)
-    parent: str = ""            # sid to nest under; must be a root in the same folder
-
-
-@app.get("/api/groups", dependencies=[Depends(require_token)])
-async def get_groups():
-    return {"groups": _load_groups()}
-
-
-@app.post("/api/groups", dependencies=[Depends(require_token)])
-async def post_groups(payload: GroupPayload):
-    """Assign one session to a folder, optionally nested under another session.
-
-    Rejects rather than repairs, on purpose: a picker that silently moves other rows
-    around to make room for your choice is a picker you stop trusting. The three ways
-    this can be refused are all depth or containment:
-
-      * nesting under a session that is itself nested (depth stops at 2);
-      * nesting under a session in a different folder;
-      * turning a session that HAS children into a child (its children would exceed
-        the depth) — move or detach them first.
-    """
-    sid = payload.claude_session_id
-    if not sid:
-        raise HTTPException(status_code=400, detail="claude_session_id required")
-    g = _load_groups()
-    folder = payload.folder.strip()[:FOLDER_MAX]
-    parent = payload.parent.strip()
-    if parent:
-        if parent == sid:
-            raise HTTPException(status_code=400, detail="a session cannot be its own parent")
-        pg = g.get(parent) or {}
-        if pg.get("parent"):
-            raise HTTPException(status_code=400,
-                                detail="that session is already nested — depth stops at 2")
-        if not folder:
-            folder = pg.get("folder") or ""      # inherit, so the picker can send one value
-        elif pg.get("folder") and pg["folder"] != folder:
-            raise HTTPException(status_code=400, detail="parent is in a different folder")
-    if not folder:
-        g.pop(sid, None)                          # ungrouped → forget it entirely
-        # children of a session that just left keep their folder but lose the parent
-        for k, v in list(g.items()):
-            if v.get("parent") == sid:
-                g[k] = {"folder": v.get("folder", ""), "parent": ""}
-    else:
-        kids = [k for k, v in g.items() if v.get("parent") == sid]
-        if parent and kids:
-            raise HTTPException(
-                status_code=400,
-                detail=f"this session has {len(kids)} nested under it — depth stops at 2")
-        g[sid] = {"folder": folder, "parent": parent}
-        # a root that moved folder takes its children with it
-        if not parent:
-            for k in kids:
-                g[k] = {"folder": folder, "parent": sid}
-    _save_groups(g)
-    return {"ok": True, "groups": g}
-
-
-@app.get("/api/folders", dependencies=[Depends(require_token)])
-async def get_folders():
-    """Existing folder labels, most-used first — what the picker offers so you choose a
-    label instead of retyping one (two spellings of one folder is the failure mode)."""
-    import collections as _c
-    c = _c.Counter(v["folder"] for v in _load_groups().values() if v.get("folder"))
-    return {"folders": [f for f, _ in c.most_common()]}
 
 
 @app.get("/api/cwds", dependencies=[Depends(require_token)])
