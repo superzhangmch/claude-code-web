@@ -2225,6 +2225,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <div class="scr-cfg-row"><span>终端连接</span>
           <button id="picker-bridge-reset" class="btn" title="重连终端 (iTerm2 / tmux)。重启过 iTerm2 之后用这个,不用重启 cc-web">↻ reconnect</button>
         </div>
+        <!-- An entry point that does not depend on there being a battery. Tapping the
+             battery was the ONLY way in, so a machine without one (a cloud VM, a desktop)
+             could never open this at all — and on Linux there was no battery reading
+             either, which hid it on laptops too. -->
+        <div class="scr-cfg-row"><span>CPU / 内存</span>
+          <button id="picker-cpu" class="btn" title="CPU 与内存历史(最近 5 小时)">📈 history</button>
+        </div>
         <div class="scr-cfg-row"><span>整页刷新</span>
           <button id="picker-reload" class="btn" title="reload the whole page — pick up the latest UI after a deploy">↻ reload</button>
         </div>
@@ -5517,9 +5524,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       cpuChartEl.innerHTML = "<div style='padding:20px;color:#ff6a6a;font-size:12px'>error: " + e + "</div>";
     }
   }
-  batteryEl.addEventListener("click", () => {
-    cpuModal.classList.add("show");
-    loadCpuHistory();
+  const openCpuModal = () => { cpuModal.classList.add("show"); loadCpuHistory(); };
+  batteryEl.addEventListener("click", openCpuModal);
+  const pickerCpuBtn = document.getElementById("picker-cpu");
+  if (pickerCpuBtn) pickerCpuBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    document.getElementById("picker-cfg-menu").classList.remove("show");
+    openCpuModal();
   });
   document.getElementById("cpu-hide-all").addEventListener("click", () => {
     if (!_cpuData || !_cpuData.series) return;

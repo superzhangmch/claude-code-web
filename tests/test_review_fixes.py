@@ -129,9 +129,44 @@ def test_filter_entries():
     check("[medium] tool_result kept (not collapsed away)", 3 in med and "R" in text_of(med[3]))
 
 
+def test_cpu_view_cross_platform():
+    """The CPU/memory view was macOS-only by accident, in three stacked ways: the battery
+    was read with `pmset`, the ONLY way in was tapping that battery, and the sampler's
+    `ps` flags were macOS-specific. So a Linux laptop showed no battery, had no button,
+    and would have drawn an empty chart even if it had one."""
+    src = open(os.path.join(ROOT, "cc_web.py"), encoding="utf-8").read()
+    check("battery has a Linux reader, not only pmset",
+          "_read_battery_linux" in src and "power_supply" in src)
+    check("...picked by platform rather than assumed",
+          'sys.platform == "darwin" else _read_battery_linux' in src)
+    # `-r` means "sort by CPU" on macOS; Linux ps rejects the combination outright and
+    # returned zero rows, which is why the chart was empty rather than broken-looking.
+    sampler = src.split("_sample_top_cpu_processes")[1][:1200]
+    check("the sampler branches instead of using macOS-only ps flags everywhere",
+          "--sort=-pcpu" in sampler and "-Arwwo" in sampler and 'sys.platform == "darwin"' in sampler)
+    check("the system-process uid floor is per-platform (macOS 501+, Linux 1000+)",
+          "floor = 500 if sys.platform" in src and "else 1000" in src)
+
+    # And it actually produces rows on the machine running this suite.
+    top = cc._sample_top_cpu_processes(3)
+    check("sampling returns rows here", len(top) > 0)
+    check("...with every column the chart reads",
+          all({"pid", "uid", "cpu", "command", "is_system"} <= set(t) for t in top))
+    b = cc._get_battery()
+    check("battery reads as a dict or a clean None (never a crash)",
+          b is None or {"pct", "state", "on_ac", "charging"} <= set(b))
+
+    # A cloud VM and a desktop have no battery at all, so the way in must not be the
+    # battery. Both triggers go through one function.
+    html = open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8").read()
+    check("there is an entry point that is not the battery", 'id="picker-cpu"' in html)
+    check("...and both triggers open the same modal", html.count("openCpuModal") >= 3)
+
+
 if __name__ == "__main__":
     for t in (test_pid_cache, test_screen_delta, test_pending_confirm,
-              test_bridge_helpers, test_fs_allowed, test_filter_entries):
+              test_bridge_helpers, test_fs_allowed, test_filter_entries,
+              test_cpu_view_cross_platform):
         print(f"\n== {t.__name__} ==")
         t()
     print(f"\n{'ALL PASS' if not _fails else 'FAILURES: ' + ', '.join(_fails)}")

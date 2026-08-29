@@ -3804,7 +3804,11 @@ SYS_PATH_PREFIXES = ("/System/", "/usr/libexec/", "/usr/sbin/", "/sbin/",
 
 
 def _is_system_proc(uid: int, comm: str) -> bool:
-    return uid < 500 or comm.startswith(SYS_PATH_PREFIXES)
+    # The uid cutoff is per-platform: macOS gives real users 501+, Linux 1000+. With the
+    # macOS number on Linux every daemon in the 500-999 range read as a normal user
+    # process, which is exactly backwards for a list whose point is telling them apart.
+    floor = 500 if sys.platform == "darwin" else 1000
+    return uid < floor or comm.startswith(SYS_PATH_PREFIXES)
 
 
 def _sample_top_cpu_processes(n: int) -> list[dict]:
@@ -3813,10 +3817,12 @@ def _sample_top_cpu_processes(n: int) -> list[dict]:
     order. Excludes cc_web's own pid (it always shows up at the top
     because of the very sampler that's reading it — useless noise)."""
     try:
-        out = subprocess.run(
-            ["ps", "-Arwwo", "pid=,uid=,pcpu=,comm="],
-            capture_output=True, text=True, timeout=3,
-        ).stdout
+        # `-Arwwo` is macOS: there `-r` means "sort by CPU". Linux ps rejects the
+        # combination outright ("unsupported SysV option") and returned NOTHING, so the
+        # CPU history was silently empty on every Linux host. Same columns either way.
+        argv = (["ps", "-Arwwo", "pid=,uid=,pcpu=,comm="] if sys.platform == "darwin"
+                else ["ps", "-eo", "pid=,uid=,pcpu=,comm=", "--sort=-pcpu"])
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=3).stdout
     except Exception:
         return []
     self_pid = os.getpid()
@@ -4188,11 +4194,60 @@ def _read_battery_macos() -> Optional[dict]:
     }
 
 
+def _read_battery_linux() -> Optional[dict]:
+    """Battery from sysfs. The macOS path shells out to `pmset`, which does not exist
+    here, so Linux hosts reported no battery at all — and since the CPU/memory view is
+    opened by tapping the battery, a laptop running Linux had no way into it.
+
+    `Not charging` is its own state and not a mistake: with a charge threshold set (this
+    ThinkPad stops at ~85%) the machine sits on AC, full enough, charging nothing. Calling
+    that "discharging" would be wrong and "charging" would be a lie."""
+    base = Path("/sys/class/power_supply")
+    try:
+        bats = sorted(d for d in base.iterdir() if d.name.startswith("BAT"))
+    except OSError:
+        return None
+    if not bats:
+        return None
+    b = bats[0]
+
+    def _read(p: Path) -> str:
+        try:
+            return p.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    cap = _read(b / "capacity")
+    if not cap.isdigit():
+        return None
+    status = (_read(b / "status") or "unknown").lower()
+    on_ac = None
+    try:
+        for ac in base.iterdir():
+            if ac.name.startswith("BAT"):
+                continue
+            v = _read(ac / "online")
+            if v in ("0", "1"):
+                on_ac = (v == "1")
+                if on_ac:
+                    break
+    except OSError:
+        pass
+    if on_ac is None:
+        on_ac = status in ("charging", "full", "not charging")
+    return {
+        "pct": int(cap),
+        "state": status,                    # charging / discharging / full / not charging
+        "on_ac": bool(on_ac),
+        "charging": status == "charging",
+    }
+
+
 def _get_battery() -> Optional[dict]:
     now = _time.time()
     if now - _battery_cache["ts"] < BATTERY_CACHE_TTL_SEC:
         return _battery_cache["value"]
-    val = _read_battery_macos()
+    val = _read_battery_macos() if sys.platform == "darwin" else _read_battery_linux()
     _battery_cache["ts"] = now
     _battery_cache["value"] = val
     return val
