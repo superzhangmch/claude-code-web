@@ -3089,25 +3089,16 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     tabs = tabs.filter(t => t.sid);
     const banned = descendantsOf(sid, tabs);        // itself + its whole subtree
     const kids = childrenOf(sid, tabs);
-    const me = tabs.find(t => t.sid === sid);
     const single = new Set(tabs.map(t => t.window_index || 0)).size <= 1;
-    // Same shape as the lists: [tab-name] then the session name. A bare session name
-    // was ambiguous — several of them start with the same words, and the tab name is
-    // what tells you which one you are actually looking at.
-    const labelOf = (t) => {
-      const tn = stripTab(t.tab_name || t.name || "");
-      const sn = (t.session_name || "").trim();
-      return (tn ? "[" + clampU(tn, 16) + "] " : "") + clampU(sn || t.sid.slice(0, 8), 26);
-    };
-
-    document.getElementById("treedlg-title").textContent =
-      "把 " + (me ? labelOf(me) : sid.slice(0, 8)) + " 挂到谁下面?";
-    // Say the two things that are easy to get wrong before you tap, not after.
-    document.getElementById("treedlg-note").innerHTML =
-      (kids.length
-        ? "它带着 <b>" + kids.length + "</b> 个子 session 一起过去,仍然是它的子。<br>"
-        : "")
-      + "灰掉的是它自己和它的后代 —— 挂进去会成环,所以禁止。";
+    // Short title. Which session is being moved does not belong here: its own row is in
+    // the list below, greyed and marked "← 就是它自己", so the long label only pushed the
+    // choices off the screen on a phone.
+    document.getElementById("treedlg-title").textContent = "Choose parent node";
+    // Only the thing you cannot see for yourself. That the greyed rows are refused is
+    // already said by them being greyed; spelling it out was a sentence you read once
+    // and then had to skip past every time.
+    document.getElementById("treedlg-note").innerHTML = kids.length
+      ? "它带着 <b>" + kids.length + "</b> 个子 session 一起过去,仍然是它的子。" : "";
 
     const listEl = document.getElementById("treedlg-list");
     listEl.innerHTML = "";
@@ -3132,9 +3123,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
                        tabName: t.tab_name || t.name || "",
                        sessName: (t.session_name || "").trim(), sessBudget: 30 });
       if (no) {
-        const w = document.createElement("span"); w.className = "td-why";
-        w.textContent = isSelf ? "← 就是它自己" : "← 它的后代";
-        b.appendChild(w);
+        // Greyed says "not this one" on its own. The current session needs no label —
+        // it is the one you are sitting in. A descendant keeps a short hint, because
+        // "why is THAT one refused" is the question greying alone doesn't answer.
+        if (!isSelf) {
+          const w = document.createElement("span"); w.className = "td-why";
+          w.textContent = "← 它的后代";
+          b.appendChild(w);
+        }
         b.disabled = true;
       } else {
         b.addEventListener("click", async () => {
