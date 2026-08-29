@@ -161,6 +161,13 @@ def test_cpu_view_cross_platform():
     html = open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8").read()
     check("there is an entry point that is not the battery", 'id="picker-cpu"' in html)
     check("...and both triggers open the same modal", html.count("openCpuModal") >= 3)
+    # No battery must not mean no way in: the slot shows a chip instead. Hiding it was
+    # the original bug, so a test that only checked "renders when b exists" would miss it.
+    r = html.split("function renderBattery")[1][:900]
+    check("with no battery the slot stays visible and shows a chip",
+          'cpu-ico' in r and 'batteryEl.style.display = ""' in r.split("return;")[0])
+    check("...and the CSS draws that chip rather than setting a glyph",
+          "#battery .cpu-ico {" in html and "border: 1px solid currentColor" in html)
 
 
 if __name__ == "__main__":

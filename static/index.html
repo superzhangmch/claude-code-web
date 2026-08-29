@@ -483,6 +483,18 @@ header .battery:hover { color: var(--text); }
 #battery .batt-fill { height: 100%; background: currentColor; border-radius: 1px; }
 #battery.charging .batt-fill { background: #4ade80; }   /* green while charging */
 #battery .batt-pct { font: 8px ui-monospace, Menlo, monospace; }
+/* Shown instead of the battery on a machine that has none. Drawn — a square die inside
+   a square package — rather than set as a glyph: at 9px the same character renders at
+   different widths per platform and font, which is the reason the tree guides are drawn
+   too. */
+#battery .cpu-ico {
+  position: relative; width: 12px; height: 10px; box-sizing: border-box;
+  border: 1px solid currentColor; border-radius: 2px;
+}
+#battery .cpu-ico::after {
+  content: ""; position: absolute; inset: 2.5px;
+  border: 1px solid currentColor; border-radius: 1px;
+}
 /* Quick-switch tab bar (top of #main, both views). Left-packed; overflows off
    the right (overflow:hidden). Each tab restores instantly from cache. */
 /* #meta-stack holds [✕ close] [tab bar] [meta title] and is the ONLY shrinkable
@@ -5677,7 +5689,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // ---------- picker ----------
   function renderBattery(b) {
     if (!b || typeof b.pct !== "number") {
-      batteryEl.style.display = "none";
+      // No battery — a cloud VM, a desktop — but it still has a CPU and memory, and
+      // this element is the way into that view. So swap the icon instead of hiding the
+      // way in: a chip in place of the battery, same slot, same click.
+      batteryEl.classList.remove("low", "charging");
+      batteryEl.innerHTML = '<span class="cpu-ico"></span><span class="batt-pct">CPU</span>';
+      batteryEl.style.display = "";
+      batteryEl.title = "CPU / 内存 history";
       return;
     }
     // Horizontal battery icon (CSS) with the fill = charge level, and the % in
