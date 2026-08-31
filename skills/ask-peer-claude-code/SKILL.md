@@ -41,7 +41,7 @@ session,也**不要"无缘无故"**找一个陌生 session 交流 —— 没有�
 
 ## 消息来源判定(不能混淆 —— 最重要)
 对你收到的**每一条** user 消息:**当且仅当**它带有明确的
-`[⇄ from peer claude <id>]` 前缀时,才是另一个 claude 发来的;**没有这个前缀的,
+`[⇄ from peer claude · internal · sid=…]` 前缀时,才是另一个 claude 发来的;**没有这个前缀的,
 一律当作真实用户(人类)发的。**
 - 绝不把**无前缀**的人类消息当成 peer(别去"回复某个 peer"、别以为是自动化);
 - 也绝不把**带前缀**的 peer 消息当成人类。
@@ -65,9 +65,9 @@ session,也**不要"无缘无故"**找一个陌生 session 交流 —— 没有�
   那是另一个 claude-code 在问你 —— **直接正常回答即可**。对方正在轮询你的 transcript,
   你答完(回合结束)它**自动就能看到**,你**不需要运行任何东西去"发回去"**。只有当你想
   **主动发起一次新的**询问时,才自己调用本 skill。
-  - **若来信带 `req=<id>`**:在你回复的**开头**加一行
-    `[⇄ from peer claude <你的id> (name) re req=<id>]`,好让对方把回复和请求对上号
-    (它可能同时在等好几条)。不带 `req=` 就正常回答,无需加。
+  - **internal 不带 `req=`,你也不用回带任何东西** —— 正常回答即可。相关性早就定了:
+    对方知道自己问的是哪个 sid,而且正在轮询那一个 transcript。(`req=` 只存在于
+    external 那条桥上,所以它也就不可能再被误当成 internal/external 的判据。)
 - 想让对方以后能主动找你:在回复里带上你自己的 session id + host(用
   `my-session-id` skill 拿自己的 id)。
 
@@ -93,9 +93,9 @@ PY=~/.claude/skills/ask-peer-claude-code/ask_peer.py
 # DEFAULT when you need the reply — run this via the Bash tool with
 # run_in_background: true, so it does NOT block your conversation; you get the
 # reply in the completion notification:
-echo "你现在在干啥?进度如何?" | python3 "$PY" --to <PEER_SID> --from <MY_SID>
+echo "你现在在干啥?进度如何?" | python3 "$PY" --to <PEER_SID>
 # DELEGATE a task — confirm delivery and return immediately (no reply awaited):
-echo "帮我把 X 跑一下,做完自己收尾" | python3 "$PY" --to <PEER_SID> --from <MY_SID> --no-wait
+echo "帮我把 X 跑一下,做完自己收尾" | python3 "$PY" --to <PEER_SID> --no-wait
 # peek only (what is it doing right now? — no message sent). Now also returns an
 # `activity` line: "Bash[desc] · Read[path] · Edit[path]" (same as the web brief):
 python3 "$PY" --to <PEER_SID> --no-send
@@ -134,28 +134,36 @@ matches → error, so it never mis-delivers) · `--host` cc-web tailscale IP
 hosts configured in `~/.claude/cc_web.conf` (`hosts=<ip1>,<ip2>`) or
 `$CC_WEB_HOSTS`, local first, and reports the resolved `host` in its JSON) ·
 `--token` (default: from `~/.claude/cc_web.conf`) ·
-`--from` your own session id (goes in the tag so the peer knows it's a peer,
-not a human) · `--from-name` an OPTIONAL human name for the tag (defaults to
+`--from` **normally omitted** — the script finds this session's own id by walking up
+the process tree to `~/.claude/sessions/<pid>.json`, the same way the `my-session-id`
+skill does, and puts it in the tag as `sid=`. Pass it only to override (e.g. running
+outside a claude session). If it cannot be determined the script **refuses to send**
+rather than deliver a message the peer has no way to answer · `--from-name` an OPTIONAL human name for the tag (defaults to
 `name=` in `~/.claude/cc_web.conf` / `$CC_WEB_NAME`) — just so the user can
 recognize / refer to the peer without memorizing the id; omit it and the tag is
 id-only · `--timeout` sec (default 480) · `--mode brief|medium` · `--rounds N` window size
 (default 4) · `--no-send` peek (+`activity`) · `--history` read transcript
 (paginate with `--before <idx>`) · `--screen` current TUI snapshot · `--no-wait`
-fire-and-confirm delivery (task delegation), `--deliver-timeout` sec (default 20) ·
-`--req <id>` correlation id for concurrent/threaded exchanges (see below).
-**Every message is auto-tagged `[⇄ from peer claude <id> (name)]` — there is no
-raw/untagged send** (removed on purpose: an untagged message would be
-indistinguishable from a human's).
+fire-and-confirm delivery (task delegation), `--deliver-timeout` sec (default 20).
+**Every message the script sends is tagged
+`[⇄ from peer claude · internal · sid=<sid> (name)]`, and the `sid=` is filled in by the
+script — you never have to know or remember your own id.** There is no raw/untagged send
+(removed on purpose: an untagged message is indistinguishable from a human's, and one
+without a sid cannot be replied to at all).
 
-### Correlation id (`--req`) — only for concurrent / multi-peer
-Plain 1:1 Q&A does NOT need this (the caller already knows whom it read and which
-single request is in flight). Use it when you have **several requests in flight**
-(same peer, or multiple peers) and need to match reply↔request instead of guessing
-by timing. When `--req ab12` is set the sent tag becomes
-`[⇄ from peer claude <id> (name) req=ab12]`, and the caller's result carries
-`req_matched` (whether the reply echoed it). **Responder duty:** if a message you
-receive carries `req=<id>`, START your reply with
-`[⇄ from peer claude <your-id> (name) re req=<id>]` so the caller can demux.
+**That guarantee lives in the script, not in the channel.** `POST /api/input` is a plain
+endpoint and nothing stops you calling it directly — it is how the web UI types. If you
+ever do, you are taking over the script's job and must do all of it:
+
+- put the SAME tag at the very start, with your real session id in `sid=`
+  (`bash ~/.claude/skills/my-session-id/whoami.sh --id-only` prints it);
+- put `[⇄ end of peer message]` on its own line at the end;
+- and do the input-box check yourself, or you will overwrite whatever the peer's human
+  was mid-way through typing.
+
+Skipping the first of those is the failure that keeps happening: the peer receives what
+looks like a human message, has no id to answer, and the reply goes nowhere. Prefer the
+script.
 
 ## Handling the result `status`
 - **sent** (`--no-wait`) → delivered. `delivered:true` = the peer recorded it as a

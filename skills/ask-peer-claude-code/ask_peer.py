@@ -8,7 +8,7 @@ comes from cc-web's own `claude_idle` + `pending_confirm`. Nothing here scrolls
 or disturbs the peer beyond delivering the message.
 
 Usage:
-  ask_peer.py --to <SID> [--host IP] [--token T] [--from SID] [--req ID]
+  ask_peer.py --to <SID> [--host IP] [--token T]
               [--timeout SEC] [--mode brief|medium] [--rounds N]
               [--no-send] [--no-wait] [--history [--before IDX]] [--screen]
               [MESSAGE]
@@ -28,9 +28,9 @@ Read-only modes (no message sent):
 
 Output: one JSON object. status ∈
   done | pending_confirm | timeout | maybe_error | peek | sent | history | screen
-  (done/peek also carry `activity`; done carries `req`/`req_matched` if --req set.)
+  (done/peek also carry `activity`.)
 """
-import argparse, json, os, re, sys, time, urllib.request, urllib.error
+import argparse, json, os, re, subprocess, sys, time, urllib.request, urllib.error
 
 
 def _known_hosts():
@@ -59,6 +59,38 @@ def _conf_token():
     except Exception:
         pass
     return os.environ.get("CC_WEB_TOKEN", "")
+
+
+def _own_session_id() -> str:
+    """This session's own id, found the same way the my-session-id skill finds it: walk
+    up the process tree until a ~/.claude/sessions/<pid>.json turns up, and read its
+    sessionId.
+
+    Auto-detected rather than passed in, because `--from` used to be optional and a
+    forgotten one produced a tag with no id at all — a message the peer physically cannot
+    reply to (it has nothing to address). The caller can still override with --from; what
+    is gone is the silent path where nobody supplies it.
+    """
+    pid = os.getpid()
+    for _ in range(12):
+        f = os.path.expanduser(f"~/.claude/sessions/{pid}.json")
+        try:
+            with open(f, encoding="utf-8") as fh:
+                sid = (json.load(fh) or {}).get("sessionId") or ""
+            if sid:
+                return sid
+        except (OSError, ValueError):
+            pass
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                                 capture_output=True, text=True, timeout=3).stdout.strip()
+            nxt = int(out)
+        except Exception:
+            return ""
+        if nxt <= 1 or nxt == pid:
+            return ""
+        pid = nxt
+    return ""
 
 
 def _conf_name():
@@ -301,7 +333,10 @@ def main():
     ap.add_argument("--to", required=True)
     ap.add_argument("--host", default=None)
     ap.add_argument("--token", default=None)
-    ap.add_argument("--from", dest="frm", default="")
+    ap.add_argument("--from", dest="frm", default="",
+                    help="my own session id. Normally OMITTED — it is detected from the "
+                         "process tree; pass it only to override, e.g. when running "
+                         "outside a claude session.")
     ap.add_argument("--from-name", dest="frm_name", default=None,
                     help="human name in the tag (recipients recognize you without the id); "
                          "defaults to name= in ~/.claude/cc_web.conf or $CC_WEB_NAME")
@@ -318,10 +353,6 @@ def main():
     ap.add_argument("--screen", action="store_true",
                     help="read-only: return the peer's CURRENT TUI screen snapshot "
                          "(refresh=false → non-intrusive). Current view only, not history.")
-    ap.add_argument("--req", default=None,
-                    help="correlation id: tag gets 'req=<id>' and the peer is asked to echo "
-                         "'re req=<id>' so concurrent replies can be demuxed (see SKILL.md). "
-                         "Optional — 1:1 Q&A doesn't need it.")
     ap.add_argument("--no-send", action="store_true")
     ap.add_argument("--no-wait", action="store_true",
                     help="fire-and-confirm: send, confirm delivery (message landed "
@@ -428,23 +459,40 @@ def main():
     # ALWAYS tag peer messages. There is no untagged send: the receiving session
     # must be able to tell a peer relay from a real human, and the tag is the
     # only signal. (No --raw — see SKILL.md.)
-    # Tag: "[⇄ from peer claude <id8> (name)]". id and name are both OPTIONAL —
-    # name is just a human-friendly label (so the user recognizes the peer and
-    # can refer to it by name); when unset the tag is just the id (or bare).
+    # Tag: "[⇄ from peer claude · internal · sid=<sid> (name)]".
+    #
+    # `internal` is spelled out because the receiving side has to choose between two
+    # different reply mechanisms, and it used to have to infer which from the wording —
+    # "peer claude" versus "external peer session", differing at the third word, both
+    # starting "[⇄ from ". Worse, `req=` appears in BOTH kinds with different obligations
+    # (echo it in text vs pass it to reply_to_bridge.py), so the most eye-catching token
+    # in the tag was not a discriminator at all. Now the word itself says which.
+    #
+    # sid is MANDATORY and full-length, labelled so it cannot be read as anything else:
+    # it is the only thing that lets the peer answer, or reach back later. name stays
+    # optional — it is a human-friendly label, nothing depends on it.
+    sid = a.frm or _own_session_id()
+    if not sid:
+        # Refuse rather than send: a message with no sid is one the peer cannot answer.
+        print(json.dumps({"status": "error", "note":
+            "cannot determine my own session id (no ~/.claude/sessions/<pid>.json up the "
+            "process tree) — pass --from <my-session-id>. Not sending: without a sid the "
+            "peer has no way to reply."}, ensure_ascii=False))
+        return 2
     name = a.frm_name if a.frm_name is not None else _conf_name()
-    who = ""
-    if a.frm:
-        who += f" {a.frm[:8]}"
+    who = f" · internal · sid={sid}"
     if name:
         who += f" ({name})"
-    # Optional correlation id: when set, the peer is asked (see SKILL.md) to start
-    # its reply with "[⇄ from peer claude <own-id> (name) re req=<id>]" so a caller
-    # with several requests in flight can match reply↔request instead of guessing
-    # by timing. Omitted for plain 1:1 Q&A (the caller already knows which/whom).
-    req_tag = f" req={a.req}" if a.req else ""
+    # No correlation id on this channel. It existed for "several requests in flight to
+    # one peer", and cost a manual step the responder had to remember — echoing
+    # "re req=<id>" back in text — which is exactly the kind of step that gets skipped.
+    # Internal correlation is already settled without it: the caller knows which sid it
+    # asked and is polling that one transcript. And removing it deletes a whole class of
+    # confusion, because `req=` now appears in exactly ONE channel (the external bridge),
+    # so it can never again be mistaken for the internal/external discriminator.
     # Header tag + an explicit END marker, so the peer knows exactly where our
     # relayed text stops — anything AFTER the end marker is the human user, not us.
-    msg = f"[⇄ from peer claude{who}{req_tag}] {msg}\n[⇄ end of peer message]"
+    msg = f"[⇄ from peer claude{who}] {msg}\n[⇄ end of peer message]"
 
     # Don't clobber a human who is mid-typing: if the peer's input box holds real
     # typed text (ghost/placeholder excluded — see /api/input-state), wait it out
@@ -537,9 +585,6 @@ def main():
                        "elapsed": round(time.time() - t0, 1),
                        "since_idx": st.get("since_idx", baseline),
                        "note": note}
-                if a.req:
-                    out["req"] = a.req
-                    out["req_matched"] = (f"re req={a.req}" in reply)
                 print(json.dumps(out, ensure_ascii=False))
                 return
         else:
@@ -559,4 +604,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # `main()` bare meant every error path exited 0 — including the refusal to send an
+    # un-addressable message, which a caller (often a backgrounded Bash tool) then read
+    # as success. Existing paths return None and still exit 0; only the explicit codes
+    # now carry.
+    sys.exit(main() or 0)
