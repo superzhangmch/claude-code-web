@@ -1,14 +1,122 @@
 #!/bin/bash
-# ccsid — print THIS claude-code session's id (and copy to clipboard).
-# Works anywhere the shell is a descendant of a claude process:
-# inside a Bash tool call, or typed as `! ccsid` at the claude-code prompt.
-sid=$(bash ~/.claude/skills/my-session-id/whoami.sh --id-only) || {
+# ccsid — print THIS claude-code session's id, where to reach it, and what it is called.
+# Works anywhere the shell is a descendant of a claude process: inside a Bash tool call,
+# or typed as `! ccsid` at the claude-code prompt.
+#
+#   claude_code_session_id=<sid> at <tailnet-name>:<port>, tab_name=<name>
+#
+# The id alone was enough to paste into ask_peer.py, but not enough to hand to a person
+# or another machine: they still had to work out which host it lives on and what it is,
+# and "which of my fifteen sessions is b2738191" is not a question a bare uuid answers.
+# Everything after the id is best-effort and only printed when it is TRUE — see below.
+sid_line=$(bash ~/.claude/skills/my-session-id/whoami.sh) || {
     echo "ccsid: not inside a claude-code session (whoami.sh failed)" >&2
     exit 1
 }
-out="claude_code_session_id=$sid"
-printf '%s\n' "$out"
-if command -v pbcopy >/dev/null 2>&1; then
-    printf %s "$out" | pbcopy
-    echo "(copied to clipboard)"
+sid=$(awk '/^session_id/{print $3}' <<<"$sid_line")
+store=$(awk '/^store/{print $3}' <<<"$sid_line")
+[ -n "$sid" ] || { echo "ccsid: could not read the session id" >&2; exit 1; }
+
+# --- where to reach it -----------------------------------------------------------------
+# Printed ONLY when both halves are known: the tailnet DNS name (NOT the name
+# `tailscale status` prints — that is the admin-console display name and can differ, which
+# is how a cert once got signed for the wrong one) and the bind address + port a cc_web is
+# actually listening on, read from its own argv rather than assumed. If cc-web is not
+# running, or tailscale is not up, there IS no address, and printing an unreachable one is
+# worse than printing none — the id by itself still resolves via ask_peer's host search.
+TS=""
+for c in "$(command -v tailscale 2>/dev/null)" /usr/bin/tailscale /usr/local/bin/tailscale \
+         /Applications/Tailscale.app/Contents/MacOS/Tailscale; do
+    [ -n "$c" ] && [ -x "$c" ] && TS="$c" && break
+done
+host=""
+[ -n "$TS" ] && host=$("$TS" status --json 2>/dev/null | /usr/bin/python3 -c \
+    "import json,sys;print((json.load(sys.stdin).get('Self') or {}).get('DNSName','').rstrip('.'))" 2>/dev/null)
+# One pass, all three values off the SAME process: two independent passes could take
+# --host from one cc-web and --port from another when a second instance is running.
+# And `exit` fires only once a port was actually found — the first line matching both
+# patterns may be some other process, and exiting there would silently yield nothing.
+read -r bind port scheme <<<"$(ps -Ao args= 2>/dev/null | awk '
+    /\/uvicorn/ && /cc_web:app/ {
+        h = ""; p = ""; s = "http"
+        for (i = 1; i <= NF; i++) {
+            if      ($i == "--host")         h = $(i+1)
+            else if ($i == "--port")         p = $(i+1)
+            else if ($i == "--ssl-certfile") s = "https"    # not assumed: a plain-HTTP
+        }                                                  # instance would 000 forever
+        if (p != "") { print h, p, s; exit }
+    }')"
+# A wildcard bind is not a dialable address (measured: https://0.0.0.0:8443 -> 000).
+case "$bind" in ""|0.0.0.0|::|"*") apihost="127.0.0.1" ;; *) apihost="$bind" ;; esac
+
+# --- what this session is called -------------------------------------------------------
+# Ask the local cc-web, because that is the name the human is looking at. The store file
+# whoami.sh located also has a `name`, but it is a snapshot taken at startup and is usually
+# an auto-generated slug: measured on mac-pro, 14 of 15 sessions disagreed ("tmp-6d" in the
+# store vs "Hello" on the tab, "gen-spark-01" vs "llm-eval-SAS"). On the tmux boxes the two
+# mostly coincide, which is exactly why testing only there missed this. The store is kept
+# as the fallback for when cc-web is not running — a stale name beats no name.
+# Not cc-web's `name`/`session_name`: those are an LLM-written sentence, not a tab name.
+# What cc-web hands back on macOS is iTerm's `tab.title`: the manual "Edit Tab Title"
+# override where one was set, and iTerm's own derived title where it was not — which is
+# claude's OSC name plus the job, e.g. "Hello (claude)". So this field is "whatever the tab
+# is currently called", not "a name the user chose"; on the tmux boxes it is the window name.
+name=""
+if [ -n "$port" ]; then
+    name=$(/usr/bin/python3 - "$sid" "$scheme://$apihost:$port" <<'PY' 2>/dev/null
+import json, re, ssl, sys, urllib.request, pathlib
+sid, base = sys.argv[1], sys.argv[2]
+tok = ""
+try:
+    for line in (pathlib.Path.home()/".claude/cc_web.conf").read_text().splitlines():
+        if line.startswith("token="):
+            tok = line.split("=", 1)[1].strip(); break
+except OSError:
+    pass
+ctx = ssl.create_default_context()                      # self-signed cert on purpose
+ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+r = urllib.request.Request(base + "/api/tabs")
+r.add_header("Authorization", "Bearer " + tok)
+tabs = json.load(urllib.request.urlopen(r, timeout=4, context=ctx)).get("tabs", [])
+print(next(t.get("tab_name") or "" for t in tabs if t.get("sid") == sid))
+PY
+)
 fi
+# Fall back to the store's startup snapshot ONLY when there is no cc-web to ask. If one IS
+# running and the lookup still failed (bad token, sid not in its list), a snapshot name is
+# exactly the failure being fixed here — it would print an authoritative-looking line
+# carrying a name like "tmp-6d" for a tab called "Hello". No name is the honest answer.
+if [ -z "$name" ] && [ -z "$port" ] && [ -n "$store" ] && [ -f "$store" ]; then
+    name=$(/usr/bin/python3 -c \
+        "import json,sys;print((json.load(open(sys.argv[1])).get('name') or '').strip())" "$store" 2>/dev/null)
+fi
+# Strip the decoration either source may carry: the leading activity glyph, and the
+# ` (claude)` / ` (caffeinate)` suffix a terminal tab title picks up from its job. Also
+# fold any inner whitespace — a tab title is free text and a newline in it would print a
+# THIRD line, breaking the two-line shape the second line's whole purpose depends on.
+[ -n "$name" ] && name=$(/usr/bin/python3 -c '
+import re, sys
+n = re.sub(r"^[\s⠀-⣿✳✻✽✢✣✱●○◍•·]+", "", sys.argv[1])
+n = re.sub(r"\s*\((?:claude|caffeinate)\)\s*$", "", n)
+print(re.sub(r"\s+", " ", n).strip())' "$name" 2>/dev/null)
+
+out="claude_code_session_id=$sid"
+[ -n "$host" ] && [ -n "$port" ] && out="$out at $host:$port"
+[ -n "$name" ] && out="$out, tab_name=$name"
+printf '%s\n' "$out"
+
+# Clipboard, where there is one. pbcopy is macOS; the Linux boxes have X or Wayland tools,
+# and on a headless ssh session none of them exist — the guard covers that.
+for cp in pbcopy wl-copy "xclip -selection clipboard" xsel; do
+    set -- $cp
+    if command -v "$1" >/dev/null 2>&1; then
+        printf %s "$out" | "$@" >/dev/null 2>&1
+        break
+    fi
+done
+
+# Exactly two lines, and this is the second one. Typed as `! ccsid` at the claude prompt
+# this stdout is the ONLY thing the model sees, so it is also the only place to ask it for
+# silence. Measured: `!` commands bypass UserPromptSubmit hooks entirely and even a
+# zero-output one draws a reply, so the turn cannot be prevented — only kept short.
+echo "(no reply to this)"

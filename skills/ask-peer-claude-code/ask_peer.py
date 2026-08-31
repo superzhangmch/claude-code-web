@@ -268,7 +268,22 @@ def _user_texts(state):
 
 
 def _assistant_text(state):
-    """Concatenate assistant (non-system) text from the transcript delta."""
+    """Concatenate assistant (non-system) text from the transcript delta, OLDEST FIRST.
+
+    Two things about that ordering, both of which have already bitten:
+
+    1. **Only pass it a delta.** On a `--rounds` window it returns several unrelated
+       answers glued together and the caller reads the lot as "the reply". That is what a
+       peek used to do — 3.0KB of a 3.4KB response, most of it older than the question
+       being asked (fixed: peeks use _last_assistant_text). The three remaining callers
+       all read `state(since=baseline)`, where baseline was taken BEFORE our message went
+       out, so everything in it was produced in answer to us.
+    2. **Never clamp this from the end.** Oldest-first means the tail is the NEWEST text,
+       so `reply[:N]` keeps the least relevant part and drops the answer. (`_ERR_RE` is
+       deliberately matched against `reply[-400:]` for the same reason — the error, if
+       any, is at the new end.) If you want less text, take the last entry, don't cut the
+       string.
+    """
     out = []
     for e in state.get("transcript", []):
         if e.get("_system"):

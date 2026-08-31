@@ -119,16 +119,39 @@ bash ~/.claude/skills/my-session-id/whoami.sh --id-only  # just the id
 
 ### `ccsid` — one-shot session-id command
 
-`ccsid` is a tiny convenience wrapper around `whoami.sh --id-only`: it prints
-`claude_code_session_id=<id>` and copies it to the clipboard (macOS `pbcopy`).
-Run it inside any Bash tool call, or as `! ccsid` at the claude-code prompt,
-to grab the current session's id (e.g. to open it in `cc_web`).
+`ccsid` prints one line naming this session, where to reach it and what it is
+called, in the same shape cc-web uses, and copies it to the clipboard (`pbcopy`
+on macOS, `wl-copy`/`xclip`/`xsel` on Linux). Run it inside any Bash tool call,
+or as `! ccsid` at the claude-code prompt.
+
+Put it on PATH as a **symlink**, not a copy. A copy is how one host silently kept
+printing the old bare-uuid line long after every `skills/` tree had been updated:
+the file being maintained and the file being run were not the same file.
 
 ```sh
-cp skills/my-session-id/ccsid ~/.local/bin/ccsid && chmod +x ~/.local/bin/ccsid
+mkdir -p ~/.local/bin
+ln -sfn ~/.claude/skills/my-session-id/ccsid ~/.local/bin/ccsid
 # then, inside a claude-code session:
-ccsid            # -> claude_code_session_id=<id>  (also copied to clipboard)
+ccsid
+# -> claude_code_session_id=d4289270-...-5866b0237486 at host.tailnet.ts.net:8443, tab_name=cc-web
+#    (no reply to this)
 ```
+
+Two lines, and only the first goes to the clipboard.
+
+Everything after the id is best-effort and printed only when true: the tailnet
+**DNSName** (not the admin-console display name — they differ), and the port read
+from a running cc-web's own argv. `tab_name` is asked of the **local cc-web**, so
+it is the name the human is looking at. The store file also carries a `name`, but
+it is a startup snapshot and usually an auto-slug — on mac-pro 14 of 15 sessions
+disagreed (`tmp-6d` in the store vs `Hello` on the tab) — so it serves only as
+the fallback for when cc-web is down. No cc-web or no tailscale → no address, since
+the id alone still resolves via `ask_peer`'s host search.
+
+That last line is aimed at the model, not at you. Typed as `! ccsid`, this stdout
+is the only thing the model sees — and a `!` command **always** costs a turn
+(measured: `!` bypasses `UserPromptSubmit` hooks entirely, and even a zero-output
+one draws a reply), so the turn cannot be prevented, only kept short.
 
 It depends on the `my-session-id` skill being installed at
 `~/.claude/skills/my-session-id/`.
