@@ -23,7 +23,7 @@ tags in your reply.
 
 The tag now SAYS which:
 
-    [⇄ from peer claude · internal · sid=<sid> (name)]   →  INTERNAL
+    [⇄ from peer claude · internal · sid=<id8> (name)]   →  INTERNAL
     [⇄ from external peer session — <who>]               →  EXTERNAL
 
 Read that word and nothing else. The two used to differ only in wording — "peer claude"
@@ -48,7 +48,7 @@ nothing about this one.
 An older sender may still produce `[⇄ from peer claude <id8> (name)]` with no `internal`
 in it. That is INTERNAL too — the word was added later.
 
-## INTERNAL — `[⇄ from peer claude · internal · sid=<sid> (name)]`
+## INTERNAL — `[⇄ from peer claude · internal · sid=<id8> (name)]`
 
 One of the owner's own sessions. Just answer normally in your terminal — the asker reads
 your reply from your transcript. Help fully.

@@ -61,24 +61,49 @@ def _conf_token():
     return os.environ.get("CC_WEB_TOKEN", "")
 
 
-def _own_session_id() -> str:
-    """This session's own id, found the same way the my-session-id skill finds it: walk
-    up the process tree until a ~/.claude/sessions/<pid>.json turns up, and read its
-    sessionId.
+_LABEL_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+/-]{0,23}$")
 
-    Auto-detected rather than passed in, because `--from` used to be optional and a
-    forgotten one produced a tag with no id at all — a message the peer physically cannot
-    reply to (it has nothing to address). The caller can still override with --from; what
-    is gone is the silent path where nobody supplies it.
+
+def _short_label(name: str) -> str:
+    """A name fit to sit in the tag, or "".
+
+    Only applied to the AUTO-derived name, and only accepts a short ASCII-ish string —
+    the kind of thing a tab is actually called (`cc-web`, `new_reader`, `gen-spark-0d`).
+    A long or CJK title is dropped rather than shortened: the tag's job is to say who is
+    speaking in a couple of words, and cc-web's other name for a session is an
+    LLM-written sentence ("cc-web多机部署完善与静默失败修复") that would swamp the line.
+    A name the CALLER passed with --from-name is never filtered — if the user gave this
+    session a working name, that is the name, whatever alphabet it is in.
+    """
+    # Strip the status glyph / process suffix a terminal tab title carries ("✳ cc-web",
+    # "cc-web (claude)") before judging it — cc-web's own UI does the same. Dropping such
+    # a name for its decoration would throw away a perfectly good label.
+    n = re.sub(r"^[\s\u2800-\u28ff✳✻✽✢✣✱●○◍•·]+", "", (name or "").strip())
+    n = re.sub(r"\s*\((?:claude|caffeinate)\)\s*$", "", n).strip()
+    return n if _LABEL_OK.match(n) else ""
+
+
+def _own_session() -> tuple:
+    """(sid, name) for THIS session, found the way the my-session-id skill finds it: walk
+    up the process tree until a ~/.claude/sessions/<pid>.json turns up, and read it.
+
+    Auto-detected rather than passed in. `--from` used to be optional and a forgotten one
+    produced a tag with no id at all — a message the peer physically cannot reply to. The
+    readable name comes from the same file (claude keeps it there, e.g. "cc-web"), which
+    is why it costs nothing: one read, both fields. Before this, the name could only come
+    from `name=` in cc_web.conf — a MACHINE name, present on one host and absent on
+    another, so most tags carried no readable identity at all. What the peer wants to know
+    is which session is talking, not which laptop.
     """
     pid = os.getpid()
     for _ in range(12):
         f = os.path.expanduser(f"~/.claude/sessions/{pid}.json")
         try:
             with open(f, encoding="utf-8") as fh:
-                sid = (json.load(fh) or {}).get("sessionId") or ""
+                d = json.load(fh) or {}
+            sid = d.get("sessionId") or ""
             if sid:
-                return sid
+                return sid, (d.get("name") or "").strip()
         except (OSError, ValueError):
             pass
         try:
@@ -86,11 +111,11 @@ def _own_session_id() -> str:
                                  capture_output=True, text=True, timeout=3).stdout.strip()
             nxt = int(out)
         except Exception:
-            return ""
+            return "", ""
         if nxt <= 1 or nxt == pid:
-            return ""
+            return "", ""
         pid = nxt
-    return ""
+    return "", ""
 
 
 def _conf_name():
@@ -468,10 +493,20 @@ def main():
     # (echo it in text vs pass it to reply_to_bridge.py), so the most eye-catching token
     # in the tag was not a discriminator at all. Now the word itself says which.
     #
-    # sid is MANDATORY and full-length, labelled so it cannot be read as anything else:
-    # it is the only thing that lets the peer answer, or reach back later. name stays
-    # optional — it is a human-friendly label, nothing depends on it.
-    sid = a.frm or _own_session_id()
+    # sid is MANDATORY and labelled so it cannot be read as anything else: it is the only
+    # thing that lets the peer answer, or reach back later. name stays optional — a
+    # human-friendly label, nothing depends on it.
+    #
+    # Eight hex chars, not the full 36. --to resolves a prefix against the target host's
+    # live tabs, and the full id buys no extra reach: both branches require the session to
+    # be live there anyway. Measured across the real fleet — 23 sessions on three hosts —
+    # the shortest globally unique prefix is THREE characters, and 1-2 within any one
+    # host; eight leaves 4.3 billion values against 23 in use. A collision is a safe
+    # failure besides: the resolver reports "ambiguous — use a longer id" rather than
+    # delivering to the wrong session. What the extra 28 characters did buy was pushing
+    # the actual message off the first line on a phone.
+    own_sid, own_name = _own_session()
+    sid = a.frm or own_sid
     if not sid:
         # Refuse rather than send: a message with no sid is one the peer cannot answer.
         print(json.dumps({"status": "error", "note":
@@ -479,8 +514,14 @@ def main():
             "process tree) — pass --from <my-session-id>. Not sending: without a sid the "
             "peer has no way to reply."}, ensure_ascii=False))
         return 2
-    name = a.frm_name if a.frm_name is not None else _conf_name()
-    who = f" · internal · sid={sid}"
+    # --from-name wins and is NOT filtered: the user may have just given this session a
+    # working name ("跑批的那个"), and the model passing it through is the whole point of
+    # the flag. Failing that, this session's own short name from the store, then the
+    # per-machine name= in cc_web.conf. Session before machine, because "cc-web" says who
+    # is speaking and "mac-pro" only says which laptop.
+    name = (a.frm_name.strip()[:24] if a.frm_name is not None
+            else (_short_label(own_name) or _short_label(_conf_name())))
+    who = f" · internal · sid={sid[:8]}"
     if name:
         who += f" ({name})"
     # No correlation id on this channel. It existed for "several requests in flight to

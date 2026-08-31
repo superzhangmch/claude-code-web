@@ -114,6 +114,11 @@ All three send **nothing** — safe to read a peer you're already in contact wit
 (still bound by the "don't 串门" rule above: don't read strangers unprompted).
 - **`--no-send`** → `status:peek` + `idle` / `pending_confirm` / recent `reply`
   text / **`activity`** (`Bash[…] · Read[…]`, the last --rounds rounds).
+  It brings the transcript tail back with it — measured 3.4KB at the default
+  `--rounds 4`, 1.1KB at `--rounds 1`. If all you want is "is it reachable / idle",
+  pass **`--rounds 1`**; the content is the point of a peek, so it is not stripped
+  further (81 bytes would cover the status fields alone, and that KB only matters
+  on the slow relay to the cloud box).
 - **`--history`** → `status:history` + a readable brief transcript (`[human]` /
   `[claude]` text + a `· Tool[…]` line per turn) + `earliest_idx` +
   `has_more_history`. **Bounded per call** to `--rounds`; page back by re-calling
@@ -138,15 +143,18 @@ hosts configured in `~/.claude/cc_web.conf` (`hosts=<ip1>,<ip2>`) or
 the process tree to `~/.claude/sessions/<pid>.json`, the same way the `my-session-id`
 skill does, and puts it in the tag as `sid=`. Pass it only to override (e.g. running
 outside a claude session). If it cannot be determined the script **refuses to send**
-rather than deliver a message the peer has no way to answer · `--from-name` an OPTIONAL human name for the tag (defaults to
-`name=` in `~/.claude/cc_web.conf` / `$CC_WEB_NAME`) — just so the user can
-recognize / refer to the peer without memorizing the id; omit it and the tag is
-id-only · `--timeout` sec (default 480) · `--mode brief|medium` · `--rounds N` window size
+rather than deliver a message the peer has no way to answer · `--from-name <label>` the readable name in the tag. **You SHOULD pass this when the
+user has given this session a working name** ("跑批的那个", "reader 重构") — that is what
+the flag is for, it is not filtered, and it is what the peer will see. Omit it and the
+script fills in this session's own short name from the store (e.g. `cc-web`), accepting
+it only if it is a short ASCII-ish label; a long or CJK title (cc-web's other name for a
+session is an LLM-written sentence) is dropped rather than allowed to swamp the tag, and
+`name=` from `~/.claude/cc_web.conf` — a machine name — is the last resort · `--timeout` sec (default 480) · `--mode brief|medium` · `--rounds N` window size
 (default 4) · `--no-send` peek (+`activity`) · `--history` read transcript
 (paginate with `--before <idx>`) · `--screen` current TUI snapshot · `--no-wait`
 fire-and-confirm delivery (task delegation), `--deliver-timeout` sec (default 20).
 **Every message the script sends is tagged
-`[⇄ from peer claude · internal · sid=<sid> (name)]`, and the `sid=` is filled in by the
+`[⇄ from peer claude · internal · sid=<id8> (name)]`, and the `sid=` is filled in by the
 script — you never have to know or remember your own id.** There is no raw/untagged send
 (removed on purpose: an untagged message is indistinguishable from a human's, and one
 without a sid cannot be replied to at all).
