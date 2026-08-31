@@ -112,13 +112,13 @@ python3 "$PY" --to <PEER_SID> --host <IP> --no-send
 ### Read-only modes (peek / history / screen)
 All three send **nothing** — safe to read a peer you're already in contact with
 (still bound by the "don't 串门" rule above: don't read strangers unprompted).
-- **`--no-send`** → `status:peek` + `idle` / `pending_confirm` / recent `reply`
-  text / **`activity`** (`Bash[…] · Read[…]`, the last --rounds rounds).
-  It brings the transcript tail back with it — measured 3.4KB at the default
-  `--rounds 4`, 1.1KB at `--rounds 1`. If all you want is "is it reachable / idle",
-  pass **`--rounds 1`**; the content is the point of a peek, so it is not stripped
-  further (81 bytes would cover the status fields alone, and that KB only matters
-  on the slow relay to the cloud box).
+- **`--no-send`** → `status:peek` + `idle` / `pending_confirm` / **`activity`**
+  (`Bash[…] · Read[…]` over the last --rounds rounds) / `reply` = the peer's **most
+  recent** answer only. Reading further back is `--history`'s job, so the peek does
+  not duplicate it: it used to concatenate every answer in the window, which was 3.0
+  of its 3.4KB and mostly older than the question you were asking. ~0.8KB now, and
+  **leave `--rounds` alone** — it still widens the useful `activity` trail while the
+  `reply` stays one answer either way.
 - **`--history`** → `status:history` + a readable brief transcript (`[human]` /
   `[claude]` text + a `· Tool[…]` line per turn) + `earliest_idx` +
   `has_more_history`. **Bounded per call** to `--rounds`; page back by re-calling

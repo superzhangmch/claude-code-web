@@ -289,6 +289,36 @@ def _assistant_text(state):
     return "\n\n".join(out)
 
 
+def _last_assistant_text(state):
+    """Just the peer's MOST RECENT answer.
+
+    What a peek is for is "what is it doing / what did it just say", and
+    _assistant_text() concatenates every answer in the --rounds window, oldest first —
+    3.0KB of the 3.4KB a default peek returned, most of it older than the question being
+    asked. Worse, oldest-first means a naive length clamp would cut the NEWEST text.
+    Reading several rounds back already has its own mode (--history, with paging), so a
+    peek duplicating it bought nothing and cost the most on the slowest link.
+    """
+    last = ""
+    for e in state.get("transcript", []):
+        if e.get("_system"):
+            continue
+        m = e.get("message") or {}
+        if (e.get("type") or m.get("role")) != "assistant":
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            t = c
+        elif isinstance(c, list):
+            t = "\n".join(b.get("text", "") for b in c
+                           if isinstance(b, dict) and b.get("type") == "text")
+        else:
+            t = ""
+        if t.strip():
+            last = t.strip()
+    return last
+
+
 def _entry_text(e):
     c = (e.get("message") or {}).get("content")
     if isinstance(c, str):
@@ -475,7 +505,10 @@ def main():
                           "pending_confirm": st0.get("pending_confirm"),
                           "since_idx": baseline,
                           "activity": _activity(st0),
-                          "reply": _assistant_text(st0)}, ensure_ascii=False))
+                          # last answer only — see _last_assistant_text. The `done` path
+                          # keeps the full concatenation: there it is the reply to OUR
+                          # message, and all of it is the answer.
+                          "reply": _last_assistant_text(st0)}, ensure_ascii=False))
         return
 
     msg = a.message
