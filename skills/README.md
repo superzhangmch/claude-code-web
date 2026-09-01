@@ -155,3 +155,46 @@ one draws a reply), so the turn cannot be prevented, only kept short.
 
 It depends on the `my-session-id` skill being installed at
 `~/.claude/skills/my-session-id/`.
+
+### `codexsid` — the same thing for a codex session
+
+`codexsid` prints a codex session's own thread id, where to reach it, and its name:
+
+```sh
+codexsid
+# -> codex_session=01a05d35-… at host.tailnet.ts.net:8444, with tab_name=tmp4
+```
+
+It works differently from `ccsid` because codex keeps no per-pid store file. What it
+does have is better: the pane id is in the environment of every command it runs
+(`$TMUX_PANE`, inherited), and cc-web already answers "which session is in this
+pane" — so this asks cc-web instead of re-implementing the lookup. That also means
+it needs cc-web's codex instance running, and it says so plainly when it is not.
+
+### Talking across agents
+
+Both directions work through the same `ask_peer.py`. cc-web runs one instance per
+agent (claude on 8443, codex on 8444, same code, `CC_WEB_AGENT` switches it), and
+ask_peer tries both ports, so a session id is enough — you do not have to know which
+agent it belongs to.
+
+The tag says which kind of agent is speaking:
+
+```
+[⇄ from peer claude · internal · sid=d4289270 (cc-web)]
+[⇄ from peer codex  · internal · sid=01a05d35 (tmp4)]
+```
+
+Not decoration: a codex thread id and a claude session id are addressed by different
+tooling, so a reply aimed at the wrong kind goes nowhere. `--from-agent` states it;
+left off, it is inferred from the sender's own id (codex ids are UUIDv7, claude's v4).
+
+The codex side of the convention lives in `AGENTS.codex.md`, deployed to
+`~/.codex/AGENTS.md` — codex loads that file globally (verified). It carries the same
+rules the claude skill does, including the one that matters most: default to NOT
+contacting anyone, and never bypass the script to poke the HTTP API directly, which
+would overwrite whatever the peer was half-way through typing and arrive without the
+tag that tells them it is not a human.
+
+Measured end to end, both ways: claude → codex 9.1s, codex → claude 254s (codex is
+slower on these boxes), each with the right tag and a real answer.

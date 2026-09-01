@@ -542,7 +542,7 @@ class ItermBridge:
             cur = contents.cursor_coord
             line = contents.line(cur.y).string.replace("\x00", " ")
             pre = line[:cur.x].lstrip()
-            if pre[:1] in ("❯", ">"):
+            if pre[:1] in ("❯", ">", "›"):   # ❯ claude, › codex
                 pre = pre[1:]
             return pre.strip()
         except Exception:

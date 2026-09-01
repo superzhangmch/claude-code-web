@@ -262,7 +262,11 @@ class TmuxBridge:
         if not (0 <= cy < len(lines)):
             return ""
         pre = lines[cy][:cx].lstrip()
-        if pre[:1] in ("❯", ">"):        # drop the prompt glyph if present
+        # claude draws its composer prompt with ❯, codex with › (U+203A). Not stripping
+        # codex's meant its bare prompt glyph was reported as text the human had typed,
+        # so /api/input-state said "busy" forever and ask-peer waited out its full
+        # two-minute don't-interrupt timer before every send.
+        if pre[:1] in ("❯", ">", "›"):   # drop the prompt glyph if present
             pre = pre[1:]
         return pre.strip()
 

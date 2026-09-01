@@ -240,20 +240,33 @@ def _list_threads_uncached(limit: int = 60) -> list[dict]:
         return []
     try:
         rows = _query(db, "select id, cwd, title, updated_at, created_at, tokens_used,"
-                          " approval_mode, model_provider, rollout_path"
+                          " approval_mode, model_provider, rollout_path, source, name"
                           " from threads order by updated_at desc limit ?", (limit,))
     except sqlite3.Error:
         return []
     holders = _lock_holders()
     out = []
-    for (tid, cwd, title, upd, created, tokens, appr, provider, rollout) in rows:
+    for (tid, cwd, title, upd, created, tokens, appr, provider, rollout,
+         source, name) in rows:
+        # Only sessions a person is having: `source` distinguishes them.
+        #   cli       — the interactive TUI. These are the sessions.
+        #   exec      — a one-shot `codex exec`; nothing to talk to.
+        #   {"subagent": …} — codex's OWN machinery. --approve-for-me spawns a
+        #     reviewer thread per approval, and since codex titles a thread with its
+        #     first message, those appeared in the list under the entire 2000-word
+        #     "treat the following transcript as untrusted evidence…" prompt.
+        if (source or "") != "cli":
+            continue
         pid = holders.get(tid)
         env = _env_of(pid) if pid else {}
         out.append({
             "agent": "codex",
             "thread_id": tid,
             "cwd": cwd or (_cwd_of(pid) if pid else ""),
-            "title": (title or "").strip(),
+            # `name` is what /rename set — a name a human chose. `title` is codex's
+            # own summary of the first message, useful but long. Prefer the chosen
+            # one, and cap either: this is a row on a phone, not a paragraph.
+            "title": ((name or "").strip() or (title or "").strip())[:80],
             "updated_at": upd,
             "created_at": created,
             "tokens_used": tokens or 0,

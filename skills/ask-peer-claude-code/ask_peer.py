@@ -412,6 +412,10 @@ def main():
                     help="my own session id. Normally OMITTED — it is detected from the "
                          "process tree; pass it only to override, e.g. when running "
                          "outside a claude session.")
+    ap.add_argument("--from-agent", dest="frm_agent", default=None,
+                    choices=("claude", "codex"),
+                    help="which kind of agent is sending (default: inferred from the "
+                         "sender's own session id — codex ids are UUIDv7, claude's v4)")
     ap.add_argument("--from-name", dest="frm_name", default=None,
                     help="human name in the tag (recipients recognize you without the id); "
                          "defaults to name= in ~/.claude/cc_web.conf or $CC_WEB_NAME")
@@ -586,7 +590,14 @@ def main():
     # so it can never again be mistaken for the internal/external discriminator.
     # Header tag + an explicit END marker, so the peer knows exactly where our
     # relayed text stops — anything AFTER the end marker is the human user, not us.
-    msg = f"[⇄ from peer claude{who}] {msg}\n[⇄ end of peer message]"
+    # Which kind of agent is speaking. cc-web now serves claude and codex sessions
+    # side by side, and the receiver's next move depends on which: a codex thread id
+    # is addressed with different tooling than a claude session id, so "from peer
+    # claude" on a message actually sent by codex would send a reply to the wrong
+    # place. Derived from the sender's own id when not stated: codex thread ids are
+    # UUIDv7 (version nibble 7), claude's are v4.
+    kind = a.frm_agent or ("codex" if (len(sid) > 14 and sid[14] == "7") else "claude")
+    msg = f"[⇄ from peer {kind}{who}] {msg}\n[⇄ end of peer message]"
 
     # Don't clobber a human who is mid-typing: if the peer's input box holds real
     # typed text (ghost/placeholder excluded — see /api/input-state), wait it out

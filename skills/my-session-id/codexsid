@@ -1,0 +1,92 @@
+#!/bin/bash
+# codexsid — print THIS codex session's thread id, where to reach it, and its name.
+#
+#   codex_session=<thread-id> at <tailnet-name>:<port>, with tab_name=<name>
+#
+# The claude counterpart (ccsid) walks up the process tree to find its own claude
+# process and reads claude's per-pid store. codex writes no such file, but it does
+# something better: the pane id is in the ENVIRONMENT of every command it runs
+# ($TMUX_PANE, inherited), and cc-web already answers "which session is in this
+# pane". So this asks cc-web rather than re-implementing the lookup — one source of
+# truth, and it keeps working when codex changes where it keeps its state.
+#
+# Run it from inside a codex session (its exec tool, or `!` in a shell it spawned).
+set -u
+
+if [ -z "${TMUX_PANE:-}" ]; then
+    echo "codexsid: no \$TMUX_PANE in the environment — run this from inside a codex" >&2
+    echo "          session that was started in tmux (that is how the pane is known)" >&2
+    exit 1
+fi
+
+CONF="$HOME/.claude/cc_web.conf"
+TOKEN=$(awk -F= '/^token=/{gsub(/[ \r]/, "", $2); print $2}' "$CONF" 2>/dev/null)
+[ -n "$TOKEN" ] || { echo "codexsid: no token= in $CONF" >&2; exit 1; }
+
+# The codex instance of cc-web: same code as the claude one, CC_WEB_AGENT=codex, its
+# own port. Read the host and port from the running process rather than assuming
+# 8444 — the `exit` inside the match, not after it, because the first line matching
+# both patterns can be some other process.
+_argv=$(ps -Ao args= 2>/dev/null)
+read -r HOST PORT <<<"$(awk '
+    /\/uvicorn/ && /cc_web:app/ {
+        h = ""; p = ""
+        for (i = 1; i <= NF; i++) {
+            if      ($i == "--host") h = $(i+1)
+            else if ($i == "--port") p = $(i+1)
+        }
+        if (p != "") { print h, p; exit }
+    }' <<<"$_argv" | head -1)"
+# Prefer the instance whose agent is codex: there are two, and only one knows about
+# codex threads. Try each port that is listening until one answers with agent=codex.
+PORTS=$(awk '/\/uvicorn/ && /cc_web:app/ { for (i=1;i<=NF;i++) if ($i=="--port") print $(i+1) }' <<<"$_argv")
+
+found=""
+for p in $PORTS; do
+    who=$(curl -sk -m 5 -H "Authorization: Bearer $TOKEN" \
+              "https://${HOST:-127.0.0.1}:$p/api/server-info" 2>/dev/null)
+    case "$who" in *'"agent":"codex"'*) found="$p"; break ;; esac
+done
+[ -n "$found" ] || { echo "codexsid: no cc-web instance serving codex is running" >&2; exit 1; }
+
+# /api/iterm-tabs, not /api/tabs: the session list does not carry the pane (its rows
+# are shaped for the UI), while the terminal view is pane-indexed and annotates which
+# pane holds which session — exactly the lookup needed here.
+out=$(curl -sk -m 8 -H "Authorization: Bearer $TOKEN" \
+          "https://${HOST:-127.0.0.1}:$found/api/iterm-tabs" 2>/dev/null | /usr/bin/python3 -c '
+import json, sys, os
+pane = os.environ.get("TMUX_PANE", "")
+try:
+    tabs = json.load(sys.stdin).get("tabs", [])
+except Exception:
+    sys.exit(1)
+for t in tabs:
+    if t.get("iterm_session_id") == pane and (t.get("sid") or ""):
+        print(t["sid"], (t.get("session_name") or t.get("name") or "").strip())
+        sys.exit(0)
+sys.exit(2)
+')
+rc=$?
+if [ $rc -ne 0 ] || [ -z "$out" ]; then
+    echo "codexsid: cc-web knows no codex session in pane $TMUX_PANE" >&2
+    echo "          (a session that has never exchanged a message is listed under a" >&2
+    echo "           pending id — say something to it first)" >&2
+    exit 1
+fi
+SID=${out%% *}
+NAME=${out#* }
+
+# The tailnet DNS name, not the display name `tailscale status` prints — those differ,
+# which is how a cert once got signed for the wrong one.
+TS=""
+for c in "$(command -v tailscale 2>/dev/null)" /usr/bin/tailscale /usr/local/bin/tailscale; do
+    [ -n "$c" ] && [ -x "$c" ] && TS="$c" && break
+done
+DNS=""
+[ -n "$TS" ] && DNS=$("$TS" status --json 2>/dev/null | /usr/bin/python3 -c \
+    "import json,sys;print((json.load(sys.stdin).get('Self') or {}).get('DNSName','').rstrip('.'))" 2>/dev/null)
+
+line="codex_session=$SID"
+[ -n "$DNS" ] && line="$line at $DNS:$found"
+[ -n "$NAME" ] && [ "$NAME" != "$SID" ] && line="$line, with tab_name=$NAME"
+printf '%s\n' "$line"

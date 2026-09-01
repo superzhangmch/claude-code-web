@@ -1478,7 +1478,7 @@ def _screen_tail(screen: str, context: int = 7) -> str:
         j = i + 1
         while j < len(lines) and not lines[j].strip():
             j += 1
-        if j < len(lines) and lines[j].lstrip()[:1] in ("❯", ">"):
+        if j < len(lines) and lines[j].lstrip()[:1] in ("❯", ">", "›"):
             top = i
             break
     out = lines[-context:] if top < 0 else lines[max(0, top - context):]
@@ -1503,7 +1503,7 @@ def _strip_prompt_box(lines: list[str]) -> list[str]:
         j = i + 1
         while j < n and not lines[j].strip():
             j += 1
-        if j >= n or lines[j].lstrip()[:1] not in ("❯", ">"):
+        if j >= n or lines[j].lstrip()[:1] not in ("❯", ">", "›"):
             continue
         k = j + 1
         while k < n and not _is_dash_run(lines[k]):
