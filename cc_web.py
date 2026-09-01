@@ -1149,7 +1149,9 @@ class Binding:
     pid: int
     pid_start: float
     cwd: str
-    jsonl_path: Path
+    jsonl_path: Optional[Path]     # None until claude writes the transcript: a tab left
+                                   # sitting at the prompt has no <sid>.jsonl yet, and is
+                                   # bindable anyway (see _try_autobind / post_attach).
     window_index: int = 0
     tab_index: int = 0
     bound_at: float = field(default_factory=_time.time)
@@ -4811,6 +4813,16 @@ async def post_attach(payload: AttachPayload):
 
     jsonl = find_jsonl_for_session(sid)
     if jsonl is None:
+        # No transcript yet — a tab that was opened and left at the prompt. It is a real,
+        # running session: the tab LIST is built from claude's own pid↔session store, which
+        # is exactly why such a tab shows up (t15 "Claude Code", cwd known) and then refused
+        # to open with "unknown session_id". Everything below this line only exists to GUESS
+        # which tab a sid belongs to from transcript fingerprints; the store already knows,
+        # so ask it instead of 404ing. The transcript view fills in by itself once claude
+        # writes the file (/api/state re-resolves jsonl_path).
+        b = await _try_autobind(sid)
+        if b is not None:
+            return {"result": "bound", "binding": _serialize_binding(b)}
         raise HTTPException(status_code=404, detail="unknown session_id")
 
     target_cwd = _project_path_from_jsonl(jsonl)
@@ -5303,9 +5315,11 @@ async def _try_autobind(sid: str):
     LLM guessing. Returns the Binding, or None if the session isn't clearly
     running. Lets /api/input, /api/state, /api/screen, … work without a prior
     explicit /api/attach (pid↔sid is now reliable, so attach is optional)."""
+    # A missing transcript is NOT a missing session: claude writes <sid>.jsonl on the
+    # first exchange, so a tab opened and left at the prompt has none. The binding needs
+    # none of it — it is built from the pid↔session store below — and Binding.jsonl_path
+    # is Optional, with /api/state re-resolving it the moment the file appears.
     jsonl = find_jsonl_for_session(sid)
-    if jsonl is None:
-        return None
     try:
         await bridge.ensure_connected()
         refs = await bridge.list_claude_tabs()
