@@ -154,6 +154,52 @@ def _cwd_of(pid: int) -> str:
         return ""
 
 
+PENDING_PREFIX = "pending-pane-"
+
+
+def live_codex_processes() -> list[dict]:
+    """Running codex TUIs, as [{pid, pane, cwd}].
+
+    Needed because codex inserts a thread row only on the FIRST exchange, so a
+    tab you just opened exists nowhere in its state — the list would be empty
+    while a codex prompt sits there waiting. Same shape of trap as a freshly
+    opened claude tab being listed-but-unattachable, and with the same cost: on a
+    phone you cannot send the first message any other way.
+
+    Matched on argv rather than process name: the npm wrapper is `node …/codex`
+    and the real work happens in a vendored binary under @openai/codex-*, so both
+    forms have to count, and the pane comes from the inherited TMUX_PANE."""
+    procs: dict[str, dict] = {}
+    if not Path("/proc").is_dir():
+        return []
+    for pdir in Path("/proc").iterdir():
+        if not pdir.name.isdigit():
+            continue
+        try:
+            argv = (pdir / "cmdline").read_bytes().decode("utf-8", "replace").split("\0")
+        except OSError:
+            continue
+        argv = [a for a in argv if a]
+        if not argv:
+            continue
+        joined = " ".join(argv)
+        looks_like_codex = ("@openai/codex" in joined
+                           or any(a.rstrip("/").endswith("/codex") for a in argv[:2]))
+        if not looks_like_codex:
+            continue
+        pid = int(pdir.name)
+        env = _env_of(pid)
+        pane = env.get("TMUX_PANE", "")
+        if not pane:
+            continue                      # no pane → nothing we could type into
+        # One entry per pane: the wrapper and the vendored binary share it, and the
+        # child (deeper pid) is the one actually running the session.
+        prev = procs.get(pane)
+        if prev is None or pid > prev["pid"]:
+            procs[pane] = {"pid": pid, "pane": pane, "cwd": _cwd_of(pid)}
+    return list(procs.values())
+
+
 def list_threads(limit: int = 60) -> list[dict]:
     """Sessions, newest first. `live` distinguishes a running TUI from a finished
     session — and a finished one is exactly what `codex resume` takes, so the
@@ -186,6 +232,21 @@ def list_threads(limit: int = 60) -> list[dict]:
             "pid": pid,
             "pane": env.get("TMUX_PANE", ""),
             "live": pid is not None,
+        })
+    # Sessions that exist only as a running process — a codex tab opened and left
+    # at its prompt. They get a synthetic id (there is no thread id to use yet)
+    # and can be read (screen) and typed into; the moment the first message lands,
+    # codex writes a real thread and the real row takes over.
+    known_panes = {r["pane"] for r in out if r["pane"]}
+    for p in live_codex_processes():
+        if p["pane"] in known_panes:
+            continue
+        out.insert(0, {
+            "agent": "codex", "thread_id": PENDING_PREFIX + p["pane"].lstrip("%"),
+            "cwd": p["cwd"], "title": "(new codex session)", "updated_at": int(time.time()),
+            "created_at": None, "tokens_used": 0, "approval_mode": "",
+            "model_provider": "", "rollout_path": "", "pid": p["pid"],
+            "pane": p["pane"], "live": True, "pending": True,
         })
     return out
 
@@ -376,18 +437,63 @@ def _exec_env() -> dict:
     return env
 
 
-def send_message(thread_id: str, text: str, timeout: float = 30.0) -> dict:
+def type_into_pane(pane: str, text: str, timeout: float = 10.0) -> dict:
+    """Type a message into a terminal pane and press Enter.
+
+    The fallback for the one thing `codex queue` cannot do: a session that has
+    never had an exchange has no rollout, and queue addresses threads through the
+    rollout store — so the FIRST message to a freshly opened codex tab has to go
+    the way a human's would. `send-keys -l` sends the text literally (no key-name
+    interpretation), and Enter is a separate keystroke so a trailing newline in
+    the message cannot submit early or split it in two."""
+    if not pane or not text.strip():
+        return {"ok": False, "error": "pane and text required"}
+    # Ctrl+U first, as its own keystroke: whatever was half-typed in the composer
+    # would otherwise be prefixed to our message and submitted as one line
+    # ("helloReply with exactly: …" — seen). cc_web's claude path clears the same
+    # way and for the same reason; a control character mixed into the -l payload
+    # would be typed literally instead of acted on.
+    try:
+        for i, args in enumerate((["tmux", "send-keys", "-t", pane, "C-u"],
+                                  ["tmux", "send-keys", "-t", pane, "-l", text],
+                                  ["tmux", "send-keys", "-t", pane, "Enter"])):
+            if i == 2:
+                # The TUI needs a beat to take the text before it will act on a
+                # Return: sent back-to-back, the message landed in the composer and
+                # just sat there — typed, unsent, and no thread ever created. cc_web
+                # spaces claude's keystrokes for the same reason.
+                time.sleep(0.45)
+            elif i:
+                time.sleep(0.1)
+            r = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True,
+                               text=True, timeout=timeout)
+            if r.returncode != 0:
+                return {"ok": False, "error": (r.stderr or "").strip() or f"exit {r.returncode}"}
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {"ok": True, "method": "keys"}
+
+
+def send_message(thread_id: str, text: str, timeout: float = 30.0,
+                 pane: str = "") -> dict:
     """Queue a message into a session. `codex queue` returns as soon as the
     message is recorded; a live TUI picks it up and runs it.
 
     stdin is closed deliberately. codex's non-interactive commands READ stdin and
     append it to the prompt — a heredoc's leftovers ended up inside a prompt
     while this was being written — so anything we invoke gets /dev/null."""
+    if not thread_id or not text.strip():
+        return {"ok": False, "error": "thread_id and text required"}
+    if thread_id.startswith(PENDING_PREFIX):
+        # No thread exists yet, so there is nothing for `codex queue` to address:
+        # this session is only a process at a prompt. Typing is the whole path.
+        if not pane:
+            return {"ok": False, "reason": "no_rollout",
+                    "error": "session has not started a thread yet and no pane is known"}
+        return type_into_pane(pane, text)
     exe = codex_bin()
     if exe is None:
         return {"ok": False, "error": "codex not installed"}
-    if not thread_id or not text.strip():
-        return {"ok": False, "error": "thread_id and text required"}
     try:
         r = subprocess.run([exe, "queue", "--thread", thread_id, "--message", text],
                            stdin=subprocess.DEVNULL, capture_output=True,
@@ -397,11 +503,21 @@ def send_message(thread_id: str, text: str, timeout: float = 30.0) -> dict:
     out = (r.stdout or "").strip()
     err = (r.stderr or "").strip()
     if r.returncode != 0:
-        # The one failure worth naming: a thread with no rollout yet cannot be
-        # queued to. That is the same "no transcript until the first exchange"
-        # trap that made freshly opened claude tabs unopenable in cc_web.
+        # A thread with no rollout yet cannot be queued to — the same "no
+        # transcript until the first exchange" trap that made freshly opened
+        # claude tabs unopenable in cc_web. Unlike there, we have a way through:
+        # the session is running in a pane, so type the first message into it and
+        # every later one can go through queue.
         no_rollout = "no rollout found" in err.lower()
+        if no_rollout and pane:
+            k = type_into_pane(pane, text)
+            if k.get("ok"):
+                return {"ok": True, "method": "keys", "queued_id": ""}
+            return {"ok": False, "reason": "no_rollout",
+                    "error": f"queue: no rollout yet; typing into {pane} also failed: "
+                             f"{k.get('error', '')}"}
         return {"ok": False, "error": err or out or f"exit {r.returncode}",
                 "reason": "no_rollout" if no_rollout else "error"}
     m = re.search(r"Queued message (\S+)", out)
-    return {"ok": True, "queued_id": m.group(1) if m else "", "stdout": out}
+    return {"ok": True, "method": "queue", "queued_id": m.group(1) if m else "",
+            "stdout": out}

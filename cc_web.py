@@ -3646,30 +3646,41 @@ async def lifespan(app: FastAPI):
     # claude pid is still alive (so an attached tab keeps showing "Enter" across
     # a cc_web restart instead of reverting to "Attach"). Filesystem-only, safe
     # to run synchronously here.
-    try:
+    # Everything below this point is claude machinery: it binds claude tabs, walks
+    # claude transcripts, and can SEND KEYS to them. A codex instance must run none
+    # of it — not as an optimisation but because the leak goes both ways: left on,
+    # it attached a live claude session into cc_web_bindings.codex.json and the
+    # codex UI offered that session as its own (the report that found this).
+    if IS_CODEX:
+        cpu_task = asyncio.create_task(_cpu_sampler_loop())    # a fact about the machine
+        reaper_task = apierr_task = snap_task = None
+        log.info("codex instance: claude bridge, binding reaper, snapshots and "
+                 "summaries stay off")
+    else:
+      try:
         kept = bindings.load_persisted()
         if kept:
             log.info("restored %d binding(s) from %s", kept, BINDINGS_FILE)
-    except Exception as e:
+      except Exception as e:
         log.info("binding restore failed: %s", e)
-    # Fire-and-forget the initial connect. When launched by launchd, iTerm2
-    # may pop a "Allow this script to control iTerm?" dialog that no one will
-    # click — synchronously awaiting connect there hangs startup forever.
-    # ensure_connected will retry lazily on the first real request.
-    asyncio.create_task(_bg_initial_connect())
-    reaper_task = asyncio.create_task(_binding_reaper(30.0))
-    cpu_task = asyncio.create_task(_cpu_sampler_loop())
-    apierr_task = asyncio.create_task(_api_error_watcher(180.0))
-    snap_task = (asyncio.create_task(_snapshot_autosave(SNAPSHOT_AUTO_MIN * 60.0))
-                 if SNAPSHOT_AUTO_MIN > 0 else None)
-    if snap_task:
+      # Fire-and-forget the initial connect. When launched by launchd, iTerm2
+      # may pop a "Allow this script to control iTerm?" dialog that no one will
+      # click — synchronously awaiting connect there hangs startup forever.
+      # ensure_connected will retry lazily on the first real request.
+      asyncio.create_task(_bg_initial_connect())
+      reaper_task = asyncio.create_task(_binding_reaper(30.0))
+      cpu_task = asyncio.create_task(_cpu_sampler_loop())
+      apierr_task = asyncio.create_task(_api_error_watcher(180.0))
+      snap_task = (asyncio.create_task(_snapshot_autosave(SNAPSHOT_AUTO_MIN * 60.0))
+                   if SNAPSHOT_AUTO_MIN > 0 else None)
+      if snap_task:
         log.info("session snapshot: auto-save every %g min", SNAPSHOT_AUTO_MIN)
-    # Session-summary generator: independent daemon thread (does blocking file
-    # reads + litellm calls, so it stays off the event loop).
-    _load_summaries()
-    _load_user_names()
-    threading.Thread(target=_summary_worker, name="cc-web-summaries",
-                     daemon=True).start()
+      # Session-summary generator: independent daemon thread (does blocking file
+      # reads + litellm calls, so it stays off the event loop).
+      _load_summaries()
+      _load_user_names()
+      threading.Thread(target=_summary_worker, name="cc-web-summaries",
+                       daemon=True).start()
     try:
         yield
     finally:
@@ -6259,7 +6270,7 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
     the lightweight 'tail screen' peek passes refresh=false to avoid
     disturbing the tab on every click."""
     if IS_CODEX:
-        return await _codex_screen(claude_session_id)
+        return await _codex_screen(claude_session_id, tail, ver)
     b = bindings.get_by_session(claude_session_id)
     if b is None:
         b = await _try_autobind(claude_session_id)   # alive-but-unbound → auto-bind (ground truth)
@@ -6349,6 +6360,8 @@ async def get_iterm_tabs():
     annotated with `bound_to` = the claude_session_id currently bound to it via
     the normal session→tab flow (if any live binding), so the viewer can skip
     the per-tab reverse-attach button for already-bound tabs."""
+    if IS_CODEX:
+        return {"tabs": await _codex_panes()}
     try:
         tabs = await bridge.list_all_tabs()
     except Exception as e:
@@ -8200,19 +8213,37 @@ async def _codex_state(thread_id: str, since_idx: Optional[int],
 
 
 async def _codex_input(thread_id: str, text: str) -> dict:
-    """/api/input for codex: `codex queue`, not keystrokes."""
+    """/api/input for codex: `codex queue` where it works, keystrokes where it can't.
+
+    The thread is resolved FIRST. Without that, a session id this instance does not
+    serve — a `#s=` left in a URL from the claude instance, say — went straight to
+    `codex queue`, and the user got a raw JSON-RPC error about a thread store they
+    have never heard of. An unknown id is a 404, as anywhere else.
+
+    The keystroke fallback covers the first message to a session that has no
+    rollout yet: queue addresses threads through the rollout store, so until an
+    exchange exists the only door is the pane the session is running in."""
     import codex_backend
-    r = await asyncio.to_thread(codex_backend.send_message, thread_id, text)
+    t = await asyncio.to_thread(_codex_shim().find_thread, thread_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="unknown session_id")
+    r = await asyncio.to_thread(codex_backend.send_message, thread_id, text,
+                                30.0, t.get("pane") or "")
     if not r.get("ok"):
-        # 409 = the peer session's own state (a thread with no rollout yet cannot
-        # be addressed), not a fault here.
+        # 409 = the peer session's own state (no rollout, and no pane to type
+        # into), not a fault of ours.
         code = 409 if r.get("reason") == "no_rollout" else 502
         raise HTTPException(status_code=code, detail=r.get("error", "queue failed"))
-    return {"ok": True, "queued_id": r.get("queued_id", "")}
+    return {"ok": True, "queued_id": r.get("queued_id", ""), "method": r.get("method", "")}
 
 
-async def _codex_screen(thread_id: str) -> dict:
-    """/api/screen for codex, via the pane the process inherited (TMUX_PANE)."""
+async def _codex_screen(thread_id: str, tail: int = 0, ver: str = "") -> dict:
+    """/api/screen for codex, via the pane the process inherited (TMUX_PANE).
+
+    Returns the SAME shape the client already knows — {full, ver} or {same, ver} —
+    not a friendlier-looking {screen}. It got {screen} first, and the tail view sat
+    empty while the request returned 200: applyScreenJson/tailScreen read `full`,
+    `same` and `ver`, and treat anything else as a base mismatch to retry forever."""
     t = await asyncio.to_thread(_codex_shim().find_thread, thread_id)
     if t is None:
         raise HTTPException(status_code=404, detail="unknown session_id")
@@ -8222,7 +8253,53 @@ async def _codex_screen(thread_id: str) -> dict:
     out = await asyncio.to_thread(
         subprocess.run, ["tmux", "capture-pane", "-p", "-t", pane],
         capture_output=True, text=True, timeout=10)
-    return {"screen": out.stdout, "agent": AGENT}
+    text = out.stdout or ""
+    if tail and tail > 0:
+        lines = text.split("\n")
+        text = "\n".join(lines[-(tail + 10):])
+    cur = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+    if ver and ver == cur:
+        return {"same": True, "ver": cur}
+    return {"full": text, "ver": cur, "agent": AGENT}
+
+
+async def _codex_panes() -> list[dict]:
+    """The terminal-browser view for a codex instance: panes, annotated with which
+    ones are codex sessions.
+
+    The claude branch cannot be reused here even though it "works": it enumerates
+    CLAUDE tabs and hands back their session ids, so a codex instance was offering
+    claude sessions to attach to — the same cross-agent leak that put a claude sid
+    into this instance's bindings file. A pane list is agent-neutral; the
+    annotation is not, so it is computed from codex's own state."""
+    r = await asyncio.to_thread(
+        subprocess.run,
+        ["tmux", "list-panes", "-a", "-F",
+         "#{pane_id}\t#{window_index}\t#{pane_index}\t#{pane_current_command}\t#{pane_title}"],
+        capture_output=True, text=True, timeout=10)
+    if r.returncode != 0:
+        raise HTTPException(status_code=503, detail=f"tmux: {(r.stderr or '').strip()}")
+    threads = await asyncio.to_thread(_codex_shim().threads_as_tabs, 60, True)
+    by_pane = {t["pane"]: t for t in threads if t.get("pane")}
+    out = []
+    for line in (r.stdout or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 5:
+            continue
+        pane, win, idx, cmd, title = parts[:5]
+        t = by_pane.get(pane)
+        out.append({
+            "iterm_session_id": pane,
+            "name": title or cmd,
+            "window_index": int(win) if win.isdigit() else 0,
+            "tab_index": int(idx) if idx.isdigit() else 0,
+            "is_claude": t is not None,     # "is an agent session" in this UI
+            "bound_to": t["sid"] if t else None,
+            "sid": t["sid"] if t else "",
+            "session_name": t["tab_name"] if t else "",
+            "parent": "",
+        })
+    return out
 
 
 async def _codex_attach(thread_id: str) -> dict:

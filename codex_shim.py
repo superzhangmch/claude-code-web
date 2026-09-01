@@ -116,7 +116,24 @@ def threads_as_sessions(limit: int = 80) -> list[dict]:
 
 
 def find_thread(thread_id: str) -> Optional[dict]:
-    return next((t for t in codex.list_threads(200) if t["thread_id"] == thread_id), None)
+    """A thread by id, and a PENDING id by the pane it stands for.
+
+    A session with no thread yet is listed under a synthetic `pending-pane-%N`.
+    The moment its first message lands, codex writes a real thread and the
+    synthetic id would go dead — leaving whoever is looking at that URL stranded
+    on a session that just came alive. So a pending id also resolves to whatever
+    real thread now occupies that pane."""
+    threads = codex.list_threads(200)
+    hit = next((t for t in threads if t["thread_id"] == thread_id), None)
+    if hit is not None and not hit.get("pending"):
+        return hit
+    if thread_id.startswith(codex.PENDING_PREFIX):
+        pane = "%" + thread_id[len(codex.PENDING_PREFIX):]
+        real = next((t for t in threads
+                     if t.get("pane") == pane and not t.get("pending")), None)
+        if real is not None:
+            return real
+    return hit
 
 
 # ---------------------------------------------------------------------------

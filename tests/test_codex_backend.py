@@ -167,6 +167,12 @@ async def main():
         rp = build_fixture(home, ROLLOUT)
 
         print("=== the session list ===")
+        # Process scanning is machine-wide by nature (it reads /proc), so a real
+        # codex running on this box would inject itself into a fixture-only list
+        # and break the ordering assertions below. Stub it out here and test it
+        # deliberately further down.
+        _real_procs = cx.live_codex_processes
+        cx.live_codex_processes = lambda: []
         check("available() sees the fixture", cx.available() is True)
         ts = cx.list_threads()
         ids = [t["thread_id"] for t in ts]
@@ -241,6 +247,61 @@ async def main():
               cx.send_message("", "hi")["ok"] is False)
         check("whitespace-only text is refused",
               cx.send_message("live-thread", "   ")["ok"] is False)
+
+        cx.live_codex_processes = _real_procs
+
+        print("=== a session that has no thread yet ===")
+        # codex writes a thread row only on the FIRST exchange, so a tab you just
+        # opened exists nowhere in its state. Left out of the list, it could not be
+        # talked to at all from a phone — you cannot send a first message to a
+        # session you cannot see.
+        real = {"pane": "%7", "thread_id": "real-thread"}
+        cx_list = cx.list_threads
+        cx.list_threads = lambda limit=60: [
+            {"agent": "codex", "thread_id": cx.PENDING_PREFIX + "9", "cwd": "/w",
+             "title": "(new codex session)", "updated_at": 1, "created_at": None,
+             "tokens_used": 0, "approval_mode": "", "model_provider": "",
+             "rollout_path": "", "pid": 5, "pane": "%9", "live": True, "pending": True},
+            {"agent": "codex", "thread_id": "real-thread", "cwd": "/w", "title": "t",
+             "updated_at": 2, "created_at": None, "tokens_used": 1, "approval_mode": "",
+             "model_provider": "", "rollout_path": "", "pid": 6, "pane": "%7",
+             "live": True},
+        ]
+        try:
+            import codex_shim as shim
+            check("a pending session resolves by its own id",
+                  (shim.find_thread(cx.PENDING_PREFIX + "9") or {}).get("pending") is True)
+            check("a pending id whose pane now has a REAL thread follows it there",
+                  (shim.find_thread(cx.PENDING_PREFIX + "7") or {}).get("thread_id")
+                  == "real-thread",
+                  str(shim.find_thread(cx.PENDING_PREFIX + "7")))
+            check("a pending session is listed as a tab (so it can be opened)",
+                  any(t["sid"].startswith(cx.PENDING_PREFIX) for t in shim.threads_as_tabs()))
+            check("queueing a pending id is refused when there is no pane",
+                  cx.send_message(cx.PENDING_PREFIX + "9", "hi", pane="")["ok"] is False)
+        finally:
+            cx.list_threads = cx_list
+
+        print("=== typing into a pane: clear, type, THEN submit ===")
+        calls = []
+        real_run = cx.subprocess.run
+        class R:
+            returncode = 0; stdout = ""; stderr = ""
+        cx.subprocess.run = lambda args, **kw: (calls.append(args), R())[1]
+        real_sleep = cx.time.sleep
+        cx.time.sleep = lambda s: None
+        try:
+            r = cx.type_into_pane("%9", "hello there")
+        finally:
+            cx.subprocess.run = real_run
+            cx.time.sleep = real_sleep
+        check("it succeeds", r.get("ok") is True and r.get("method") == "keys", str(r))
+        check("three keystrokes: C-u, the literal text, Enter",
+              [c[-1] for c in calls] == ["C-u", "hello there", "Enter"], str(calls))
+        check("the text goes through -l so it is typed, not interpreted",
+              "-l" in calls[1] and "-l" not in calls[0] and "-l" not in calls[2], str(calls))
+        check("Enter is its own keystroke, not appended to the text",
+              "\n" not in calls[1][-1], repr(calls[1][-1]))
 
         print("=== the PATH the child gets ===")
         # `codex` is a `#!/usr/bin/env node` script and cc_web runs as a systemd
