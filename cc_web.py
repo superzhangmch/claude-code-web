@@ -59,7 +59,45 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("ccweb")
 
 STATIC_DIR = Path(__file__).parent / "static"
-SESSION_INDEX_PATH = Path.home() / ".claude" / "session_index.json"
+
+# ---------- which agent this instance serves ----------
+# One codebase, one frontend, one instance per agent: `CC_WEB_AGENT=codex` on a
+# second port serves the SAME UI backed by codex sessions. The default is claude,
+# and on that default every switch added for codex is a dead branch — the claude
+# paths are not merely preserved, nothing new is even entered.
+#
+# Two instances must not share state, so every file cc_web writes is suffixed for
+# a non-default agent. Without that they would fight over cc_web_bindings.json
+# exactly as two claude instances would — which is what the instance lock exists
+# to prevent, so that lock is per-agent too.
+AGENT = (os.environ.get("CC_WEB_AGENT") or "claude").strip().lower()
+_A = "" if AGENT == "claude" else f".{AGENT}"
+IS_CODEX = AGENT == "codex"
+
+
+def _state_path(name: str) -> Path:
+    """~/.claude/<stem><.agent><suffix>: cc_web_bindings.json for claude,
+    cc_web_bindings.codex.json for a codex instance."""
+    p = Path(name)
+    return Path.home() / ".claude" / f"{p.stem}{_A}{p.suffix}"
+
+
+_codex_shim_mod = None
+
+
+def _codex_shim():
+    """Imported on FIRST USE, and only ever by a codex instance — never at module
+    scope. A claude instance therefore cannot be affected by anything in
+    codex_shim, not even an import error, which is the property that matters more
+    than the few milliseconds saved."""
+    global _codex_shim_mod
+    if _codex_shim_mod is None:
+        import codex_shim
+        _codex_shim_mod = codex_shim
+    return _codex_shim_mod
+
+
+SESSION_INDEX_PATH = _state_path("session_index.json")
 PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 # claude-code's OWN per-process state, written by each running `claude`:
 #   ~/.claude/sessions/<pid>.json = {pid, sessionId, cwd, procStart, status,
@@ -1160,7 +1198,7 @@ class Binding:
 # Bindings persist here so they survive a cc_web restart (otherwise every
 # deploy/kickstart wipes them and every attached tab reverts to "Attach").
 # Lives in ~/.claude (NOT under ~/Desktop — launchd can't read TCC dirs).
-BINDINGS_FILE = Path.home() / ".claude" / "cc_web_bindings.json"
+BINDINGS_FILE = _state_path("cc_web_bindings.json")
 
 # ---------- the session tree ----------
 # {child_sid: parent_sid}. One field, because that is all a forest needs: a session with
@@ -1172,7 +1210,7 @@ BINDINGS_FILE = Path.home() / ".claude" / "cc_web_bindings.json"
 # for where that lesson came from), and NOTHING else writes this file: the name shown in
 # the lists is mostly LLM-generated and gets regenerated as a conversation moves, so a
 # structure encoded in names would evaporate.
-TREE_FILE = Path.home() / ".claude" / "cc_web_tree.json"
+TREE_FILE = _state_path("cc_web_tree.json")
 
 
 def _load_tree() -> dict:
@@ -3152,7 +3190,7 @@ async def _bg_initial_connect() -> None:
 # to cc_web_summaries.json (atomic). The in-memory dict is shared with the async
 # request handlers (which only READ it), so a lock guards every access. The
 # thread is the ONLY writer.
-SUMMARIES_FILE = Path.home() / ".claude" / "cc_web_summaries.json"
+SUMMARIES_FILE = _state_path("cc_web_summaries.json")
 SUMMARY_MODEL = "claude-sonnet-4-6"
 SUMMARY_EMB_MODEL = "text-embedding-3-small"   # for title/summary embeddings
 SUMMARY_MAX_AGE_SEC = 14 * 86400      # only sessions touched within 2 weeks
@@ -3172,7 +3210,7 @@ _summaries_lock = threading.Lock()
 
 # User-edited display names (override the LLM title in the picker). Separate
 # store from summaries so the background regen can't clobber them.
-NAMES_FILE = Path.home() / ".claude" / "cc_web_names.json"
+NAMES_FILE = _state_path("cc_web_names.json")
 _user_names: dict[str, str] = {}
 _user_names_lock = threading.Lock()
 
@@ -3565,7 +3603,7 @@ async def _api_error_watcher(interval_sec: float = 180.0) -> None:
 # So: one instance per machine, enforced here rather than by convention. flock is
 # the right primitive — the kernel releases it when the holder dies, so there is
 # no stale-pidfile case to reason about or clean up.
-INSTANCE_LOCK_FILE = Path.home() / ".claude" / "cc_web.lock"
+INSTANCE_LOCK_FILE = _state_path("cc_web.lock")
 _instance_lock_fh = None      # module-global: closing the fd would release the lock
 
 
@@ -4264,6 +4302,20 @@ async def get_sessions(card: str = "both", brief: int = 0):
     brief=1 → the cheap list (see brief_picker_sessions): no transcript is opened, so
     no excerpts come back. It is the frontend's default view because first paint on a
     phone used to wait on parsing every JSONL."""
+    if IS_CODEX:
+        # The SAME envelope the claude branch returns — the frontend reads a flat
+        # `sessions` array and keys off each item's `group`. battery is real (it is
+        # a property of the machine, not of the agent); bridge_error/claude_store
+        # are claude-specific and stay quiet.
+        return {
+            "sessions": await asyncio.to_thread(_codex_shim().threads_as_sessions),
+            "brief": bool(brief),
+            "bridge_error": "",
+            "battery": await asyncio.to_thread(_get_battery),
+            "claude_store": None,
+            "runaway": [],
+            "agent": AGENT,
+        }
     live_tabs: list[dict] = []
     bridge_err = ""
     try:
@@ -4360,6 +4412,8 @@ async def get_tabs():
     [{sid, window_index, tab_index, name, cwd}] sorted by window/tab. `name` prefers
     the user-set name, then the LLM title, then the iTerm tab name. `cwd` is what the
     Files popup's "prj" shortcut jumps to — the bridge already resolves it per tab."""
+    if IS_CODEX:
+        return {"tabs": _codex_shim().threads_as_tabs(), "agent": AGENT}
     out: list[dict] = []
     err = ""
     tree = _load_tree()
@@ -4801,6 +4855,8 @@ async def post_attach(payload: AttachPayload):
       - 'no_match' : zero matches → user must still pick from candidates
       - 'not_running' : no claude tab in matching cwd at all → suggest resume"""
     sid = payload.claude_session_id
+    if IS_CODEX:
+        return await _codex_attach(sid)
     # Already bound? Verify alive — if so, return immediately.
     existing = bindings.get_by_session(sid)
     if existing and verify_binding(existing):
@@ -5361,6 +5417,8 @@ async def get_state(
     """Read state for a specific bound session. Picker is via /api/sessions."""
     if not claude_session_id:
         raise HTTPException(status_code=400, detail="claude_session_id required")
+    if IS_CODEX:
+        return await _codex_state(claude_session_id, since_idx, rounds, mode)
     b = bindings.get_by_session(claude_session_id)
     if b is None:
         b = await _try_autobind(claude_session_id)   # alive-but-unbound → auto-bind (ground truth)
@@ -5586,6 +5644,8 @@ async def get_tool_detail(
 
 @app.post("/api/input", dependencies=[Depends(require_token)])
 async def post_input(payload: InputPayload):
+    if IS_CODEX:
+        return await _codex_input(payload.claude_session_id, payload.text)
     b = bindings.get_by_session(payload.claude_session_id)
     if b is None:
         b = await _try_autobind(payload.claude_session_id)   # alive-but-unbound → auto-bind
@@ -6098,6 +6158,11 @@ async def post_live(payload: LivePayload):
     jsonl message the client already renders) — what claude is writing right now
     that hasn't flushed to the transcript. Unchanged since `ver` → {same}. This
     is how the heartbeat shows realtime generation without waiting on the jsonl."""
+    if IS_CODEX:
+        # codex writes its answer to the rollout when the TURN ends, so there is no
+        # partial text to stream. Report "unchanged" rather than fabricating a
+        # preview: the transcript poll picks the answer up a beat later.
+        return {"same": True}
     b = bindings.get_by_session(payload.claude_session_id)
     if b is None:
         b = await _try_autobind(payload.claude_session_id)
@@ -6193,6 +6258,8 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
     refresh=True sends Ctrl+L first for a clean redraw (the full modal);
     the lightweight 'tail screen' peek passes refresh=false to avoid
     disturbing the tab on every click."""
+    if IS_CODEX:
+        return await _codex_screen(claude_session_id)
     b = bindings.get_by_session(claude_session_id)
     if b is None:
         b = await _try_autobind(claude_session_id)   # alive-but-unbound → auto-bind (ground truth)
@@ -7350,7 +7417,7 @@ async def get_server_info():
     """Small facts the SPA needs to adapt its wording. `terminal` is the
     user-facing name of the terminal backend on this host — 'iTerm2' on macOS,
     'tmux' on Linux — so the UI can say the right thing (resume prompt etc.)."""
-    return {"terminal": TERM_NAME, "platform": _platform.system()}
+    return {"terminal": TERM_NAME, "platform": _platform.system(), "agent": AGENT}
 
 
 @app.post("/api/resume", dependencies=[Depends(require_token)])
@@ -7409,7 +7476,7 @@ async def post_resume(payload: ResumePayload):
 
 # ---------- session-list snapshot (save before reboot, resume after) ----------
 
-SNAPSHOT_FILE = Path.home() / ".claude" / "cc_web_session_snapshot.json"
+SNAPSHOT_FILE = _state_path("cc_web_session_snapshot.json")
 
 
 async def _live_tab_entries() -> list[dict]:
@@ -8082,6 +8149,94 @@ def _candidate_dict(c: dict) -> dict:
         "matched_count": len(c["matched"]),
         "screen_tail": c["screen"],
     }
+
+
+# ---------------------------------------------------------------------------
+# The codex branch of each switched endpoint.
+#
+# Kept together down here, and never called when AGENT == "claude", so the claude
+# request paths above read exactly as they did. The translation into cc_web's own
+# entry shape lives in codex_shim, which is what lets the REST of this file —
+# _filter_entries, _is_claude_idle, _last_n_rounds, the since_idx cursor — serve
+# codex without a line of change.
+# ---------------------------------------------------------------------------
+
+def _codex_thread_or_404(thread_id: str) -> dict:
+    t = _codex_shim().find_thread(thread_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="unknown session_id")
+    return t
+
+
+async def _codex_state(thread_id: str, since_idx: Optional[int],
+                       rounds: Optional[int], mode: str) -> dict:
+    """/api/state for codex. `since_idx` is a rollout ordinal; the client's cursor
+    contract (send back what you were given) is unchanged."""
+    sh = _codex_shim()
+    t = await asyncio.to_thread(sh.find_thread, thread_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="unknown session_id")
+    entries, tip = await asyncio.to_thread(sh.entries_for, t, since_idx)
+    # Same helpers the claude path uses, on the same entry shape.
+    sliced = _last_n_rounds(entries, rounds) if (rounds and since_idx is None) else entries
+    transcript = _filter_entries(sliced, mode)
+    resp = {
+        "binding": {"claude_session_id": thread_id, "iterm_session_id": t.get("pane", ""),
+                    "pid": t.get("pid") or 0, "cwd": t.get("cwd", ""),
+                    "window_index": 0, "tab_index": 0},
+        "transcript": transcript,
+        "status_line": sh.status_line(t, entries),
+        "since_idx": tip if tip >= 0 else None,
+        "has_more_history": False,
+        "claude_idle": _is_claude_idle(entries) if entries else True,
+        # codex's approval dialogs are drawn with a different cursor glyph than
+        # claude's (`›` vs `❯`), so the claude detector would not fire on them.
+        # Left unset until that is done properly rather than half-detected.
+        "pending_confirm": None,
+        "epoch": f"{_BOOT_TOKEN}.codex",
+        "agent": AGENT,
+    }
+    return {k: v for k, v in resp.items() if v is not None}
+
+
+async def _codex_input(thread_id: str, text: str) -> dict:
+    """/api/input for codex: `codex queue`, not keystrokes."""
+    import codex_backend
+    r = await asyncio.to_thread(codex_backend.send_message, thread_id, text)
+    if not r.get("ok"):
+        # 409 = the peer session's own state (a thread with no rollout yet cannot
+        # be addressed), not a fault here.
+        code = 409 if r.get("reason") == "no_rollout" else 502
+        raise HTTPException(status_code=code, detail=r.get("error", "queue failed"))
+    return {"ok": True, "queued_id": r.get("queued_id", "")}
+
+
+async def _codex_screen(thread_id: str) -> dict:
+    """/api/screen for codex, via the pane the process inherited (TMUX_PANE)."""
+    t = await asyncio.to_thread(_codex_shim().find_thread, thread_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="unknown session_id")
+    pane = t.get("pane")
+    if not pane:
+        raise HTTPException(status_code=409, detail="session is not running in a pane")
+    out = await asyncio.to_thread(
+        subprocess.run, ["tmux", "capture-pane", "-p", "-t", pane],
+        capture_output=True, text=True, timeout=10)
+    return {"screen": out.stdout, "agent": AGENT}
+
+
+async def _codex_attach(thread_id: str) -> dict:
+    """/api/attach for codex. There is nothing to resolve: codex's own state names
+    the thread, and its writer lock names the live process — so attaching is just
+    confirming the session exists, and the whole screen-fingerprint machinery the
+    claude path needs has no counterpart here."""
+    t = await asyncio.to_thread(_codex_shim().find_thread, thread_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="unknown session_id")
+    return {"result": "bound",
+            "binding": {"claude_session_id": thread_id, "pid": t.get("pid") or 0,
+                        "iterm_session_id": t.get("pane", ""), "cwd": t.get("cwd", ""),
+                        "window_index": 0, "tab_index": 0}}
 
 
 if STATIC_DIR.exists():
