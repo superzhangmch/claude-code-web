@@ -6269,20 +6269,26 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
     refresh=True sends Ctrl+L first for a clean redraw (the full modal);
     the lightweight 'tail screen' peek passes refresh=false to avoid
     disturbing the tab on every click."""
+    # Reading a screen is the same job for either agent — capture the pane, slice
+    # it, diff it against `ver`. Only the FIRST step differs (which pane belongs to
+    # this session), so only that step is switched. An earlier version of this had
+    # a private codex implementation, which promptly drifted: it lost the cursor,
+    # the delta and the slice-to-the-input-box that this path has.
     if IS_CODEX:
-        return await _codex_screen(claude_session_id, tail, ver)
-    b = bindings.get_by_session(claude_session_id)
-    if b is None:
-        b = await _try_autobind(claude_session_id)   # alive-but-unbound → auto-bind (ground truth)
-    if b is None:
-        raise HTTPException(status_code=409, detail="session not bound")
-    if not verify_binding(b):
-        # Same as /api/input: a dead pid is what `/exit` + resume looks like, so
-        # re-resolve by session id before reporting it gone.
-        bindings.remove_session(claude_session_id)
-        b = await _try_autobind(claude_session_id)
+        b = await _codex_binding(claude_session_id)
+    else:
+        b = bindings.get_by_session(claude_session_id)
         if b is None:
-            raise HTTPException(status_code=410, detail="tab/pid is gone")
+            b = await _try_autobind(claude_session_id)   # alive-but-unbound → ground truth
+        if b is None:
+            raise HTTPException(status_code=409, detail="session not bound")
+        if not verify_binding(b):
+            # Same as /api/input: a dead pid is what `/exit` + resume looks like, so
+            # re-resolve by session id before reporting it gone.
+            bindings.remove_session(claude_session_id)
+            b = await _try_autobind(claude_session_id)
+            if b is None:
+                raise HTTPException(status_code=410, detail="tab/pid is gone")
     want_cursor = (tail == 0)   # the cursor marker only applies to the full-screen view
     try:
         # Send Ctrl+L before reading so claude's TUI redraws and we get
@@ -6303,7 +6309,8 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
         # window's new id, or a resumed session's new tab) — re-resolve by session id and
         # read again. This is what returned 0 characters for six days while the session
         # was fine.
-        b2 = await _reresolve_handle(claude_session_id, b.iterm_session_id, "screen")
+        b2 = (None if IS_CODEX else
+              await _reresolve_handle(claude_session_id, b.iterm_session_id, "screen"))
         if b2 is not None:
             try:
                 res = await bridge.get_screen_for(b2.iterm_session_id, max_lines=200,
@@ -8237,30 +8244,72 @@ async def _codex_input(thread_id: str, text: str) -> dict:
     return {"ok": True, "queued_id": r.get("queued_id", ""), "method": r.get("method", "")}
 
 
-async def _codex_screen(thread_id: str, tail: int = 0, ver: str = "") -> dict:
-    """/api/screen for codex, via the pane the process inherited (TMUX_PANE).
+async def _codex_binding(thread_id: str) -> "Binding":
+    """A codex thread as a Binding, so the shared screen/terminal code can run.
 
-    Returns the SAME shape the client already knows — {full, ver} or {same, ver} —
-    not a friendlier-looking {screen}. It got {screen} first, and the tail view sat
-    empty while the request returned 200: applyScreenJson/tailScreen read `full`,
-    `same` and `ver`, and treat anything else as a base mismatch to retry forever."""
+    Not inserted into the bindings table: that table is claude's attach bookkeeping
+    (persisted, reaped, re-resolved from claude's pid↔session store), and a codex
+    instance deliberately runs none of it. All the shared path actually reads is
+    `iterm_session_id` — which on tmux IS the pane id — so this is a value object,
+    not registered state."""
     t = await asyncio.to_thread(_codex_shim().find_thread, thread_id)
     if t is None:
         raise HTTPException(status_code=404, detail="unknown session_id")
     pane = t.get("pane")
     if not pane:
         raise HTTPException(status_code=409, detail="session is not running in a pane")
-    out = await asyncio.to_thread(
-        subprocess.run, ["tmux", "capture-pane", "-p", "-t", pane],
-        capture_output=True, text=True, timeout=10)
-    text = out.stdout or ""
-    if tail and tail > 0:
-        lines = text.split("\n")
-        text = "\n".join(lines[-(tail + 10):])
-    cur = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
-    if ver and ver == cur:
-        return {"same": True, "ver": cur}
-    return {"full": text, "ver": cur, "agent": AGENT}
+    return Binding(claude_session_id=thread_id, iterm_session_id=pane,
+                   pid=t.get("pid") or 0, pid_start=0.0, cwd=t.get("cwd", ""),
+                   jsonl_path=None, window_index=0, tab_index=0)
+
+
+async def _codex_panes() -> list[dict]:
+    """The terminal-browser view for a codex instance.
+
+    Enumeration is shared — bridge.list_all_tabs() already lists every pane and is
+    agent-neutral. Only the ANNOTATION is switched: the claude branch marks which
+    panes run claude and hands back claude session ids, which is how a codex
+    instance came to offer claude sessions to attach to. Here the same panes are
+    annotated from codex's own state instead.
+
+    (This function used to re-list the panes itself with its own tmux call. Same
+    mistake as the private screen implementation: a copy of shared behaviour that
+    can only drift away from it.)"""
+    try:
+        panes = await bridge.list_all_tabs()
+    except Exception as e:                       # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"cannot list panes: {e}")
+    threads = await asyncio.to_thread(_codex_shim().threads_as_tabs, 60, True)
+    by_pane = {t["pane"]: t for t in threads if t.get("pane")}
+    out = []
+    for p in panes:
+        t = by_pane.get(p.get("iterm_session_id", ""))
+        out.append({**p,
+                    "is_claude": t is not None,   # "is an agent session" in this UI
+                    "bound_to": t["sid"] if t else None,
+                    "sid": t["sid"] if t else "",
+                    "session_name": t["tab_name"] if t else "",
+                    "parent": ""})
+    return out
+
+
+async def _codex_binding(thread_id: str) -> "Binding":
+    """A codex thread as a Binding, so the shared screen/terminal code can run.
+
+    Not inserted into the bindings table: that table is claude's attach bookkeeping
+    (persisted, reaped, re-resolved from claude's pid↔session store), and a codex
+    instance deliberately runs none of it. All the shared path actually reads is
+    `iterm_session_id` — which on tmux IS the pane id — so this is a value object,
+    not registered state."""
+    t = await asyncio.to_thread(_codex_shim().find_thread, thread_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="unknown session_id")
+    pane = t.get("pane")
+    if not pane:
+        raise HTTPException(status_code=409, detail="session is not running in a pane")
+    return Binding(claude_session_id=thread_id, iterm_session_id=pane,
+                   pid=t.get("pid") or 0, pid_start=0.0, cwd=t.get("cwd", ""),
+                   jsonl_path=None, window_index=0, tab_index=0)
 
 
 async def _codex_panes() -> list[dict]:
