@@ -1381,7 +1381,14 @@ MARKER_RE = re.compile(r"test_alive_marker=[a-f0-9]+")
 #   "  3. No, and tell Claude what to do (esc)"
 # Group 1: cursor (❯ / >) marking the current selection — may be absent.
 # Group 2: digit. Group 3: option text.
-_PROMPT_OPT_RE = re.compile(r"^\s*([❯>])?\s*(\d)\.\s+(.+?)\s*$")
+# The cursor mark on the selected line of a numbered menu. claude draws it with
+# U+276F ❯; codex uses U+203A › (measured: `e2 80 ba` in its trust prompt). Without
+# codex's glyph the detector saw no menu at all — which is why a new codex session
+# looked broken: it opens on "Do you trust the contents of this directory?" and the
+# UI had no idea a question was waiting. Gated on the mode rather than just adding
+# the character, so claude's detection is provably unchanged.
+_PROMPT_OPT_RE = re.compile(r"^\s*([❯>›])?\s*(\d)\.\s+(.+?)\s*$" if IS_CODEX
+                            else r"^\s*([❯>])?\s*(\d)\.\s+(.+?)\s*$")
 _ESC_HINT_RE = re.compile(r"\s*\(esc\)\s*$", re.I)
 
 # Prose options: Claude FINISHED its turn and listed choices in plain text
@@ -2459,6 +2466,14 @@ def brief_picker_sessions(live_tabs: Optional[list[dict]] = None) -> list[dict]:
             for jsonl in proj.glob("*.jsonl"):
                 if jsonl.stem in wanted:
                     files[jsonl.stem] = jsonl
+    # Anything the project scan did not find, resolve the one agent-aware way — a
+    # codex session's transcript is its rollout, which lives elsewhere. Costs claude
+    # nothing (its sids are all found above) and removes the need for this list to
+    # know which agent it is serving.
+    for sid in wanted - set(files):
+        f = find_jsonl_for_session(sid)
+        if f is not None:
+            files[sid] = f
 
     import datetime as _dt
     tree = _load_tree()               # one read for the whole list
@@ -2553,6 +2568,17 @@ def _tool_summary(inp) -> Optional[str]:
     and is length-capped."""
     if not isinstance(inp, dict):
         return None
+    # codex only, gated on the MODE rather than on "claude happens not to use this
+    # field name" — a coincidence of vocabularies is not a decision, and the day some
+    # claude tool grows a `justification` this would silently change claude's
+    # headlines. When codex asks to step outside its sandbox it writes a
+    # `justification` addressed to the HUMAN ("允许我在沙箱外运行只读的 date 命令吗?").
+    # That sentence is the most useful headline a permission request can have — more
+    # use than the command it wants to run, which is one click away in the detail view.
+    just = inp.get("justification") if IS_CODEX else None
+    if isinstance(just, str) and just.strip():
+        j = re.sub(r"\s+", " ", just.strip())
+        return j if len(j) <= 160 else j[:160] + " …"
     for k in _SUMMARY_ORDER:
         v = inp.get(k)
         if not isinstance(v, str):
@@ -4348,20 +4374,6 @@ async def get_sessions(card: str = "both", brief: int = 0):
     brief=1 → the cheap list (see brief_picker_sessions): no transcript is opened, so
     no excerpts come back. It is the frontend's default view because first paint on a
     phone used to wait on parsing every JSONL."""
-    if IS_CODEX:
-        # The SAME envelope the claude branch returns — the frontend reads a flat
-        # `sessions` array and keys off each item's `group`. battery is real (it is
-        # a property of the machine, not of the agent); bridge_error/claude_store
-        # are claude-specific and stay quiet.
-        return {
-            "sessions": await asyncio.to_thread(_codex_shim().threads_as_sessions),
-            "brief": bool(brief),
-            "bridge_error": "",
-            "battery": await asyncio.to_thread(_get_battery),
-            "claude_store": None,
-            "runaway": [],
-            "agent": AGENT,
-        }
     live_tabs: list[dict] = []
     bridge_err = ""
     try:
@@ -4899,14 +4911,6 @@ async def post_attach(payload: AttachPayload):
       - 'no_match' : zero matches → user must still pick from candidates
       - 'not_running' : no claude tab in matching cwd at all → suggest resume"""
     sid = payload.claude_session_id
-    if IS_CODEX:
-        # Nothing to resolve: codex's own state names the thread and its writer lock
-        # names the process, so the fingerprint scoring below has no counterpart —
-        # ground-truth autobind IS the answer.
-        cb = await _try_autobind(sid)
-        if cb is None:
-            raise HTTPException(status_code=404, detail="unknown session_id")
-        return {"result": "bound", "binding": _serialize_binding(cb)}
     # Already bound? Verify alive — if so, return immediately.
     existing = bindings.get_by_session(sid)
     if existing and verify_binding(existing):
@@ -5436,6 +5440,18 @@ async def _try_autobind(sid: str):
     if ref is None:                       # fall back to --resume argv ground truth
         ref = next((r for r in refs if getattr(r, "claude_session_id", "") == sid), None)
     if ref is None:
+        # Last resort: ask the bridge to resolve the id itself. A session that had not
+        # started yet is listed under a synthetic id, and the moment it writes its
+        # first record the real id takes over — leaving whoever holds the old one (an
+        # open page, a URL) with a session that just came alive and answers "unknown
+        # session_id". The bridge knows both of its names, so it does the matching;
+        # this stays free of any stored handle, which is the rule here.
+        resolver = getattr(bridge, "resolve_session", None)
+        if resolver is not None:
+            ref = await resolver(sid)
+            if ref is not None and getattr(ref, "claude_session_id", ""):
+                sid = ref.claude_session_id      # bind under the REAL id from now on
+    if ref is None:
         return None
     b = _build_binding(sid, ref, jsonl)
     if b:
@@ -5573,7 +5589,13 @@ async def get_state(
     gate = _pending_confirm_gate_open(b)
     try:
         screen = await bridge.get_screen_for(
-            b.iterm_session_id, max_lines=(80 if gate else 6), strip_input=False)
+            # 6 lines is enough to spot claude's status bar. codex pads the bottom of
+            # its pane with blank lines and puts "• Working (… esc to interrupt)" above
+            # the composer, so a 6-line tail there is all blanks — measured. Ask for a
+            # few more and the busy check below can read THIS screen instead of running
+            # its own capture-pane on every poll.
+            b.iterm_session_id,
+            max_lines=(80 if gate else (20 if IS_CODEX else 6)), strip_input=False)
     except Exception:
         screen = None
     if gate:
@@ -5583,9 +5605,44 @@ async def get_state(
     status_line = _status_line(screen)
 
     # codex only: its rollout does not grow while a turn runs, so the file can only
-    # say "the last thing I saw finished". The TUI footer says it outright, and it
-    # is the difference between the page showing work and looking asleep.
-    codex_busy = (await _codex_pane_busy({"pane": b.iterm_session_id})) if IS_CODEX else None
+    # say "the last thing I saw finished". The TUI footer says it outright, and it is
+    # the difference between the page showing work and looking asleep. Read from the
+    # screen this poll ALREADY fetched — a second capture-pane per poll for the same
+    # pixels was pure duplication.
+    codex_busy = None
+    if IS_CODEX:
+        # codex's own turn state first — structured, live, and immune to a wording
+        # change. The screen is the fallback for when that table moves (its name
+        # carries a schema version) or has no row for this thread yet.
+        import codex_backend as _cb
+        st = await asyncio.to_thread(_cb.turn_status, claude_session_id)
+        if st:
+            codex_busy = (st == "inProgress")
+        elif screen:
+            tail = "\n".join([ln for ln in screen.splitlines() if ln.strip()][-14:])
+            codex_busy = bool(_CODEX_BUSY_RE.search(tail))
+
+    # A codex send, echoed before its log admits it exists.
+    #
+    # Same "_queued" placeholder shape claude's enqueue records produce, so the
+    # client shows the pending badge and the existing pairing hides it when the real
+    # turn arrives — no new frontend rule. The cursor stays at the file's tip, so a
+    # placeholder is re-sent on every poll and deduped by _idx until it is withdrawn
+    # explicitly. An unconfirmed send also means busy: you just gave the session
+    # work, whatever the file or the screen says yet.
+    if not getattr(bridge, "records_sent_messages", True):
+        tip = (all_entries[-1].get("_idx") if all_entries else _JSONL_BASE) or _JSONL_BASE
+        pend, withdraw = _codex_pending_sync(claude_session_id, all_entries, tip)
+        if withdraw:
+            removed_idxs = (removed_idxs or []) + withdraw
+        for item in pend:
+            transcript = transcript + [{
+                "type": "user", "_idx": item["idx"], "_queued": True,
+                "timestamp": _iso(item["ts"]),
+                "message": {"content": item["text"]},
+            }]
+        if pend:
+            codex_busy = True
     resp = {
         "binding": _serialize_binding(b),
         "transcript": transcript,               # queued msgs are rendered INLINE here now
@@ -5696,8 +5753,14 @@ async def get_tool_detail(
 
 @app.post("/api/input", dependencies=[Depends(require_token)])
 async def post_input(payload: InputPayload):
-    if IS_CODEX:
-        return await _codex_input(payload.claude_session_id, payload.text)
+    # Deliberately NO special case here. Both agents get the same treatment: type it
+    # into the terminal, with the same don't-clobber check, the same Ctrl+U, the same
+    # `!`-prefix and CR handling. codex does offer a message door (`codex queue`) and
+    # an earlier version used it — but that split is what made typing in the screen
+    # window echo nothing, and every benefit claimed for it (not overwriting a
+    # half-typed line, no bracketed-paste surprises) is something this shared path
+    # already does. The door stays available in codex_backend for cross-agent
+    # messaging; it is not needed to talk to a session from the web.
     b = bindings.get_by_session(payload.claude_session_id)
     if b is None:
         b = await _try_autobind(payload.claude_session_id)   # alive-but-unbound → auto-bind
@@ -5772,6 +5835,17 @@ async def post_input(payload: InputPayload):
     if not ok:
         raise HTTPException(status_code=404, detail="iterm session vanished")
     _last_input_ts[b.claude_session_id] = now
+    # Echo it ourselves only if the agent's own log will not.
+    #
+    # claude writes an `enqueue` record the instant a message is submitted, so its
+    # "Queued" placeholder is read from the transcript like everything else. codex
+    # writes nothing until the turn ends — measured: 60s after sending, its rollout
+    # had grown by 0 bytes, with neither the message nor the answer in it. This is a
+    # difference in LOGGING, not in how a terminal is driven, so it is asked as a
+    # capability rather than switched on an agent name.
+    if payload.press_enter and payload.text.strip() and \
+            not getattr(bridge, "records_sent_messages", True):
+        _codex_pending_add(b.claude_session_id, payload.text)
     return {"ok": True}
 
 
@@ -6068,6 +6142,64 @@ def _last_real_texts(entries: list[dict], n: int = 3) -> list[str]:
 # Small per-session pool {_idx: text-tail} of recently-served messages, so
 # /api/live can resolve a client-sent anchor _idx → text WITHOUT re-reading the
 # jsonl. Populated by /api/state (which already has the text). Bounded.
+# Messages sent to a codex session that its log has not caught up with yet.
+#
+# claude records an `enqueue` in its own jsonl the instant you hit send, so its
+# "Queued" placeholder is READ, like everything else, and the pairing machinery
+# exists to reconcile it with the later delivery. codex writes nothing until the
+# turn ends — measured: 60s after sending, its rollout had grown by 0 bytes, with
+# neither the message nor the answer in it. A translation layer can only translate
+# records that exist, so this is the one thing that has to be remembered rather
+# than read: what we sent, until the file admits it.
+_CODEX_PENDING: dict[str, list[dict]] = {}
+_CODEX_PENDING_TTL = 900.0        # a send this old was lost; stop claiming it is coming
+
+
+def _iso(ts: float) -> str:
+    import datetime as _d
+    return _d.datetime.fromtimestamp(ts).isoformat(timespec="milliseconds")
+
+
+def _codex_pending_add(sid: str, text: str) -> None:
+    d = _CODEX_PENDING.setdefault(sid, [])
+    d.append({"text": text, "ts": _time.time(), "idx": None})
+    del d[:-8]                     # only the newest few can plausibly be in flight
+
+
+def _codex_pending_sync(sid: str, entries: list[dict], tip: int):
+    """(still-unconfirmed items, placeholder ids to withdraw).
+
+    An item keeps the SAME placeholder id for its whole life: ids are assigned once,
+    above the tip at the time. Re-deriving them from the current tip each poll would
+    renumber every placeholder whenever the file grew, and the client — which
+    dedupes by _idx — would render the same pending message again under its new id.
+
+    Confirmed means the transcript now has a user turn with that text. Timed out
+    means the send is 15 minutes old and not coming; both are withdrawals, because
+    an echo that never resolves is worse than none."""
+    d = _CODEX_PENDING.get(sid)
+    if not d:
+        return [], []
+    said = {(_entry_text(e) or "").strip()
+            for e in entries if e.get("type") == "user" and not e.get("toolUseResult")}
+    now, keep, drop = _time.time(), [], []
+    for item in d:
+        confirmed = item["text"].strip() in said
+        stale = now - item["ts"] >= _CODEX_PENDING_TTL
+        if confirmed or stale:
+            if item["idx"] is not None:
+                drop.append(item["idx"])
+        else:
+            keep.append(item)
+    d[:] = keep
+    n = 0
+    for item in keep:
+        if item["idx"] is None:
+            n += 1
+            item["idx"] = tip + n
+    return keep, drop
+
+
 _LIVE_TEXT_POOL: dict[str, dict[int, str]] = {}
 
 
@@ -6349,8 +6481,7 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
         # window's new id, or a resumed session's new tab) — re-resolve by session id and
         # read again. This is what returned 0 characters for six days while the session
         # was fine.
-        b2 = (None if IS_CODEX else
-              await _reresolve_handle(claude_session_id, b.iterm_session_id, "screen"))
+        b2 = await _reresolve_handle(claude_session_id, b.iterm_session_id, "screen")
         if b2 is not None:
             try:
                 res = await bridge.get_screen_for(b2.iterm_session_id, max_lines=200,
@@ -8055,16 +8186,23 @@ async def post_new_session(payload: NewSessionPayload):
         match = next((r for r in refs if r.iterm_session_id == iterm_id), None)
         if match is None:
             continue
-        meta = _claude_session_meta(match.pid)
-        if meta and meta.get("sessionId"):
-            sid = meta["sessionId"]
-            # claude only creates the transcript JSONL on the FIRST message, so
-            # for a brand-new tab it doesn't exist yet. We don't need it to bind:
-            # bind by the store's sessionId + the expected path (claude encodes
-            # the project dir as cwd with /,_ → -). The file appears at exactly
-            # that path when the user sends their first message — no marker, no
-            # injected echo; the user's own message writes the JSONL.
-            jl = find_jsonl_for_session(sid) or (PROJECTS_ROOT / encoded / f"{sid}.jsonl")
+        # Which session is this new pane? Ask the ref FIRST: the bridge already knows,
+        # including for a session whose own log does not exist yet. Going straight to
+        # claude's per-pid store is what made "new codex tab" hang — codex never
+        # writes that file, so the loop span its full 30s and gave up.
+        sid = (getattr(match, "claude_session_id", "") or "").strip()
+        if not sid:
+            meta = _claude_session_meta(match.pid)
+            sid = ((meta or {}).get("sessionId") or "").strip()
+        if sid:
+            # An agent creates its transcript on the FIRST message, so a brand-new tab
+            # has none. Binding does not need it. For claude the path is predictable
+            # (project dir with /,_ → -) so it is pre-filled and the file appears there
+            # on the first message; for any other agent, guessing a claude-shaped path
+            # would be inventing one — jsonl_path is Optional, so leave it unset.
+            jl = find_jsonl_for_session(sid)
+            if jl is None and not IS_CODEX:
+                jl = PROJECTS_ROOT / encoded / f"{sid}.jsonl"
             b = _build_binding(sid, match, jl)
             if b:
                 bindings.insert(b); bound = b; break
@@ -8219,56 +8357,8 @@ def _candidate_dict(c: dict) -> dict:
 # codex without a line of change.
 # ---------------------------------------------------------------------------
 
-async def _codex_input(thread_id: str, text: str) -> dict:
-    """/api/input for codex: `codex queue` where it works, keystrokes where it can't.
-
-    The thread is resolved FIRST. Without that, a session id this instance does not
-    serve — a `#s=` left in a URL from the claude instance, say — went straight to
-    `codex queue`, and the user got a raw JSON-RPC error about a thread store they
-    have never heard of. An unknown id is a 404, as anywhere else.
-
-    The keystroke fallback covers the first message to a session that has no
-    rollout yet: queue addresses threads through the rollout store, so until an
-    exchange exists the only door is the pane the session is running in."""
-    import codex_backend
-    t = await asyncio.to_thread(_codex_shim().find_thread, thread_id)
-    if t is None:
-        raise HTTPException(status_code=404, detail="unknown session_id")
-    r = await asyncio.to_thread(codex_backend.send_message, thread_id, text,
-                                30.0, t.get("pane") or "")
-    if not r.get("ok"):
-        # 409 = the peer session's own state (no rollout, and no pane to type
-        # into), not a fault of ours.
-        code = 409 if r.get("reason") == "no_rollout" else 502
-        raise HTTPException(status_code=code, detail=r.get("error", "queue failed"))
-    return {"ok": True, "queued_id": r.get("queued_id", ""), "method": r.get("method", "")}
-
-
 # codex's TUI footer while a turn runs: "• Working (4m 25s • esc to interrupt)".
 _CODEX_BUSY_RE = re.compile(r"esc to interrupt|Working \(")
-
-
-async def _codex_pane_busy(thread: dict):
-    """Is this session mid-turn, according to its terminal? None if unknown.
-
-    Measured, and the reason this exists: a codex rollout does not grow WHILE a
-    turn runs — one 4-minute turn appended nothing at all, not even task_started.
-    So the file can only say "the last thing I saw finished", and between sending a
-    message and the file catching up, a rollout-only reading calls a working
-    session idle. The screen says it outright."""
-    pane = thread.get("pane")
-    if not pane:
-        return None
-    try:
-        r = await asyncio.to_thread(
-            subprocess.run, ["tmux", "capture-pane", "-p", "-t", pane],
-            capture_output=True, text=True, timeout=6)
-    except Exception:                            # noqa: BLE001
-        return None
-    if r.returncode != 0:
-        return None
-    tail = "\n".join((r.stdout or "").splitlines()[-14:])
-    return bool(_CODEX_BUSY_RE.search(tail))
 
 
 async def _codex_panes() -> list[dict]:

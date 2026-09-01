@@ -91,7 +91,11 @@ try:
     m = re.search(r"TABS \((\d+)\)", found)
     check("the list has a TABS group with at least one session",
           bool(m) and int(m.group(1)) >= 1, repr(found[:300]))
-    check("the finished session lands in RECENT", "RECENT" in found, repr(found[:300]))
+    # NOT "RECENT appears": brief mode lists live sessions only, for either agent —
+    # an earlier codex-only branch invented a RECENT group here that claude's brief
+    # list does not have, and this assertion was written against that invention.
+    check("brief mode lists live sessions only, as it does for claude",
+          "RECENT" not in found, repr(found[:300]))
     # The reported bug: every row showed "01a0". codex thread ids are time-ordered
     # (UUID v7), so the leading hex is a timestamp shared by every session created
     # around the same time — a 4-char prefix of it identifies nothing. With two
@@ -136,6 +140,16 @@ try:
     req.add_header("Authorization", "Bearer " + TOKEN)
     info = json.load(urllib.request.urlopen(req, timeout=10))
     check("...served by the codex instance", info.get("agent") == "codex", str(info))
+
+    # The speaker label and the page title, which were both hardcoded to claude: a
+    # codex answer was labelled CLAUDE, and two instances open in one browser had
+    # identical tab titles. Both now come from the agent the server reports.
+    check("the assistant is not labelled CLAUDE here",
+          "CLAUDE" not in body, repr([l for l in body.splitlines() if "CLAUDE" in l][:2]))
+    check("...it is labelled with this agent's name", "CODEX" in body.upper(),
+          repr(body[:200]))
+    check("the tab title says which agent this is",
+          "Codex" in drv.js("return document.title"), drv.js("return document.title"))
     check("the input box is there to type into",
           drv.js("return !!document.querySelector('textarea, [contenteditable]')") is True)
 

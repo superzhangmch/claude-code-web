@@ -19,6 +19,7 @@ attached — same spirit as needing iTerm on macOS.
 from __future__ import annotations
 
 import asyncio
+import time as _t
 import os
 import shlex
 import subprocess
@@ -341,6 +342,39 @@ class TmuxBridge:
     async def open_new_claude_tab(self, cwd: str, label: str) -> Optional[str]:
         return await self._open(cwd, label, None)
 
+    async def maybe_accept_trust_prompt(self, pane: str,
+                                        max_wait_sec: float = 10.0) -> bool:
+        """Answer the "do you trust this directory?" dialog a fresh session opens with.
+
+        The macOS bridge has done this for claude since the beginning
+        (_maybe_accept_trust_prompt there); the tmux side never did, which went
+        unnoticed only because the dirs on these boxes were already trusted. It
+        surfaced with codex, whose prompt wording differs but whose behaviour is the
+        same: a new tab sits on a blocking question, the transcript stays empty, and
+        the session looks broken. One implementation, both agents' wordings.
+
+        Does nothing when the prompt never appears (already-trusted directory), and
+        gives up rather than pressing keys blindly if the banner never shows either."""
+        deadline = _t.monotonic() + max_wait_sec
+        while _t.monotonic() < deadline:
+            await asyncio.sleep(0.6)
+            screen = await self.get_screen_for(pane, max_lines=80)
+            low = (screen or "").lower()
+            if not low.strip():
+                continue
+            if ("trust this folder" in low                       # claude
+                    or "yes, i trust this folder" in low
+                    or "do you trust the contents of this directory" in low):  # codex
+                # Option 1 is the default in both; "1" then Enter is explicit.
+                await self.send_text_to(pane, "1\r")
+                await asyncio.sleep(1.2)
+                return True
+            # Already past it: either agent's ready banner.
+            if ("welcome back" in low or "claude code v" in low
+                    or "ask codex to do anything" in low):
+                return False
+        return False
+
     async def _open(self, cwd: str, label: str,
                     resume_id: Optional[str]) -> Optional[str]:
         """Open a new tmux window running claude, return its pane id.
@@ -366,11 +400,15 @@ class TmuxBridge:
             q = await asyncio.to_thread(
                 _run, ["list-panes", "-t", "ccweb", "-F", "#{pane_id}"])
             if q and q.returncode == 0 and q.stdout.strip():
-                return q.stdout.strip().splitlines()[0]
+                pane = q.stdout.strip().splitlines()[0]
+                await self.maybe_accept_trust_prompt(pane)
+                return pane
             return None
         r = await asyncio.to_thread(
             _run, ["new-window", "-t", "ccweb", "-n", label,
                    "-P", "-F", "#{pane_id}", "bash", "-lc", inner])
         if r and r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
+            pane = r.stdout.strip()
+            await self.maybe_accept_trust_prompt(pane)
+            return pane
         return None

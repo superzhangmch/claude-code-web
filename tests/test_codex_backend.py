@@ -187,16 +187,19 @@ async def main():
               and by_id["live-thread"]["tokens_used"] == 42, str(by_id["live-thread"]))
 
         print("=== live = someone holds the writer lock ===")
+        cx.invalidate_threads_cache()      # assert liveness, not the 1.5s cache
         lock = home / "thread-writer-locks" / "live-thread.lock"
         lock.write_text("")
         fh = open(lock, "r")                     # hold an fd, like codex's flock does
         try:
+            cx.invalidate_threads_cache()
             live = {t["thread_id"]: t for t in cx.list_threads()}["live-thread"]
             check("holding the lock marks the thread live",
                   live["live"] is True and live["pid"] == os.getpid(),
                   f"live={live['live']} pid={live['pid']} me={os.getpid()}")
         finally:
             fh.close()
+        cx.invalidate_threads_cache()
         after = {t["thread_id"]: t for t in cx.list_threads()}["live-thread"]
         check("releasing it marks the thread finished", after["live"] is False)
 
@@ -303,11 +306,15 @@ async def main():
         check("Enter is its own keystroke, not appended to the text",
               "\n" not in calls[1][-1], repr(calls[1][-1]))
 
-        print("=== busy vs idle: the screen outranks the file ===")
-        # Measured on a live session: a codex rollout does not grow while a turn
-        # runs. One 4-minute turn appended nothing — not even task_started — so a
-        # rollout-only reading reports the PREVIOUS turn's completion and calls a
-        # working session idle. The TUI footer says it outright.
+        print("=== busy vs idle: codex's own turn state, screen as fallback ===")
+        # Measured on a live session: the rollout does not grow while a turn runs — one
+        # 4-minute turn appended nothing, not even task_started — so the transcript can
+        # only say "the last thing I saw finished". Two better signals exist, in order:
+        #
+        #   1. thread_history_*.sqlite thread_turns.status — codex's own state, updates
+        #      LIVE (sampled every 4s through a turn it tracked the screen exactly).
+        #   2. the TUI footer, for when that table moves: its name carries a schema
+        #      version, so a string match is the fallback, never the primary.
         import cc_web as cw
         pat = cw._CODEX_BUSY_RE
         for line, want in (("• Working (4m 25s • esc to interrupt)", True),
@@ -315,29 +322,54 @@ async def main():
                            ("› Ask Codex to do anything", False),
                            ("  gpt-5.6-sol default · ~/work", False),
                            ("• Paris", False)):
-            check(f"busy({line[:34]!r}) == {want}", bool(pat.search(line)) is want, line)
+            check(f"fallback busy({line[:32]!r}) == {want}",
+                  bool(pat.search(line)) is want, line)
+        check("the primary signal is a structured status, not a string",
+              callable(getattr(cx, "turn_status", None)))
+        check("...and it says None rather than guessing when it cannot tell",
+              cx.turn_status("no-such-thread") is None)
+        check("...and for a thread with no id at all",
+              cx.turn_status("") is None)
+        import inspect
+        gs = inspect.getsource(cw.get_state)
+        check("get_state prefers turn_status and keeps the screen as fallback",
+              "turn_status" in gs and "_CODEX_BUSY_RE" in gs,
+              "one of the two is missing")
 
-        async def _busy_of(screen):
-            real = cw.subprocess.run
-            class R:
-                returncode = 0; stderr = ""
-                def __init__(self, out): self.stdout = out
-            cw.subprocess.run = lambda a, **k: R(screen)
-            try:
-                return await cw._codex_pane_busy({"pane": "%9"})
-            finally:
-                cw.subprocess.run = real
+        print("=== driving a terminal is the same job for both agents ===")
+        # An earlier version routed a codex message through `codex queue` and kept the
+        # keystroke path for everything else. That split is what made typing in the
+        # screen window echo nothing — every keypress became a queued message — and
+        # nothing about it was necessary: typing works for codex, and every benefit
+        # claimed for the door (not clobbering a half-typed line, no bracketed-paste
+        # or `!`-prefix surprises) is something the shared path already handles.
+        # So /api/input must contain no agent branch at all.
+        import inspect
+        src = inspect.getsource(cw.post_input)
+        check("/api/input has no codex branch",
+              "IS_CODEX" not in src, "IS_CODEX still in post_input")
+        # CODE only — comments are stripped first. The comment there explains why the
+        # special case is absent, and an assertion that forbids saying "codex" in a
+        # comment would just delete the explanation.
+        code = "\n".join(l.split("#", 1)[0] for l in src.splitlines())
+        agent_named = [l for l in code.splitlines()
+                       if "codex" in l.lower() and "_codex_pending_add" not in l]
+        check("...and no agent name in the code either", not agent_named, str(agent_named[:2]))
 
-        check("a working pane reads busy",
-              await _busy_of("x\n" * 20 + "• Working (3s • esc to interrupt)\n") is True)
-        check("an idle pane reads not-busy",
-              await _busy_of("x\n" * 20 + "› Ask Codex to do anything\n") is False)
-        check("a session with no pane is unknown, not a guess",
-              await cw._codex_pane_busy({"pane": ""}) is None)
-        # Only the TAIL counts: a "esc to interrupt" scrolled far up the pane is
-        # history, not the current state.
-        check("an old busy line further up the screen does not count",
-              await _busy_of("• Working (1s • esc to interrupt)\n" + "x\n" * 30) is False)
+        from codex_bridge import CodexBridge
+        from tmux_bridge import TmuxBridge
+        check("send_text_to is INHERITED — characters go to a terminal the same way",
+              CodexBridge.send_text_to is TmuxBridge.send_text_to)
+
+        # The one thing the write path still asks about is the agent's LOG, not its
+        # terminal: claude records an enqueue when you submit, codex records nothing
+        # until the turn ends, so only the latter needs cc_web to echo the send.
+        check("the difference asked about is logging, not typing",
+              "records_sent_messages" in src)
+        check("codex declares that its log does not record a send",
+              CodexBridge.records_sent_messages is False)
+        check("...and the claude bridges are assumed to (default true)",
+              getattr(TmuxBridge, "records_sent_messages", True) is True)
 
         print("=== the PATH the child gets ===")
         # `codex` is a `#!/usr/bin/env node` script and cc_web runs as a systemd

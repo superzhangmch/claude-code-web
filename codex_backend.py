@@ -200,7 +200,38 @@ def live_codex_processes() -> list[dict]:
     return list(procs.values())
 
 
+# Reading codex's state means a sqlite query plus a walk of /proc (for the lock
+# holders and their panes). Several layers ask for it within ONE request — the
+# bridge for the session list, the transcript lookup for the rollout path, the busy
+# check for the pane — so one /api/state poll walked the whole process table twice,
+# every couple of seconds, for the life of the page. A short TTL collapses that to
+# once without making the list meaningfully staler than the poll interval itself.
+_THREADS_CACHE: dict = {"ts": 0.0, "limit": 0, "rows": []}
+_THREADS_TTL = 1.5
+
+
+def invalidate_threads_cache() -> None:
+    """Drop the cached session list.
+
+    Exists because the cache is a real behaviour change, not just an optimisation:
+    a session that starts or ends is invisible for up to _THREADS_TTL. That is fine
+    against a poll interval measured in seconds, and not fine for a test asserting
+    "hold the lock -> the thread reads live", which would otherwise be asserting
+    the cache."""
+    _THREADS_CACHE.update(ts=0.0, limit=0, rows=[])
+
+
 def list_threads(limit: int = 60) -> list[dict]:
+    now = time.time()
+    c = _THREADS_CACHE
+    if c["rows"] and c["limit"] >= limit and now - c["ts"] < _THREADS_TTL:
+        return [dict(r) for r in c["rows"][:limit]]     # copies: callers must not alias
+    rows = _list_threads_uncached(limit)
+    c.update(ts=now, limit=limit, rows=rows)
+    return [dict(r) for r in rows]
+
+
+def _list_threads_uncached(limit: int = 60) -> list[dict]:
     """Sessions, newest first. `live` distinguishes a running TUI from a finished
     session — and a finished one is exactly what `codex resume` takes, so the
     same list serves both the tab list and the resume picker."""
@@ -270,6 +301,29 @@ def _text_of(payload: dict) -> str:
         elif isinstance(c, str):
             parts.append(c)
     return "\n".join(parts).strip()
+
+
+def turn_status(thread_id: str) -> Optional[str]:
+    """"inProgress" / "completed" for a thread's newest turn, or None if unknown.
+
+    Measured to update LIVE, which makes it strictly better than matching
+    "esc to interrupt" on the pane: it is codex's own state, it cannot be broken by
+    a wording change, and it needs no terminal read. Sampled every 4s through a
+    turn, it tracked the screen exactly — inProgress while working, completed with a
+    completed_at the moment it finished.
+
+    Returns None rather than guessing when the table or row is missing: the db name
+    carries a schema version (thread_history_1) and will move, so the caller keeps a
+    fallback. Structured signal first, screen second."""
+    db = _versioned_db("thread_history")
+    if db is None or not thread_id:
+        return None
+    try:
+        rows = _query(db, "select status from thread_turns where thread_id=?"
+                          " order by rowid desc limit 1", (thread_id,))
+    except sqlite3.Error:
+        return None
+    return (rows[0][0] or None) if rows else None
 
 
 def parse_rollout(path: str | Path, since_ordinal: Optional[int] = None) -> dict:

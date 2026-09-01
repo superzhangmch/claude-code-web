@@ -2605,7 +2605,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   <!-- new session dialog -->
   <div id="newdlg" class="modal">
     <div class="modal-card">
-      <h2>New Claude session</h2>
+      <h2 id="newsess-title">New Claude session</h2>
       <p id="newsess-hint">Pick a working directory. Opens a new iTerm2 tab on the server.</p>
       <div id="newdlg-cwds"></div>
       <label class="newdlg-label" for="newdlg-subdir">Sub-directory (optional)</label>
@@ -2679,10 +2679,28 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // User-facing terminal name for this host (iTerm2 on macOS, tmux on Linux).
   // Filled from /api/server-info at startup; drives all UI wording.
   let TERM = "iTerm2";
+  // Which agent this instance serves. The transcript's speaker label and the page
+  // title come from here: a codex session labelled CLAUDE is simply wrong, and with
+  // two instances open in one browser the tab titles have to tell them apart.
+  // Derived from the name the server reports, so a third agent needs no code here.
+  let AGENT = "claude", AGENT_LABEL = "Claude";
   async function loadServerInfo() {
     try {
       const r = await authedFetch("/api/server-info");
-      if (r.ok) { const d = await r.json(); if (d && d.terminal) { TERM = d.terminal; applyTermName(); } }
+      if (r.ok) {
+        const d = await r.json();
+        // AGENT first: applyTermName() writes wording that includes the agent name,
+        // so setting it afterwards left the dialog saying "New Claude session" on a
+        // codex instance.
+        if (d && d.agent) {
+          AGENT = String(d.agent);
+          AGENT_LABEL = AGENT.charAt(0).toUpperCase() + AGENT.slice(1);
+          document.title = (AGENT === "claude" ? "Claude Code" : AGENT_LABEL) + " — Web";
+        }
+        if (d && d.terminal) { TERM = d.terminal; }
+        applyTermName();
+        if (d && d.agent) rebuild(true);   // relabel anything already on screen
+      }
     } catch {}
   }
   function applyTermName() {
@@ -2690,6 +2708,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     setTitle("screen-btn", TERM + " screen + session info");
     setTitle("tabs-btn", "Show all " + TERM + " tabs");
     const setText = (id, t) => { const el = document.getElementById(id); if (el) el.textContent = t; };
+    // Which agent a new session will run. Was hardcoded "New Claude session", on a
+    // dialog that opens a codex tab.
+    setText("newsess-title", "New " + AGENT_LABEL + " session");
+    const inp = document.getElementById("input");
+    if (inp) inp.placeholder = "Reply to " + AGENT_LABEL + "…";
     setText("tabs-modal-title", TERM + " tabs");
     setText("newsess-hint", "Pick a working directory. Opens a new " + TERM + " tab on the server.");
   }
@@ -6555,13 +6578,20 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     return { tn: stripTab(m.tabName || ot.tabName || ""),
              sn: (m.sessName || ot.sessName || "").trim() };
   }
-  // What the click copies. Shaped to be pasted straight into ANOTHER claude-code
-  // session (or the ask-peer skill): it carries the full id plus the host:port
-  // that session is reachable on — the id alone is useless to a peer that doesn't
-  // know which machine to look on.
+  // What the click copies. Shaped to be pasted straight into ANOTHER agent session
+  // (or the ask-peer skill): it carries the full id plus the host:port that session
+  // is reachable on — the id alone is useless to a peer that doesn't know which
+  // machine to look on.
+  //
+  // The prefix names the AGENT, because with two kinds of session in play "session="
+  // no longer says what kind of id follows: a codex thread id and a claude session id
+  // are addressed by different tools, and pasting one where the other is expected
+  // fails in a way that reads like a bug in the peer ("no rollout found for thread
+  // id …" was exactly that). claude_code_session= / codex_session=.
   function metaCopyText() {
     const { tn } = metaBits();
-    return "session=" + attachedSid + " at " + location.host
+    const kind = AGENT === "claude" ? "claude_code" : AGENT;
+    return kind + "_session=" + attachedSid + " at " + location.host
          + (tn ? ", with tab_name=" + tn : "");
   }
   function setMeta() {
@@ -8078,7 +8108,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // block (dashed "Queued" box); tagged queued is _system → stacked above.
       const indieQueued = b.queued && !b.system;
       div.className = "msg " + (indieQueued ? (b.role + " queued") : (b.system ? "system" : b.role));
-      label.textContent = indieQueued ? "Queued" : (b.system ? "System" : (b.role === "user" ? "You" : "Claude"));
+      label.textContent = indieQueued ? "Queued" : (b.system ? "System" : (b.role === "user" ? "You" : AGENT_LABEL));
       if (indieQueued) label.classList.add("queued-label");
       const md = document.createElement("div"); md.className = "markdown";
       md.innerHTML = renderMarkdown(b.text);

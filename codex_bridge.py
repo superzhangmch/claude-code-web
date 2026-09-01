@@ -94,23 +94,35 @@ class CodexBridge(TmuxBridge):
         return out
 
     # ---- writing ----------------------------------------------------------
-    async def send_text_to(self, iterm_session_id: str, text: str) -> bool:
-        """Deliver a message to whatever codex session owns this pane.
+    # Two different operations that both happen to take a string, kept apart:
+    #
+    #   send_text_to     put these CHARACTERS on the terminal. Identical for either
+    #                    agent — arrows, ESC, a keypress in the screen window — so it
+    #                    is inherited, not overridden. Overriding it to mean "queue a
+    #                    message" is what made typing in the screen window echo
+    #                    nothing: every keypress became a queued message.
+    #   deliver_message  get this MESSAGE to the agent. Same requirement for both
+    #                    (don't clobber a half-typed line, no bracketed-paste or
+    #                    `!`-prefix special cases, queue it if a turn is running) —
+    #                    the difference is only that codex offers a door for it and
+    #                    claude does not, so cc_web emulates one with keystroke
+    #                    choreography there and calls this here.
+    #
+    # codex's log records nothing until a turn ends — no enqueue entry for a message
+    # you just sent, unlike claude's jsonl. cc_web asks this to know whether it has to
+    # echo the send itself. A fact about the LOG, not about typing.
+    records_sent_messages = False
 
-        `codex queue` is the supported way in and needs no keystroke simulation —
-        so none of cc_web's typing hazards (half-typed composer, Ctrl+U, echo
-        detection) apply. It addresses threads through the rollout store, though,
-        so a session that has never had an exchange cannot be queued to: for that
-        first message only, fall back to typing, which is what a human would do.
-        codex_backend.send_message makes that choice; both paths end up here."""
-        thread = await asyncio.to_thread(self._thread_for_pane, iterm_session_id)
-        if thread is None:
-            # Not a codex session (a plain shell in the terminal browser) — typing
-            # is the only sensible meaning of "send text to this pane".
-            return await super().send_text_to(iterm_session_id, text)
-        r = await asyncio.to_thread(codex.send_message, thread["thread_id"], text,
-                                    30.0, iterm_session_id)
-        return bool(r.get("ok"))
+    # NOTE: an earlier version also exposed `deliver_message` / `delivers_messages`
+    # so a codex message could go through `codex queue` instead of being typed. That
+    # split is gone: driving a terminal is the same job for both agents, and the
+    # queue door bought nothing the shared typing path does not already handle.
+    # codex_backend.send_message still exists for cross-agent messaging, which is a
+    # different job than "a human sent this from the web".
+
+    async def send_keys_raw(self, pane: str, text: str) -> bool:
+        """Retained name for the raw path; send_text_to now means exactly this."""
+        return await TmuxBridge.send_text_to(self, pane, text)
 
     @staticmethod
     def _thread_for_pane(pane: str) -> Optional[dict]:
@@ -133,7 +145,13 @@ class CodexBridge(TmuxBridge):
         install under ~/.nvm or ~/.local/bin, and a plain `bash -c` has neither on
         PATH. The pane is kept alive after codex exits (exec $SHELL) so it does not
         vanish out from under you."""
-        cmd = "codex" + (f" resume {shlex.quote(resume_id)}" if resume_id else "")
+        # --approve-for-me is codex's equivalent of claude's "auto mode": approvals go
+        # through automatic review instead of stopping to ask, with the
+        # workspace-write sandbox. Without it a session opens in on-request +
+        # read-only, which means every command waits for a human and nothing can be
+        # written — measured on the existing sessions (approval_mode='on-request',
+        # sandbox='{"type":"read-only"}').
+        cmd = "codex --approve-for-me" + (f" resume {shlex.quote(resume_id)}" if resume_id else "")
         inner = (
             'export NVM_DIR="$HOME/.nvm"; '
             '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
@@ -150,11 +168,39 @@ class CodexBridge(TmuxBridge):
             q = await asyncio.to_thread(
                 _run, ["list-panes", "-t", "ccweb", "-F", "#{pane_id}"])
             if q and q.returncode == 0 and q.stdout.strip():
-                return q.stdout.strip().splitlines()[0]
+                pane = q.stdout.strip().splitlines()[0]
+                await self.maybe_accept_trust_prompt(pane)
+                return pane
             return None
         r = await asyncio.to_thread(
             _run, ["new-window", "-t", "ccweb", "-n", label,
                    "-P", "-F", "#{pane_id}", "bash", "-lc", inner])
         if r and r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
+            pane = r.stdout.strip()
+            # Inherited from TmuxBridge — codex opens on the same kind of blocking
+            # "do you trust this directory?" question claude does.
+            await self.maybe_accept_trust_prompt(pane)
+            return pane
         return None
+
+    async def resolve_session(self, sid: str):
+        """The session ref an id refers to — including an id that has been superseded.
+
+        A session with no thread yet is listed as `pending-pane-%N`; once codex writes
+        its first record the real thread id takes over and the synthetic one stops
+        appearing in any list. Whoever still holds it (an open page, a bookmarked URL,
+        a binding made seconds ago) would then get "unknown session_id" for a session
+        that is very much alive. Both names point at the same pane, so resolve through
+        the pane and hand back the ref under its CURRENT id."""
+        import codex_shim
+        t = await asyncio.to_thread(codex_shim.find_thread, sid)
+        pane = (t or {}).get("pane") or ""
+        if not pane:
+            return None
+        for ref in await self.list_claude_tabs():
+            if ref.iterm_session_id == pane:
+                return ref
+        return None
+        import codex_shim
+        t = codex_shim.find_thread(sid)
+        return (t or {}).get("pane") or ""

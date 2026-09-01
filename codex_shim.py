@@ -23,6 +23,8 @@ which is why the flag can be set honestly rather than guessed from a spinner.
 """
 from __future__ import annotations
 
+import json
+import re
 import time
 from typing import Optional
 
@@ -63,56 +65,6 @@ def threads_as_tabs(limit: int = 60, live_only: bool = True) -> list[dict]:
             "tokens_used": t["tokens_used"],
         })
     return rows
-
-
-def threads_as_sessions(limit: int = 80) -> list[dict]:
-    """The picker's list, in brief_picker_sessions' item shape.
-
-    Field-for-field, because the frontend reads a FLAT `sessions` array and keys
-    off `group` and `claude_session_id` — returning the obvious-looking
-    {tabs, recent, named} instead rendered "No live claude tab" on a page whose
-    API calls were all succeeding. A real browser caught that; the endpoint tests
-    could not have.
-
-    group="tabs" for a session with a live process (talkable now), "recent" for a
-    finished one — which is exactly the split `codex resume` cares about."""
-    out = []
-    for i, t in enumerate(codex.list_threads(limit)):
-        name = t["title"] or "(codex)"
-        # SECONDS, verified against the live db — not milliseconds. Dividing by
-        # 1000 "to be safe" put every row at 1970-01-22, which the list rendered
-        # without complaint. (codex's rollout timestamps ARE ms; its sqlite is not.)
-        mtime = float(t["updated_at"] or 0)
-        out.append({
-            "claude_session_id": t["thread_id"],
-            "group": "tabs" if t["live"] else "recent",
-            "title": name,
-            "project_path": t["cwd"],
-            "last_visit": (time.strftime("%m-%d %H:%M", time.localtime(mtime))
-                           if mtime else ""),
-            "mtime": mtime,
-            "ts_approx": False,          # codex stamps updated_at itself; no guessing
-            "file_size": 0,
-            "named": False,
-            "bound": t["live"],          # nothing to attach: live == talkable
-            "summary": "",
-            "summary_title": "",
-            "user_name": "",
-            "brief": True,
-            "parent": "",
-            "tab_count": 1,
-            "tab_positions": [],
-            "tab_name": name,
-            "window_index": 0,
-            "tab_index": i,
-            "iterm_session_id": t["pane"],
-            "pid": t["pid"],
-            "proc_start": None,
-            "cwd": t["cwd"],
-            "agent": AGENT_NAME,
-            "tokens_used": t["tokens_used"],
-        })
-    return out
 
 
 def find_thread(thread_id: str) -> Optional[dict]:
@@ -195,11 +147,10 @@ def translate_line(row: dict):
                 "message": {"role": "assistant", "content": [{
                     "type": "tool_use",
                     "id": payload.get("call_id") or "codex_tool",
-                    "name": payload.get("name") or ptype,
-                    "input": {"command": codex._tool_input(payload)}}]}}
+                    **_exec_call_fields(payload, ptype)}]}}
 
     if ptype in ("custom_tool_call_output", "function_call_output"):
-        out = codex._tool_output(payload)
+        out = _readable_output(payload)
         # Shaped like claude's tool result — a user entry carrying toolUseResult —
         # so brief mode drops it and medium/full show it, with no new rules.
         return {"type": "user", "timestamp": ts, "toolUseResult": {"stdout": out},
@@ -208,3 +159,133 @@ def translate_line(row: dict):
                     "tool_use_id": payload.get("call_id") or "codex_tool",
                     "content": out}]}}
     return None
+
+
+# ---------------------------------------------------------------------------
+# codex's one tool, made legible
+# ---------------------------------------------------------------------------
+# codex has a single tool, `exec`, whose input is a JavaScript SNIPPET that calls
+# sub-tools:
+#
+#   const r = await tools.exec_command({"cmd":"date","workdir":"…",
+#       "sandbox_permissions":"require_escalated",
+#       "justification":"允许我在沙箱外运行只读的 date 命令吗?"});
+#   text(r.output);
+#
+# Handed over as-is it makes the activity line a wall of JS with the interesting
+# part — what it wants to run, and what it is asking permission for — buried in the
+# middle. claude's tools each have their own fields, which is why cc_web's headline
+# table works there; codex's have to be dug out of the script first.
+_TOOLS_CALL_RE = re.compile(r"tools\.([A-Za-z_]\w*)\s*\(\s*(\{)")
+
+
+def _exec_call_fields(payload: dict, ptype: str) -> dict:
+    """{name, input} for a tool_use block, dug out of codex's exec script.
+
+    Never lossy: the original script is kept under `script`, so the detail view
+    shows exactly what ran even when this parsing guesses wrong — a prettier
+    headline is not worth hiding what happened."""
+    raw = codex._tool_input(payload)
+    name = payload.get("name") or ptype
+    inp: dict = {"script": raw}
+    m = _TOOLS_CALL_RE.search(raw or "")
+    if m is None:
+        inp["command"] = raw
+        return {"name": name, "input": inp}
+    sub, arg = m.group(1), _first_json_object(raw, m.start(2))
+    extra = m.string.count("tools.") - 1          # further calls in the same script
+    if isinstance(arg, dict):
+        # The identifying field, per sub-tool. `cmd` is what a person recognises for a
+        # shell call; a path for anything file-shaped.
+        for k in ("cmd", "command", "path", "file_path", "pattern", "query"):
+            v = arg.get(k)
+            if isinstance(v, str) and v.strip():
+                inp["path" if k in ("path", "file_path") else "command"] = v.strip()
+                break
+        for k in ("justification", "workdir", "sandbox_permissions"):
+            v = arg.get(k)
+            if isinstance(v, str) and v.strip():
+                inp[k] = v.strip()
+    if extra > 0:
+        inp["command"] = (inp.get("command") or sub) + f"  (+{extra} more)"
+    return {"name": sub or name, "input": inp}
+
+
+def _first_json_object(text: str, start: int):
+    """The JSON object beginning at `start`, by brace matching.
+
+    A regex cannot do this: the argument contains nested braces and strings with
+    braces in them. Returns None rather than guessing if it does not parse."""
+    depth, i, in_str, esc = 0, start, False, False
+    while i < len(text):
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                blob = text[start:i + 1]
+                try:
+                    return json.loads(blob)
+                except json.JSONDecodeError:
+                    pass
+                # It is a JS object literal, not JSON: codex writes some calls with
+                # BARE keys (`{path:"…", detail:"original"}`), which json refuses.
+                # Quote the keys and retry once; give up rather than guess further.
+                quoted = re.sub(r'([{,]\s*)([A-Za-z_]\w*)(\s*:)', r'\1"\2"\3', blob)
+                try:
+                    return json.loads(quoted)
+                except json.JSONDecodeError:
+                    return None
+        i += 1
+    return None
+
+
+# codex wraps every exec result in three fixed lines:
+#
+#   Script completed|failed|running with cell ID N
+#   Wall time 0.1 seconds
+#   Output:
+#   <the part anyone actually wants>
+#
+# and delivers it either as a plain string or as a list of {type, text} chunks. Left
+# alone, the result panel shows a JSON array whose first element is boilerplate.
+_OUT_HEAD_RE = re.compile(
+    r"^\s*Script (?P<status>[a-z]+)[^\n]*\n\s*Wall time (?P<secs>[\d.]+) seconds\s*\n\s*Output:\s*\n?",
+    re.I)
+
+
+def _readable_output(payload: dict) -> str:
+    """A tool result a person can read, without losing anything.
+
+    The three wrapper lines become one short prefix ("failed · 0.0s") and the rest is
+    passed through verbatim — nothing is dropped, because a result that looks tidy
+    and hides the error is worse than an ugly one."""
+    raw = payload.get("output")
+    if isinstance(raw, list):
+        parts = []
+        for c in raw:
+            if isinstance(c, dict) and isinstance(c.get("text"), str):
+                parts.append(c["text"])
+            elif isinstance(c, str):
+                parts.append(c)
+        text = "".join(parts)
+    elif isinstance(raw, str):
+        text = raw
+    else:
+        text = codex._tool_output(payload)
+    m = _OUT_HEAD_RE.match(text or "")
+    if m is None:
+        return text
+    body = text[m.end():]
+    head = f"{m.group('status')} · {m.group('secs')}s"
+    return f"{head}\n{body}" if body.strip() else head

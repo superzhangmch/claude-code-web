@@ -198,6 +198,11 @@ def _bases(host):
     name = _ts_name_for(host) if _IPISH.match(host or "") else host
     if name:
         out.append(f"https://{name}:8443")
+        # cc-web now runs one instance per agent: claude on 8443, codex on 8444 (same
+        # code, CC_WEB_AGENT switches it). A session id alone does not say which port
+        # it lives on, so both are candidates — the resolver tries each and matches the
+        # id against that instance's own session list, so the wrong port simply misses.
+        out.append(f"https://{name}:8444")
     out.append(f"http://{host}:8765")
     return out
 
