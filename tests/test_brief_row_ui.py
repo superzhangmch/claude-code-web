@@ -237,7 +237,8 @@ process.exit(_fails.length ? 1 : 0);
     # briefRow → sessionLine → tabPos: pull the whole chain so the row under test is
     # built by exactly the shipped code.
     deps = []
-    for pat, what in ((r"\n  (function tabPos\(p\) \{.*?\n  \})\n", "tabPos"),
+    for pat, what in ((r"\n  (function shortSid\(sid\) \{.*?\n  \})\n", "shortSid"),
+                      (r"\n  (function tabPos\(p\) \{.*?\n  \})\n", "tabPos"),
                       (r"\n  (function sessionLine\(el, p\) \{.*?\n  \})\n", "sessionLine"),
                       (r"\n  (function treePlan\(items, getSid\) \{.*?\n  \})\n", "treePlan")):
         hit = re.search(pat, src, re.S)

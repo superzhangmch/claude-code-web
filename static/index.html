@@ -2773,6 +2773,24 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   let traffic = { in_bytes: 0, out_bytes: 0 };
   // Traffic counter — whole units, no decimals. (Named distinctly from the
   // CPU-mem fmtBytes below, since duplicate function names in one scope clash.)
+  // The short session id shown on rows, chips and the tab bar. NOT simply the
+  // first four characters: codex's thread ids are time-ordered (UUID v7), so every
+  // session created around the same time shares that leading hex and the list came
+  // out as "01a0", "01a0", "01a0" — an identifier that identifies nothing. The
+  // version nibble says which end carries the entropy, so no agent knowledge is
+  // needed here: v4 (claude) keeps the first four exactly as before, v7 takes the
+  // last four. A non-uuid id (a not-yet-started codex session, "pending-pane-30")
+  // falls back to its last segment.
+  function shortSid(sid) {
+    const s = String(sid || "");
+    // Loose on purpose: anything that starts like a uuid is treated as one, so a
+    // shortened or synthetic id keeps its leading chars instead of falling through
+    // to the last-segment rule (which would turn "d585bf36-aaaa-bbbb" into "bbbb").
+    if (/^[0-9a-f]{8}-/i.test(s)) return s[14] === "7" ? s.slice(-4) : s.slice(0, 4);
+    const seg = s.split("-").pop();
+    return (seg || s).slice(0, 4);
+  }
+
   function fmtTraffic(n) {
     if (n < 1024) return "" + n;                                  // bytes: just the number
     if (n < 1024 * 1024) return Math.round(n / 1024) + "K";
@@ -5896,7 +5914,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // claude attribution: which session/tab, and self vs child.
       const tag = document.createElement("span"); tag.className = "ra-tag";
       if (p.is_claude && p.session_id) {
-        const sid4 = p.session_id.slice(0, 4);
+        const sid4 = shortSid(p.session_id);
         const tabTxt = [p.tab, p.tab_name].filter(Boolean).join(" ");
         const self = (p.attribution === "claude 进程本身");
         tag.textContent = `🧩 ${self ? "claude 本身" : "claude 子进程"} ← [${sid4}]${tabTxt ? " " + tabTxt : ""}`;
@@ -6110,14 +6128,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       titleRow.className = "title-row";
       const title = document.createElement("span");
       title.className = "title";
-      const sidPrefix = `[${s.claude_session_id.slice(0, 4)}] `;
+      const sidPrefix = `[${shortSid(s.claude_session_id)}] `;
       // Tabs group: [sid] wXtY (omit wX when there's a single window).
       // Otherwise: title / last / first msg.
       if (s.group === "tabs") {
         // Line 1: metadata — tX [sid] json_size pid create_datetime.
         const wt = tabPos({ windowIndex: s.window_index, tabIndex: s.tab_index || 0,
                             singleWindow: tabsSingleWin });
-        const parts = [wt, `[${s.claude_session_id.slice(0, 4)}]`];
+        const parts = [wt, `[${shortSid(s.claude_session_id)}]`];
         if (s.file_size) parts.push(fmtSize(s.file_size));
         if (s.proc_start) parts.push(fmtAge(s.proc_start));
         title.textContent = parts.join("  ");
@@ -6906,7 +6924,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       el.appendChild(e); return e;
     };
     if (!p.noPos) add("sw-wt", tabPos({ ...p, tabIndex: p.tabIndex || 0 }));
-    add("sw-sid", (p.sid || "").slice(0, 4));
+    add("sw-sid", shortSid(p.sid));
     if (p.dup > 1) {
       // Right after the sid, because that is what is duplicated — and short: the row's
       // job is the session name, not an explanation. Which OTHER tabs they are lives in
@@ -6969,7 +6987,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
                           singleWindow: single, current: active });
       // Quick-switch bar shows the TAB-NAME only (matches iTerm/tmux).
       const full = (t.tabName && t.tabName.trim()) ? t.tabName
-        : (t.name && t.name.trim()) ? t.name : t.sid.slice(0, 4);
+        : (t.name && t.name.trim()) ? t.name : shortSid(t.sid);
       const label = (tx ? tx + " " : "") + (mob ? tabLabel(full, mbud, "") : tabLabel(full));
       return { sid: t.sid, label, active };
     });
@@ -7141,7 +7159,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (attachedSid && attachedSid !== sid) saveTabState(attachedSid);  // snapshot outgoing
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
     attachedSid = sid;
-    attachedShort = (sid || "").slice(0, 4);
+    attachedShort = shortSid(sid);
     attachedName = label || "";
     attachedTab = "";
     queuedRegion.innerHTML = "";   // clear the previous session's queued tail (poll refills)
@@ -8026,7 +8044,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // human-readable numbers (r42 · #1302), not r1000000042 · #1000001302.
     const _disp = n => (typeof n === "number" && n >= 1000000000) ? n - 1000000000 : n;
     const r = (b.round != null) ? ("r" + _disp(b.round) + " · ") : "";
-    const sidTag = b.sid ? ` · ${String(b.sid).slice(0, 4)}` : "";
+    const sidTag = b.sid ? ` · ${shortSid(b.sid)}` : "";
     idx.textContent = r + "#" + (b.idx != null ? _disp(b.idx) : "?") + sidTag + when;
     role.appendChild(label); role.appendChild(idx);
 

@@ -92,6 +92,20 @@ try:
     check("the list has a TABS group with at least one session",
           bool(m) and int(m.group(1)) >= 1, repr(found[:300]))
     check("the finished session lands in RECENT", "RECENT" in found, repr(found[:300]))
+    # The reported bug: every row showed "01a0". codex thread ids are time-ordered
+    # (UUID v7), so the leading hex is a timestamp shared by every session created
+    # around the same time — a 4-char prefix of it identifies nothing. With two
+    # sessions listed, their chips must differ.
+    chips = drv.js("return [].map.call("
+                   "document.querySelectorAll('#picker-list .brief-row .sw-sid'),"
+                   " function (e) { return e.textContent.trim(); })") or []
+    if len(chips) < 2:
+        check("(only one session listed — nothing to collide)", True)
+    else:
+        check("the short ids on the rows are distinct, not all '01a0'",
+              len(set(chips)) == len(chips), str(chips))
+        check("...and are not the shared v7 timestamp prefix",
+              not all(c == chips[0] for c in chips) and "01a0" not in chips, str(chips))
     import datetime as _d
     check("its timestamp is today, not 1970",
           _d.datetime.now().strftime("%m-%d") in found, repr(found[:300]))
@@ -113,6 +127,39 @@ try:
           "codex ·" in body, repr(body[-300:]))
     check("the input box is there to type into",
           drv.js("return !!document.querySelector('textarea, [contenteditable]')") is True)
+
+    # --- the round trip, driven the way a person drives it -------------------
+    # Everything above still only proves the page can DISPLAY. This types into the
+    # composer, presses the send button, and waits for codex's answer to come back
+    # through the rollout into the transcript: browser -> /api/input -> codex queue
+    # -> the TUI -> the rollout file -> /api/state -> the DOM.
+    marker = "E2E-" + str(int(time.time()))[-6:]
+    typed = drv.js("""
+      var ta = document.getElementById('input');
+      if (!ta) return 'NO-COMPOSER';
+      ta.focus(); ta.value = 'Reply with exactly: %s';
+      ta.dispatchEvent(new Event('input', {bubbles: true}));
+      return ta.value;
+    """ % marker)
+    check("the message can be typed into the composer",
+          marker in str(typed), str(typed))
+    sent = drv.js("""
+      var b = document.getElementById('send') ||
+              [].find.call(document.querySelectorAll('button'),
+                           function (x) { return (x.textContent || '').indexOf('\u27a4') >= 0; });
+      if (!b) return 'NO-SEND-BUTTON';
+      b.click(); return 'clicked';
+    """)
+    check("the send button is there and clickable", sent == "clicked", str(sent))
+    got = False
+    for _ in range(30):                     # codex answers in seconds; allow a minute
+        time.sleep(2)
+        body = drv.js("return document.body.innerText")
+        if marker in body and body.count(marker) >= 2:   # the prompt AND the answer
+            got = True
+            break
+    check("codex's answer comes back into the page by itself", got,
+          repr(body[-500:]))
     found = body
     errs = drv.js("return (window.__errs||[]).length")
     print("\n--- page text (first 1200 chars) ---")
