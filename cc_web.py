@@ -8197,6 +8197,7 @@ async def _codex_state(thread_id: str, since_idx: Optional[int],
     if t is None:
         raise HTTPException(status_code=404, detail="unknown session_id")
     entries, tip = await asyncio.to_thread(sh.entries_for, t, since_idx)
+    busy = await _codex_pane_busy(t)
     # Same helpers the claude path uses, on the same entry shape.
     sliced = _last_n_rounds(entries, rounds) if (rounds and since_idx is None) else entries
     transcript = _filter_entries(sliced, mode)
@@ -8208,7 +8209,9 @@ async def _codex_state(thread_id: str, since_idx: Optional[int],
         "status_line": sh.status_line(t, entries),
         "since_idx": tip if tip >= 0 else None,
         "has_more_history": False,
-        "claude_idle": _is_claude_idle(entries) if entries else True,
+        # The screen wins when it says "working": the rollout lags a running turn
+        # by the whole turn, so it is authoritative only for what already finished.
+        "claude_idle": (False if busy else (_is_claude_idle(entries) if entries else True)),
         # codex's approval dialogs are drawn with a different cursor glyph than
         # claude's (`›` vs `❯`), so the claude detector would not fire on them.
         # Left unset until that is done properly rather than half-detected.
@@ -8242,6 +8245,33 @@ async def _codex_input(thread_id: str, text: str) -> dict:
         code = 409 if r.get("reason") == "no_rollout" else 502
         raise HTTPException(status_code=code, detail=r.get("error", "queue failed"))
     return {"ok": True, "queued_id": r.get("queued_id", ""), "method": r.get("method", "")}
+
+
+# codex's TUI footer while a turn runs: "• Working (4m 25s • esc to interrupt)".
+_CODEX_BUSY_RE = re.compile(r"esc to interrupt|Working \(")
+
+
+async def _codex_pane_busy(thread: dict):
+    """Is this session mid-turn, according to its terminal? None if unknown.
+
+    Measured, and the reason this exists: a codex rollout does not grow WHILE a
+    turn runs — one 4-minute turn appended nothing at all, not even task_started.
+    So the file can only say "the last thing I saw finished", and between sending a
+    message and the file catching up, a rollout-only reading calls a working
+    session idle. The screen says it outright."""
+    pane = thread.get("pane")
+    if not pane:
+        return None
+    try:
+        r = await asyncio.to_thread(
+            subprocess.run, ["tmux", "capture-pane", "-p", "-t", pane],
+            capture_output=True, text=True, timeout=6)
+    except Exception:                            # noqa: BLE001
+        return None
+    if r.returncode != 0:
+        return None
+    tail = "\n".join((r.stdout or "").splitlines()[-14:])
+    return bool(_CODEX_BUSY_RE.search(tail))
 
 
 async def _codex_binding(thread_id: str) -> "Binding":
@@ -8291,25 +8321,6 @@ async def _codex_panes() -> list[dict]:
                     "session_name": t["tab_name"] if t else "",
                     "parent": ""})
     return out
-
-
-async def _codex_binding(thread_id: str) -> "Binding":
-    """A codex thread as a Binding, so the shared screen/terminal code can run.
-
-    Not inserted into the bindings table: that table is claude's attach bookkeeping
-    (persisted, reaped, re-resolved from claude's pid↔session store), and a codex
-    instance deliberately runs none of it. All the shared path actually reads is
-    `iterm_session_id` — which on tmux IS the pane id — so this is a value object,
-    not registered state."""
-    t = await asyncio.to_thread(_codex_shim().find_thread, thread_id)
-    if t is None:
-        raise HTTPException(status_code=404, detail="unknown session_id")
-    pane = t.get("pane")
-    if not pane:
-        raise HTTPException(status_code=409, detail="session is not running in a pane")
-    return Binding(claude_session_id=thread_id, iterm_session_id=pane,
-                   pid=t.get("pid") or 0, pid_start=0.0, cwd=t.get("cwd", ""),
-                   jsonl_path=None, window_index=0, tab_index=0)
 
 
 async def _codex_panes() -> list[dict]:

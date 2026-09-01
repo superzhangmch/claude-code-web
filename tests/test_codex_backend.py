@@ -303,6 +303,42 @@ async def main():
         check("Enter is its own keystroke, not appended to the text",
               "\n" not in calls[1][-1], repr(calls[1][-1]))
 
+        print("=== busy vs idle: the screen outranks the file ===")
+        # Measured on a live session: a codex rollout does not grow while a turn
+        # runs. One 4-minute turn appended nothing — not even task_started — so a
+        # rollout-only reading reports the PREVIOUS turn's completion and calls a
+        # working session idle. The TUI footer says it outright.
+        import cc_web as cw
+        pat = cw._CODEX_BUSY_RE
+        for line, want in (("• Working (4m 25s • esc to interrupt)", True),
+                           ("  Working (12s • esc to interrupt)", True),
+                           ("› Ask Codex to do anything", False),
+                           ("  gpt-5.6-sol default · ~/work", False),
+                           ("• Paris", False)):
+            check(f"busy({line[:34]!r}) == {want}", bool(pat.search(line)) is want, line)
+
+        async def _busy_of(screen):
+            real = cw.subprocess.run
+            class R:
+                returncode = 0; stderr = ""
+                def __init__(self, out): self.stdout = out
+            cw.subprocess.run = lambda a, **k: R(screen)
+            try:
+                return await cw._codex_pane_busy({"pane": "%9"})
+            finally:
+                cw.subprocess.run = real
+
+        check("a working pane reads busy",
+              await _busy_of("x\n" * 20 + "• Working (3s • esc to interrupt)\n") is True)
+        check("an idle pane reads not-busy",
+              await _busy_of("x\n" * 20 + "› Ask Codex to do anything\n") is False)
+        check("a session with no pane is unknown, not a guess",
+              await cw._codex_pane_busy({"pane": ""}) is None)
+        # Only the TAIL counts: a "esc to interrupt" scrolled far up the pane is
+        # history, not the current state.
+        check("an old busy line further up the screen does not count",
+              await _busy_of("• Working (1s • esc to interrupt)\n" + "x\n" * 30) is False)
+
         print("=== the PATH the child gets ===")
         # `codex` is a `#!/usr/bin/env node` script and cc_web runs as a systemd
         # user unit with the minimal PATH, so a node living under nvm is invisible
