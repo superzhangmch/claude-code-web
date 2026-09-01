@@ -140,76 +140,71 @@ def find_thread(thread_id: str) -> Optional[dict]:
 # rollout → claude-shaped entries
 # ---------------------------------------------------------------------------
 
-def _user(text: str, idx: int, ts: str) -> dict:
-    return {"type": "user", "_idx": idx, "timestamp": ts,
-            "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
+# ---------------------------------------------------------------------------
+# The deep seam: one rollout LINE → one cc_web entry
+# ---------------------------------------------------------------------------
+# Translating here, inside the transcript reader, rather than in an endpoint is
+# what makes codex "just be" a session to the rest of the server. Everything
+# JsonlCache does then applies unchanged: byte-window reads, incremental append,
+# _idx/_round numbering, the epoch, gap detection, load-earlier, /api/tool. The
+# alternative — assembling a response per endpoint — is how you end up not knowing
+# which endpoints you have covered.
+#
+# Necessarily per-line and stateless, because the reader hands out byte windows
+# and may never have seen the start of the file. That rules out marking an earlier
+# entry when a later `task_complete` arrives, so end-of-turn comes from the
+# assistant message's own `phase == "final_answer"` — which is what it means.
 
+def translate_line(row: dict):
+    """One codex rollout record → one cc_web-shaped entry, or None to drop it.
 
-def _assistant(content: list, idx: int, ts: str, done: bool) -> dict:
-    msg = {"role": "assistant", "content": content}
-    if done:
-        # The single field cc_web's idle test reads. Set only on a turn codex has
-        # actually reported complete — claiming it early would make the UI offer
-        # the input box while the agent is still working.
-        msg["stop_reason"] = "end_turn"
-    return {"type": "assistant", "_idx": idx, "timestamp": ts, "message": msg}
+    Dropped: session_meta, world_state, turn_context, reasoning, token counts,
+    turn markers, the developer-role preambles, and the injected
+    <environment_context> user turn — everything that is machinery rather than
+    conversation. What survives is what a person said and what the agent said."""
+    if not isinstance(row, dict):
+        return None
+    rtype, payload = row.get("type"), (row.get("payload") or {})
+    if not isinstance(payload, dict):
+        return None
+    ts, ptype, role = row.get("timestamp") or "", payload.get("type"), payload.get("role")
 
+    if rtype != "response_item":
+        return None                      # event_msg / session_meta / world_state / …
 
-def entries_for(thread: dict, since_ordinal: Optional[int] = None) -> tuple[list[dict], int]:
-    """(entries, tip_ordinal) for a thread, in cc_web's entry shape.
+    if ptype == "message":
+        text = codex._text_of(payload)
+        if not text or role == "developer":
+            return None
+        if role == "user":
+            if codex._INJECTED.match(text):
+                return None
+            return {"type": "user", "timestamp": ts,
+                    "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
+        if role == "assistant":
+            msg = {"role": "assistant", "content": [{"type": "text", "text": text}]}
+            if payload.get("phase") == "final_answer":
+                # The turn's answer. cc_web's idle test reads exactly this field,
+                # and a per-line translator cannot go back and mark it later.
+                msg["stop_reason"] = "end_turn"
+            return {"type": "assistant", "timestamp": ts, "message": msg}
+        return None
 
-    Ordinals become `_idx`, which is what the client's since_idx cursor tracks —
-    they are already monotonic per rollout, so the existing paging works as-is.
+    if ptype in ("custom_tool_call", "function_call", "local_shell_call"):
+        return {"type": "assistant", "timestamp": ts,
+                "message": {"role": "assistant", "content": [{
+                    "type": "tool_use",
+                    "id": payload.get("call_id") or "codex_tool",
+                    "name": payload.get("name") or ptype,
+                    "input": {"command": codex._tool_input(payload)}}]}}
 
-    A tool call becomes an assistant entry carrying a `tool_use` block, which is
-    how the UI's activity line finds it. Tool OUTPUT is deliberately dropped: in
-    brief mode cc_web filters out anything with `toolUseResult` anyway, and
-    forging a claude tool_result pair here would be inventing structure to have
-    it thrown away."""
-    if not thread.get("rollout_path"):
-        return [], -1
-    r = codex.parse_rollout(thread["rollout_path"], since_ordinal)
-    raw = r["entries"]
-    # Whether the LAST turn is finished decides the stop_reason on the last
-    # assistant entry. turn_state reads the same events the UI's spinner cares
-    # about; ask it rather than re-deriving.
-    idle = codex.turn_state(raw)["idle"]
-    out: list[dict] = []
-    for e in raw:
-        kind, idx, ts = e.get("kind"), e.get("idx") or 0, e.get("ts") or ""
-        if kind == "msg":
-            text = (e.get("text") or "").strip()
-            if not text:
-                continue
-            if e.get("role") == "user":
-                out.append(_user(text, idx, ts))
-            elif e.get("role") == "assistant":
-                out.append(_assistant([{"type": "text", "text": text}], idx, ts, False))
-        elif kind == "tool":
-            out.append(_assistant([{
-                "type": "tool_use",
-                "id": e.get("call_id") or f"codex_{idx}",
-                "name": e.get("tool") or "exec",
-                "input": {"command": e.get("text") or ""},
-            }], idx, ts, False))
-    # Mark the final assistant entry done, once, at the end: doing it inline would
-    # need to know which entry is last before the loop ends.
-    if idle:
-        for e in reversed(out):
-            if e["type"] == "assistant":
-                e["message"]["stop_reason"] = "end_turn"
-                break
-    return out, r["ordinal"]
-
-
-def status_line(thread: dict, entries: list[dict]) -> str:
-    """The bottom status bar. claude's comes from its own TUI; codex has no
-    equivalent single line, so state the facts the UI has room for."""
-    bits = [f"codex · {thread.get('cwd', '')}"]
-    if thread.get("tokens_used"):
-        bits.append(f"{thread['tokens_used']:,} tok")
-    if thread.get("pane"):
-        bits.append(f"pane {thread['pane']}")
-    if not thread.get("live"):
-        bits.append("not running (resume in a terminal to continue)")
-    return " · ".join(bits)
+    if ptype in ("custom_tool_call_output", "function_call_output"):
+        out = codex._tool_output(payload)
+        # Shaped like claude's tool result — a user entry carrying toolUseResult —
+        # so brief mode drops it and medium/full show it, with no new rules.
+        return {"type": "user", "timestamp": ts, "toolUseResult": {"stdout": out},
+                "message": {"role": "user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": payload.get("call_id") or "codex_tool",
+                    "content": out}]}}
+    return None

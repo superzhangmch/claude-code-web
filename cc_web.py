@@ -578,7 +578,18 @@ def _project_cwds_from_jsonl(path: Path) -> set[str]:
 
 
 def find_jsonl_for_session(session_id: str) -> Optional[Path]:
-    """Locate a JSONL file by its session_id (filename stem) by scanning all project dirs."""
+    """The transcript file for a session id.
+
+    For codex that is its rollout, which is a resolution difference and nothing
+    more — the file is READ by the same cache, through the same window logic, and
+    translated line-by-line in _parse_jsonl_line. Keeping the difference here, in
+    one lookup, is what lets /api/state, /api/live and the load-earlier paths stay
+    single-implementation."""
+    if IS_CODEX:
+        t = _codex_shim().find_thread(session_id)
+        rp = (t or {}).get("rollout_path") or ""
+        p = Path(rp) if rp else None
+        return p if (p and p.exists()) else None
     if not PROJECTS_ROOT.exists():
         return None
     for proj in PROJECTS_ROOT.iterdir():
@@ -1801,6 +1812,32 @@ def _number_entries(entries: list[dict], start_idx: int, start_round: int):
     return idx, rnd
 
 
+def _parse_jsonl_line(line: bytes):
+    """One transcript line → one entry, or None to drop it. THE only place a
+    transcript line is decoded.
+
+    There used to be two: a cold-window parser and a separate loop in the
+    incremental-append path. Adding the codex translation to one of them meant a
+    session read correctly on first load and then accumulated untranslated records
+    as it grew — the answer was in the file, present in a fresh process, and
+    missing from the running server. One function, both callers, no second place
+    to forget."""
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        row = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if IS_CODEX:
+        # THE seam: a codex rollout record becomes a cc_web entry here, so
+        # everything downstream — byte windows, incremental append, _idx/_round
+        # numbering, the epoch, gap detection, load-earlier, /api/tool, the whole
+        # frontend — works on codex without another branch anywhere.
+        return _codex_shim().translate_line(row)
+    return row
+
+
 def _parse_window_bytes(raw: bytes, frm: int):
     """Parse a byte window read starting at file offset `frm`. If frm>0 the
     leading fragment is a partial line → dropped. Returns (entries, anchor_off)
@@ -1824,13 +1861,9 @@ def _parse_window_bytes(raw: bytes, frm: int):
         parts = parts[:-1]
     entries: list[dict] = []
     for line in parts:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entries.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+        e = _parse_jsonl_line(line)
+        if e is not None:
+            entries.append(e)
     return entries, anchor
 
 
@@ -1943,13 +1976,9 @@ class JsonlCache:
             consume = nl + 1 if nl >= 0 else 0
             new: list[dict] = []
             for line in raw[:consume].split(b"\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    new.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+                e = _parse_jsonl_line(line)
+                if e is not None:
+                    new.append(e)
             if new:
                 ent = c["entries"]
                 si = (ent[-1]["_idx"] + 1) if ent else _JSONL_BASE
@@ -2011,6 +2040,12 @@ class JsonlCache:
 
 
 jsonl_cache = JsonlCache()
+# Seam 2 of 2: which terminal bridge this instance talks to. A codex instance gets
+# a CodexBridge — same interface, so every endpoint that goes through `bridge`
+# (tabs, sessions, attach, input, screen, live, new/close/resume) serves codex with
+# no branch of its own. Seam 1 is _parse_jsonl_line.
+if IS_CODEX:
+    from codex_bridge import CodexBridge as _BridgeClass          # noqa: F811
 bridge = _BridgeClass()
 
 # Tmp tab counter (for New + button)
@@ -4423,8 +4458,6 @@ async def get_tabs():
     [{sid, window_index, tab_index, name, cwd}] sorted by window/tab. `name` prefers
     the user-set name, then the LLM title, then the iTerm tab name. `cwd` is what the
     Files popup's "prj" shortcut jumps to — the bridge already resolves it per tab."""
-    if IS_CODEX:
-        return {"tabs": _codex_shim().threads_as_tabs(), "agent": AGENT}
     out: list[dict] = []
     err = ""
     tree = _load_tree()
@@ -4867,7 +4900,13 @@ async def post_attach(payload: AttachPayload):
       - 'not_running' : no claude tab in matching cwd at all → suggest resume"""
     sid = payload.claude_session_id
     if IS_CODEX:
-        return await _codex_attach(sid)
+        # Nothing to resolve: codex's own state names the thread and its writer lock
+        # names the process, so the fingerprint scoring below has no counterpart —
+        # ground-truth autobind IS the answer.
+        cb = await _try_autobind(sid)
+        if cb is None:
+            raise HTTPException(status_code=404, detail="unknown session_id")
+        return {"result": "bound", "binding": _serialize_binding(cb)}
     # Already bound? Verify alive — if so, return immediately.
     existing = bindings.get_by_session(sid)
     if existing and verify_binding(existing):
@@ -5428,11 +5467,9 @@ async def get_state(
     """Read state for a specific bound session. Picker is via /api/sessions."""
     if not claude_session_id:
         raise HTTPException(status_code=400, detail="claude_session_id required")
-    if IS_CODEX:
-        return await _codex_state(claude_session_id, since_idx, rounds, mode)
     b = bindings.get_by_session(claude_session_id)
     if b is None:
-        b = await _try_autobind(claude_session_id)   # alive-but-unbound → auto-bind (ground truth)
+        b = await _try_autobind(claude_session_id)   # alive-but-unbound → ground truth
     if b is None:
         raise HTTPException(status_code=409, detail="session not bound")
     if not verify_binding(b):
@@ -5545,6 +5582,10 @@ async def get_state(
             pending_confirm = None   # it's the user's own "1. .. 2. .." msg echoed, not a menu
     status_line = _status_line(screen)
 
+    # codex only: its rollout does not grow while a turn runs, so the file can only
+    # say "the last thing I saw finished". The TUI footer says it outright, and it
+    # is the difference between the page showing work and looking asleep.
+    codex_busy = (await _codex_pane_busy({"pane": b.iterm_session_id})) if IS_CODEX else None
     resp = {
         "binding": _serialize_binding(b),
         "transcript": transcript,               # queued msgs are rendered INLINE here now
@@ -5552,7 +5593,7 @@ async def get_state(
         "since_idx": new_since_idx,
         "has_more_history": has_more,
         "gap_before_idx": gap_before_idx,
-        "claude_idle": _is_claude_idle(all_entries),
+        "claude_idle": (False if codex_busy else _is_claude_idle(all_entries)),
         "pending_confirm": pending_confirm,
         "epoch": cur_epoch,
         "resync": resync,
@@ -6169,11 +6210,12 @@ async def post_live(payload: LivePayload):
     jsonl message the client already renders) — what claude is writing right now
     that hasn't flushed to the transcript. Unchanged since `ver` → {same}. This
     is how the heartbeat shows realtime generation without waiting on the jsonl."""
-    if IS_CODEX:
-        # codex writes its answer to the rollout when the TURN ends, so there is no
-        # partial text to stream. Report "unchanged" rather than fabricating a
-        # preview: the transcript poll picks the answer up a beat later.
-        return {"same": True}
+    # This is the ONLY live view a codex session has, which took a measurement to
+    # learn: its rollout does not grow while a turn runs, so nothing streams from
+    # the file. Returning {"same": true} here — my first guess, on the theory that
+    # there was nothing partial to show — is what made the page look permanently
+    # idle: the busy indicator IS the live block (setReady() is a no-op; see its
+    # comment), so no live block means no sign of work at all.
     b = bindings.get_by_session(payload.claude_session_id)
     if b is None:
         b = await _try_autobind(payload.claude_session_id)
@@ -6195,7 +6237,8 @@ async def post_live(payload: LivePayload):
     anchors = [pool[k] for k in sorted(pool, reverse=True)[:3]]   # newest served first
     if not anchors:
         try:
-            entries = jsonl_cache.entries(b.jsonl_path) if (b.jsonl_path and b.jsonl_path.exists()) else []
+            entries = (jsonl_cache.entries(b.jsonl_path)
+                       if (b.jsonl_path and b.jsonl_path.exists()) else [])
         except Exception:
             entries = []
         anchors = _last_real_texts(entries, 3)
@@ -6274,21 +6317,18 @@ async def get_screen(claude_session_id: str, refresh: bool = True, tail: int = 0
     # this session), so only that step is switched. An earlier version of this had
     # a private codex implementation, which promptly drifted: it lost the cursor,
     # the delta and the slice-to-the-input-box that this path has.
-    if IS_CODEX:
-        b = await _codex_binding(claude_session_id)
-    else:
-        b = bindings.get_by_session(claude_session_id)
+    b = bindings.get_by_session(claude_session_id)
+    if b is None:
+        b = await _try_autobind(claude_session_id)   # alive-but-unbound → ground truth
+    if b is None:
+        raise HTTPException(status_code=409, detail="session not bound")
+    if not verify_binding(b):
+        # Same as /api/input: a dead pid is what `/exit` + resume looks like, so
+        # re-resolve by session id before reporting it gone.
+        bindings.remove_session(claude_session_id)
+        b = await _try_autobind(claude_session_id)
         if b is None:
-            b = await _try_autobind(claude_session_id)   # alive-but-unbound → ground truth
-        if b is None:
-            raise HTTPException(status_code=409, detail="session not bound")
-        if not verify_binding(b):
-            # Same as /api/input: a dead pid is what `/exit` + resume looks like, so
-            # re-resolve by session id before reporting it gone.
-            bindings.remove_session(claude_session_id)
-            b = await _try_autobind(claude_session_id)
-            if b is None:
-                raise HTTPException(status_code=410, detail="tab/pid is gone")
+            raise HTTPException(status_code=410, detail="tab/pid is gone")
     want_cursor = (tail == 0)   # the cursor marker only applies to the full-screen view
     try:
         # Send Ctrl+L before reading so claude's TUI redraws and we get
@@ -6367,8 +6407,6 @@ async def get_iterm_tabs():
     annotated with `bound_to` = the claude_session_id currently bound to it via
     the normal session→tab flow (if any live binding), so the viewer can skip
     the per-tab reverse-attach button for already-bound tabs."""
-    if IS_CODEX:
-        return {"tabs": await _codex_panes()}
     try:
         tabs = await bridge.list_all_tabs()
     except Exception as e:
@@ -8181,47 +8219,6 @@ def _candidate_dict(c: dict) -> dict:
 # codex without a line of change.
 # ---------------------------------------------------------------------------
 
-def _codex_thread_or_404(thread_id: str) -> dict:
-    t = _codex_shim().find_thread(thread_id)
-    if t is None:
-        raise HTTPException(status_code=404, detail="unknown session_id")
-    return t
-
-
-async def _codex_state(thread_id: str, since_idx: Optional[int],
-                       rounds: Optional[int], mode: str) -> dict:
-    """/api/state for codex. `since_idx` is a rollout ordinal; the client's cursor
-    contract (send back what you were given) is unchanged."""
-    sh = _codex_shim()
-    t = await asyncio.to_thread(sh.find_thread, thread_id)
-    if t is None:
-        raise HTTPException(status_code=404, detail="unknown session_id")
-    entries, tip = await asyncio.to_thread(sh.entries_for, t, since_idx)
-    busy = await _codex_pane_busy(t)
-    # Same helpers the claude path uses, on the same entry shape.
-    sliced = _last_n_rounds(entries, rounds) if (rounds and since_idx is None) else entries
-    transcript = _filter_entries(sliced, mode)
-    resp = {
-        "binding": {"claude_session_id": thread_id, "iterm_session_id": t.get("pane", ""),
-                    "pid": t.get("pid") or 0, "cwd": t.get("cwd", ""),
-                    "window_index": 0, "tab_index": 0},
-        "transcript": transcript,
-        "status_line": sh.status_line(t, entries),
-        "since_idx": tip if tip >= 0 else None,
-        "has_more_history": False,
-        # The screen wins when it says "working": the rollout lags a running turn
-        # by the whole turn, so it is authoritative only for what already finished.
-        "claude_idle": (False if busy else (_is_claude_idle(entries) if entries else True)),
-        # codex's approval dialogs are drawn with a different cursor glyph than
-        # claude's (`›` vs `❯`), so the claude detector would not fire on them.
-        # Left unset until that is done properly rather than half-detected.
-        "pending_confirm": None,
-        "epoch": f"{_BOOT_TOKEN}.codex",
-        "agent": AGENT,
-    }
-    return {k: v for k, v in resp.items() if v is not None}
-
-
 async def _codex_input(thread_id: str, text: str) -> dict:
     """/api/input for codex: `codex queue` where it works, keystrokes where it can't.
 
@@ -8272,25 +8269,6 @@ async def _codex_pane_busy(thread: dict):
         return None
     tail = "\n".join((r.stdout or "").splitlines()[-14:])
     return bool(_CODEX_BUSY_RE.search(tail))
-
-
-async def _codex_binding(thread_id: str) -> "Binding":
-    """A codex thread as a Binding, so the shared screen/terminal code can run.
-
-    Not inserted into the bindings table: that table is claude's attach bookkeeping
-    (persisted, reaped, re-resolved from claude's pid↔session store), and a codex
-    instance deliberately runs none of it. All the shared path actually reads is
-    `iterm_session_id` — which on tmux IS the pane id — so this is a value object,
-    not registered state."""
-    t = await asyncio.to_thread(_codex_shim().find_thread, thread_id)
-    if t is None:
-        raise HTTPException(status_code=404, detail="unknown session_id")
-    pane = t.get("pane")
-    if not pane:
-        raise HTTPException(status_code=409, detail="session is not running in a pane")
-    return Binding(claude_session_id=thread_id, iterm_session_id=pane,
-                   pid=t.get("pid") or 0, pid_start=0.0, cwd=t.get("cwd", ""),
-                   jsonl_path=None, window_index=0, tab_index=0)
 
 
 async def _codex_panes() -> list[dict]:
@@ -8360,20 +8338,6 @@ async def _codex_panes() -> list[dict]:
             "parent": "",
         })
     return out
-
-
-async def _codex_attach(thread_id: str) -> dict:
-    """/api/attach for codex. There is nothing to resolve: codex's own state names
-    the thread, and its writer lock names the live process — so attaching is just
-    confirming the session exists, and the whole screen-fingerprint machinery the
-    claude path needs has no counterpart here."""
-    t = await asyncio.to_thread(_codex_shim().find_thread, thread_id)
-    if t is None:
-        raise HTTPException(status_code=404, detail="unknown session_id")
-    return {"result": "bound",
-            "binding": {"claude_session_id": thread_id, "pid": t.get("pid") or 0,
-                        "iterm_session_id": t.get("pane", ""), "cwd": t.get("cwd", ""),
-                        "window_index": 0, "tab_index": 0}}
 
 
 if STATIC_DIR.exists():

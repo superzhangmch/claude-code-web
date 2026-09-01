@@ -123,8 +123,19 @@ try:
     # human/assistant exchange, and the codex status line.
     check("clicking the row opens a transcript",
           "YOU" in body and ("CLAUDE" in body or "CODEX" in body), repr(body[:400]))
-    check("...of a codex session (status line says so)",
-          "codex ·" in body, repr(body[-300:]))
+    # NOT looking for the word "codex" any more: the status line is now whatever the
+    # session's terminal footer says, by the same rule claude uses (last non-empty
+    # screen line) — for codex that is "gpt-5.6-sol default · /tmp", which is more
+    # informative than a label this server made up. What matters is that a footer
+    # got through at all, and that the instance says which agent it serves.
+    check("...with the session's own terminal footer beneath it",
+          bool((body.strip().splitlines() or [""])[-1].strip()), repr(body[-200:]))
+    # From here, not from the page: drv.js returns before a promise resolves, so a
+    # browser-side fetch would have asserted nothing at all.
+    req = urllib.request.Request(base + "/api/server-info")
+    req.add_header("Authorization", "Bearer " + TOKEN)
+    info = json.load(urllib.request.urlopen(req, timeout=10))
+    check("...served by the codex instance", info.get("agent") == "codex", str(info))
     check("the input box is there to type into",
           drv.js("return !!document.querySelector('textarea, [contenteditable]')") is True)
 
