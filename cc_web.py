@@ -3850,9 +3850,13 @@ def _favicon_slug() -> str:
     and shows the generic C by default; you opt a box into a labelled icon with one
     line (`icon=pro` / `air` / `linux` / `win`). Read per request, so the change needs
     no restart.
+
+    `tp` (ThinkPad) is the same design as `linux` with a different label: "Lx" named
+    the OS, which every Linux box here shares, so it told the tabs apart from nothing.
+    Nothing is renamed — `linux` still works.
     """
     want = (_load_conf().get("icon") or "").strip().lower()
-    return want if want in ("pro", "air", "linux", "win", "az") else ""
+    return want if want in ("pro", "air", "linux", "win", "az", "tp") else ""
 
 
 @app.get("/favicon.svg")
