@@ -5879,6 +5879,40 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (span) hlInto(span, stripTab(t.tab_name || ""), hlTerms());
     }
   }
+  // Refresh the tab NAMES once, regardless of whether the picker is open.
+  // pollTabNames() deliberately does nothing when the picker is closed (it exists to
+  // keep the cards fresh while you look at them), so a rename typed in the composer
+  // would otherwise leave the tab bar showing the old name until the next time you
+  // opened the list. Returns the name now known for `sid`, so a caller can tell
+  // whether the agent has caught up yet.
+  async function refreshTabNames(sid) {
+    let tabs = [];
+    try {
+      const r = await authedFetch("/api/tabs");
+      if (!r.ok) return null;
+      tabs = (await r.json()).tabs || [];
+    } catch { return null; }
+    updateTabMeta(tabs);
+    renderTabBar();
+    const hit = tabs.find(t => (t.sid || t.claude_session_id) === sid);
+    return hit ? (hit.tab_name || "") : null;
+  }
+
+  // A `/rename` only takes effect once the agent has processed the turn — claude writes
+  // its store, codex updates its own record — and neither is instant. Poll a few times
+  // over ~12s instead of guessing one delay, and stop as soon as the name changes.
+  // Cheap: /api/tabs is the light endpoint the picker already polls every 15s.
+  function scheduleRenameRefresh(sid) {
+    const before = (tabMeta.get(sid) || {}).tabName || "";
+    [1500, 3500, 6500, 12000].forEach((ms) => setTimeout(async () => {
+      if (sid !== attachedSid) return;            // switched away; leave it alone
+      const now = await refreshTabNames(sid);
+      if (now != null && now !== before) _renameSettled = sid;
+    }, ms));
+    _renameSettled = null;
+  }
+  let _renameSettled = null;
+
   function startTabNamePoll() { stopTabNamePoll(); _tabNameTimer = setInterval(pollTabNames, 15000); }
   function stopTabNamePoll() { if (_tabNameTimer) { clearInterval(_tabNameTimer); _tabNameTimer = null; } }
 
@@ -9387,6 +9421,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // originated (already model output), attachments, and trivially short.
         if (autoTranslate && !attachPrefix && !inputFromVoice && _shouldGrammarCheck(text)) fireGrammar(text);
         inputFromVoice = false;
+        // A rename changes what every list calls this session, and the tab bar reads
+        // that from the server — so ask again once the agent has had a moment.
+        if (/^\s*\/rename\b/.test(body)) scheduleRenameRefresh(attachedSid);
         inputEl.value = ""; inputEl.style.height = "auto";
         pendingUploads = []; renderUploadRow();
         keepAlive(); schedulePoll(400);
