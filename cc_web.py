@@ -5632,7 +5632,12 @@ async def get_state(
     # work, whatever the file or the screen says yet.
     if not getattr(bridge, "records_sent_messages", True):
         tip = (all_entries[-1].get("_idx") if all_entries else _JSONL_BASE) or _JSONL_BASE
-        pend, withdraw = _codex_pending_sync(claude_session_id, all_entries, tip)
+        # Keyed by the BINDING's id, not the requested one. They can differ: a client
+        # may still hold the synthetic `pending-pane-%N` while the binding has been
+        # re-resolved to the real thread id. post_input registers under the binding's
+        # id, so reading under the request's id silently found nothing and no echo
+        # ever appeared — the two halves have to agree on one key.
+        pend, withdraw = _codex_pending_sync(b.claude_session_id, all_entries, tip)
         if withdraw:
             removed_idxs = (removed_idxs or []) + withdraw
         for item in pend:

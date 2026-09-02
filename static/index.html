@@ -2295,7 +2295,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     </div>
     <div class="scr-cfg-row"><span>结束这个 session</span>
       <button class="sw-item" id="mm-exit-close"
-              title="退出 claude 并关闭它的终端 tab(有后台作业时不关)">⏏ exit &amp; close</button>
+              id="exit-close-btn" title="退出 claude 并关闭它的终端 tab(有后台作业时不关)">⏏ exit &amp; close</button>
     </div>
   </div>
 
@@ -2328,8 +2328,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <button id="tabs-close" class="btn" title="close">✕</button>
       </div>
       <div class="modal-row tabs-snap-row">
-        <button id="tabs-snap-save" class="btn" title="保存当前所有 claude tab（含顺序），重启前点">💾 Save list</button>
-        <button id="tabs-snap-resume" class="btn" title="按选中的快照 claude --resume 恢复，重启后点">↻ Resume saved</button>
+        <button id="tabs-snap-save" class="btn" title="保存当前所有 tab（含顺序），重启前点">💾 Save list</button>
+        <button id="tabs-snap-resume" class="btn" title="按选中的快照 --resume 恢复，重启后点">↻ Resume saved</button>
         <!-- Only visible while resuming: 15 tabs take ~20s to open, which is long enough
              to notice you picked the wrong snapshot. -->
         <button id="tabs-snap-stop" class="btn" style="display:none" title="停止恢复(已经开出来的 tab 保留)">✕ 停止恢复</button>
@@ -2361,7 +2361,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
              exit path rather than typing `exit` at the tab — in a claude tab that text
              lands in claude's composer as a PROMPT, not in the shell. -->
         <button class="tk" data-exit=""
-                title="退出并关闭选中的 tab(claude tab 会先 /exit)">exit</button>
+                id="tabs-exit-btn" title="退出并关闭选中的 tab(claude tab 会先 /exit)">exit</button>
       </div>
       <div id="tabs-input-row" class="tabs-input-row">
         <input id="tabs-input" type="text" placeholder="Send a prompt to this tab…" autocomplete="off">
@@ -2550,7 +2550,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 
   <footer id="footer" class="hidden">
     <div id="choice-banner" style="display:none">
-      <span id="choice-banner-text">Claude is waiting for your choice</span>
+      <span id="choice-banner-text">Waiting for your choice</span>
       <button id="choice-banner-btn" class="btn">🖥 Open screen</button>
     </div>
     <div id="prompt-row" class="prompt-row" style="display:none">
@@ -2573,7 +2573,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <button id="mic-btn" class="icon" title="语音输入(录音→识别→整理)">🎤</button>
         <button id="upload-btn" class="icon" title="Attach image (long-press: any file ≤10MB)">📎</button>
       </div>
-      <textarea id="input" placeholder="Reply to Claude…" rows="1"></textarea>
+      <textarea id="input" placeholder="Reply…" rows="1"></textarea>
       <button id="send" class="send" title="点击发送 · 长按更多" aria-label="Send">➤</button>
       <div id="rec-bar" class="rec-bar" style="display:none" title="Tap to stop">
         <span class="rec-dot"></span>
@@ -2684,6 +2684,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // two instances open in one browser the tab titles have to tell them apart.
   // Derived from the name the server reports, so a third agent needs no code here.
   let AGENT = "claude", AGENT_LABEL = "Claude";
+  // Lowercase form, for the middle of a sentence ("no live codex tab", "codex idle").
+  // Every user-visible mention of the agent goes through one of these two — a
+  // hardcoded "Claude" on a codex instance is just a lie about what you are looking at.
+  const agentLc = () => AGENT;
   async function loadServerInfo() {
     try {
       const r = await authedFetch("/api/server-info");
@@ -2713,6 +2717,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     setText("newsess-title", "New " + AGENT_LABEL + " session");
     const inp = document.getElementById("input");
     if (inp) inp.placeholder = "Reply to " + AGENT_LABEL + "…";
+    setTitle("exit-close-btn", `退出 ${agentLc()} 并关闭它的终端 tab(有后台作业时不关)`);
+    setTitle("tabs-exit-btn", `退出并关闭选中的 tab(${agentLc()} tab 会先 /exit)`);
+    setTitle("tabs-snap-save", `保存当前所有 ${agentLc()} tab（含顺序），重启前点`);
+    setTitle("tabs-snap-resume", `按选中的快照 ${agentLc()} --resume 恢复，重启后点`);
     setText("tabs-modal-title", TERM + " tabs");
     setText("newsess-hint", "Pick a working directory. Opens a new " + TERM + " tab on the server.");
   }
@@ -3578,10 +3586,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (r.ok) { const j = await r.json(); tabs = j.tabs || []; bridgeErr = j.bridge_error || ""; }
     } catch {}
     if (!tabs.length) {
-      // "没有运行中的 claude tab" was a lie whenever the bridge was the problem.
+      // `没有运行中的 ${agentLc()} tab` was a lie whenever the bridge was the problem.
       switchMenu.innerHTML = "<div class='sw-empty'>" + (bridgeErr
         ? "⚠ 连不上 " + TERM + ":" + _escHtml(bridgeErr) + "<br>(会话列表页 ⚙ → reconnect)"
-        : "没有运行中的 claude tab") + "</div>";
+        : `没有运行中的 ${agentLc()} tab`) + "</div>";
       return;
     }
     const single = new Set(tabs.map(t => t.window_index || 0)).size <= 1;
@@ -3886,7 +3894,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // menu, an interactive selector, prose choices, or a trailing question.
     const hasBanner = pending && (pending.question || numbered);
     if (hasBanner) {
-      choiceBannerText.textContent = pending.question || "Claude is waiting for your choice";
+      choiceBannerText.textContent = pending.question || `${AGENT_LABEL} is waiting for your choice`;
       choiceBanner.style.display = "";
     } else {
       choiceBanner.style.display = "none";
@@ -3904,7 +3912,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
               + "?" + (pending.question || "");
     if (key === lastPromptKey && promptRowEl.style.display !== "none") return;
     lastPromptKey = key;
-    promptQuestionEl.textContent = pending.question || "Claude is waiting for a choice:";
+    promptQuestionEl.textContent = pending.question || `${AGENT_LABEL} is waiting for a choice:`;
     promptChoicesEl.innerHTML = "";
     for (const c of pending.choices) {
       const btn = document.createElement("button");
@@ -4717,7 +4725,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (prev && (prev.sessions || []).length) {
       if (!confirm(`⚠️ 已存在快照:${prev.sessions.length} 个 session(存于 ${prev.saved_at})。\n\nSave 会用“当前”的 tab 列表覆盖它。\n（重启后想恢复的话应该点 “Resume saved”,不是 Save!）\n\n确定要覆盖?`)) return;
     } else {
-      if (!confirm("保存当前所有 claude tab(含顺序)为快照?")) return;
+      if (!confirm(`保存当前所有 ${agentLc()} tab(含顺序)为快照?`)) return;
     }
     snapBusy(true);
     snapStatus.textContent = "saving…";
@@ -5798,7 +5806,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
       if (ex.response && cardMode === "both") {
         const blk = document.createElement("div"); blk.className = "msg-block claude";
-        const ts = document.createElement("div"); ts.className = "ts"; ts.textContent = "Claude · " + fmtTs(ex.response.ts);
+        const ts = document.createElement("div"); ts.className = "ts"; ts.textContent = `${AGENT_LABEL} · ` + fmtTs(ex.response.ts);
         const body = document.createElement("div"); body.className = "body"; hlInto(body, ex.response.text, hlTerms());
         blk.appendChild(ts); blk.appendChild(body); container.appendChild(blk);
       }
@@ -5907,7 +5915,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     }
     if (btn) { btn.disabled = false; btn.textContent = was; }
     if (d && d.ok) {
-      alert(`已重连 ${TERM}:看到 ${d.tabs} 个 claude tab` + (d.tabs ? "" : "\n(连上了,但确实没有正在运行的 claude tab)"));
+      alert(`已重连 ${TERM}:看到 ${d.tabs} 个 ${agentLc()} tab`
+            + (d.tabs ? "" : `\n(连上了,但确实没有正在运行的 ${agentLc()} tab)`));
       refreshPicker();
     } else {
       alert(`重连 ${TERM} 失败:\n\n${(d && d.error) || "unknown"}`);
@@ -5940,14 +5949,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         const sid4 = shortSid(p.session_id);
         const tabTxt = [p.tab, p.tab_name].filter(Boolean).join(" ");
         const self = (p.attribution === "claude 进程本身");
-        tag.textContent = `🧩 ${self ? "claude 本身" : "claude 子进程"} ← [${sid4}]${tabTxt ? " " + tabTxt : ""}`;
-        tag.title = "该进程属于这个 claude session/tab";
+        tag.textContent = `🧩 ${self ? `${agentLc()} 本身` : `${agentLc()} 子进程`} ← [${sid4}]${tabTxt ? " " + tabTxt : ""}`;
+        tag.title = `该进程属于这个 ${agentLc()} session/tab`;
       } else {
         // Non-claude: surface parent + cwd so you can tell who's the culprit.
         const bits = [];
         if (p.parent_cmd) bits.push(`父进程 ${p.parent_cmd}`);
         if (p.cwd) bits.push(`📁 ${p.cwd}`);
-        tag.textContent = "非 claude · " + (bits.length ? bits.join(" · ") : "无法归属");
+        tag.textContent = `非 ${agentLc()} · ` + (bits.length ? bits.join(" · ") : "无法归属");
         tag.classList.add("muted");
       }
 
@@ -6054,8 +6063,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
             : listBrief
             // brief lists the live tabs only, so "nothing here" means no tab is running —
             // NOT that there are no sessions. Say where the history is.
-            ? `No live <code>claude</code> tab. Start one in ${TERM}, or tap <b>≣ brief</b> above to switch to <b>▤ full</b> and browse past sessions.`
-            : `No sessions yet. Start <code>claude</code> in ${TERM} and use the <em>session-name</em> skill to name it.`);
+            ? `No live <code>${agentLc()}</code> tab. Start one in ${TERM}, or tap <b>≣ brief</b> above to switch to <b>▤ full</b> and browse past sessions.`
+            : `No sessions yet. Start <code>${agentLc()}</code> in ${TERM} and use the <em>session-name</em> skill to name it.`);
       pickerListEl.innerHTML = "<div style='color:var(--muted);font-size:12px;padding:20px;text-align:center'>" + msg + "</div>";
       return;
     }
@@ -6512,10 +6521,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (data.result === "not_running") {
       const cwdHint = data.cwd ? `\nsession cwd: ${data.cwd}` : "";
       const why = data.store_ok
-        ? "This session isn't currently running (no live claude process for it)."
+        ? `This session isn't currently running (no live ${agentLc()} process for it).`
         : `No ${TERM} tab matches this session's cwd — so it isn't currently running.`;
       if (confirm(`${why}${cwdHint}\n\nResume it on ${TERM} (opens a new tab + \`claude --resume\`)?`)) {
-        showLoading("Resuming… (opening tab + waiting for claude)");
+        showLoading(`Resuming… (opening tab + waiting for ${agentLc()})`);
         let r;
         try {
           r = await authedFetch("/api/resume", {
@@ -7592,7 +7601,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (!confirm(`None of these tabs is the right one — open a NEW ${TERM} tab and \`claude --resume\` this session there?`)) return;
     const sid = candiState.sid, label = candiState.label;
     candiDlg.classList.remove("show");
-    showLoading("Resuming… (opening tab + waiting for claude)");
+    showLoading(`Resuming… (opening tab + waiting for ${agentLc()})`);
     const r = await authedFetch("/api/resume", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -8662,7 +8671,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   //                  ACTIVITY_TIMEOUT_MS window, as if newly submitted
   //   timeout pause → "paused · tap to continue"          (red)
   //                  tap → one-shot fetch; stay paused if nothing new
-  //   claudeIdle   → "claude idle · tap to refresh"       (red)
+  //   claudeIdle   → `${agentLc()} idle · tap to refresh`       (red)
   //                  tap → one-shot fetch; stay idle if nothing new
   // "tail screen" pill — peek at the last few lines of the live terminal in a
   // small bottom-left box (refresh=false → no Ctrl+L, doesn't disturb the tab).
@@ -10861,7 +10870,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const cwd = joinCwd(selectedCwd, newDlgSub.value);   // base, or base/sub if typed
     const newName = (document.getElementById("newdlg-name").value || "").trim();
     newDlg.classList.remove("show");
-    showLoading("Opening new claude tab…");
+    showLoading(`Opening new ${agentLc()} tab…`);
     const r = await authedFetch("/api/new-session", {
       method: "POST",
       headers: { "content-type": "application/json" },

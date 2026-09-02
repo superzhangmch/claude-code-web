@@ -147,6 +147,32 @@ def _env_of(pid: int) -> dict[str, str]:
     return env
 
 
+# A pane whose foreground is one of these is at a SHELL PROMPT, not running an
+# agent. Deliberately a list of shells rather than a list of codex process names:
+# under-reporting a live session is worse than the reverse, and codex's own name
+# (`node` for the npm wrapper, a vendored binary underneath) is the thing likely to
+# change.
+_SHELL_CMDS = {"bash", "zsh", "sh", "fish", "dash", "tcsh", "ksh", "-bash", "-zsh"}
+
+
+def _pane_foreground() -> dict:
+    """{pane_id: foreground command} from tmux, or {} if tmux is not there."""
+    try:
+        r = subprocess.run(["tmux", "list-panes", "-a", "-F",
+                            "#{pane_id}\t#{pane_current_command}"],
+                           capture_output=True, text=True, timeout=6)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if r.returncode != 0:
+        return {}
+    out = {}
+    for line in (r.stdout or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) == 2:
+            out[parts[0]] = parts[1]
+    return out
+
+
 def _cwd_of(pid: int) -> str:
     try:
         return os.readlink(f"/proc/{pid}/cwd")
@@ -245,6 +271,13 @@ def _list_threads_uncached(limit: int = 60) -> list[dict]:
     except sqlite3.Error:
         return []
     holders = _lock_holders()
+    # Holding the writer lock is not enough to be TALKABLE. Measured: after a session
+    # is closed with /exit, codex's vendored binary can outlive the TUI — it keeps the
+    # lock while the pane falls back to a shell prompt. Such a row looked live and was
+    # not: sending to it would have typed the message at a bash prompt, which runs it
+    # as a command. So a session counts as live only if its pane is still running
+    # something other than a shell.
+    fg = _pane_foreground()
     out = []
     for (tid, cwd, title, upd, created, tokens, appr, provider, rollout,
          source, name) in rows:
@@ -259,6 +292,9 @@ def _list_threads_uncached(limit: int = 60) -> list[dict]:
             continue
         pid = holders.get(tid)
         env = _env_of(pid) if pid else {}
+        pane_now = env.get("TMUX_PANE", "")
+        if pid and pane_now and fg and fg.get(pane_now, "") in _SHELL_CMDS:
+            pid = None                      # lock outlived the session; not talkable
         out.append({
             "agent": "codex",
             "thread_id": tid,

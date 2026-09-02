@@ -36,6 +36,14 @@ if not list(pathlib.Path.home().glob(".codex/state_*.sqlite")):
     print("SKIP: no codex on this machine"); sys.exit(0)
 if not list(pathlib.Path.home().glob(".codex/sessions/*/*/*/rollout-*.jsonl")):
     print("SKIP: codex has no sessions to show"); sys.exit(0)
+# This test drives a session that must be RUNNING — it types into it and waits for an
+# answer. It deliberately does not start one: creating and destroying real sessions
+# belongs in the acceptance script, not in a suite that runs on every change.
+sys.path.insert(0, ROOT if 'ROOT' in dir() else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import codex_backend as _cb
+if not any(t["live"] for t in _cb.list_threads(60)):
+    print("SKIP: no live codex session (start one in tmux, or run the acceptance "
+          "script which creates its own)"); sys.exit(0)
 
 TOKEN = open(os.path.expanduser("~/.claude/cc_web.conf")).read()
 TOKEN = next(l.split("=", 1)[1].strip() for l in TOKEN.splitlines() if l.startswith("token="))

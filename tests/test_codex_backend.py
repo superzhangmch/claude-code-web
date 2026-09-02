@@ -213,6 +213,12 @@ async def main():
 
         print("=== live = someone holds the writer lock ===")
         cx.invalidate_threads_cache()      # assert liveness, not the 1.5s cache
+        # The pane-foreground rule below is about REAL panes; this fixture's "holder"
+        # is the test process, which lives in whatever pane happens to be running the
+        # suite (a shell). Stub the lookup to "unknown" so this block tests the lock,
+        # and test the rule itself right after.
+        _real_fg = cx._pane_foreground
+        cx._pane_foreground = lambda: {}
         lock = home / "thread-writer-locks" / "live-thread.lock"
         lock.write_text("")
         fh = open(lock, "r")                     # hold an fd, like codex's flock does
@@ -227,6 +233,29 @@ async def main():
         cx.invalidate_threads_cache()
         after = {t["thread_id"]: t for t in cx.list_threads()}["live-thread"]
         check("releasing it marks the thread finished", after["live"] is False)
+        cx._pane_foreground = _real_fg
+
+        print("=== a lock can outlive the session that held it ===")
+        # Measured: closing a codex session with /exit can leave its vendored binary
+        # running. It keeps the writer lock while the pane falls back to a shell
+        # prompt, so the row looked live and was not — and sending to it would have
+        # typed the message at a bash prompt, which runs it as a command.
+        fh2 = open(lock, "r")
+        try:
+            for fg, want, why in (({}, True, "tmux unknown → trust the lock"),
+                                  ({"%9": "node"}, True, "pane still running an agent"),
+                                  ({"%9": "bash"}, False, "pane back at a shell prompt")):
+                cx._pane_foreground = (lambda f: (lambda: f))(fg)
+                cx._env_of_real = cx._env_of
+                cx._env_of = lambda pid: {"TMUX_PANE": "%9"}
+                cx.invalidate_threads_cache()
+                got = {t["thread_id"]: t for t in cx.list_threads()}["live-thread"]["live"]
+                check(f"{why} → live={want}", got is want, f"got {got}")
+                cx._env_of = cx._env_of_real
+        finally:
+            fh2.close()
+            cx._pane_foreground = _real_fg
+            cx.invalidate_threads_cache()
 
         print("=== the transcript ===")
         r = cx.parse_rollout(rp)

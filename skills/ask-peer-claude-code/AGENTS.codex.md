@@ -56,22 +56,16 @@ echo "你现在在忙什么?" | python3 ~/.claude/skills/ask-peer-claude-code/as
 `host`。`--from-agent codex` 让对方看到的前缀写 `from peer codex`（不给也会从你的
 id 形状推断，但明写更可靠）。
 
-几个常用形态：
+更多用法（`--no-wait` 委派、`--no-send` 只看、`--history` 读对话、返回的 `status`
+各值的含义、超时怎么处理）**不在这里重复** —— 它们和 claude 那边是同一套，写在同一份
+文件里：
 
-```bash
-# 不要傻等：先确认送达、立刻返回 (委派 / 通知)
-… ask_peer.py --to <id> --from <我的id> --from-agent codex --no-wait
-
-# 只看对方在干什么, 一个字都不发
-python3 ~/.claude/skills/ask-peer-claude-code/ask_peer.py --to <id> --no-send
-
-# 读对方最近几轮的对话
-python3 ~/.claude/skills/ask-peer-claude-code/ask_peer.py --to <id> --history --rounds 6
+```
+~/.claude/skills/ask-peer-claude-code/SKILL.md
 ```
 
-返回的 JSON 里 `status` ∈ `done`（`reply` 就是答案）/ `sent`（只确认送达）/
-`pending_confirm`（对方卡在一个需要人操作的菜单上 —— 交给人，别试图代答）/
-`timeout` / `peek` / `history`。
+需要时读它。这里只留必须一直记着的判断规则，因为**同一件事写两份就会飘**：机制的唯一
+出处是那份 SKILL.md 和 `ask_peer.py`（脚本本身两边共用，同一个文件）。
 
 ## 一条纪律
 
