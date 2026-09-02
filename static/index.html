@@ -311,6 +311,11 @@ main {
 .sess-line .sw-run { color: var(--muted); font-size: 11px; flex-shrink: 0; opacity: .8; }
 
 /* Brief list rows — the same line, as the session list's default view. */
+/* The line is [ row | copy ]: two separate hit targets, so copying can never also
+   open the session. The row takes all the slack (min-width:0 so a long name shrinks
+   instead of pushing the button off the edge). */
+#picker-list .brief-line { display: flex; align-items: stretch; margin-bottom: 4px; }
+#picker-list .brief-line > .brief-row { flex: 1; min-width: 0; margin-bottom: 0; }
 #picker-list .brief-row {
   display: flex; align-items: baseline; width: 100%; box-sizing: border-box;
   background: var(--panel2); border: 1px solid transparent; border-radius: 6px;
@@ -321,18 +326,20 @@ main {
 #picker-list .brief-row .sw-sess { flex: 1; }   /* takes the slack; time sits right */
 #picker-list .brief-row .br-time { color: var(--muted); font-size: 11px; flex-shrink: 0; }
 #picker-list .brief-row .br-dot { color: var(--accent); font-size: 11px; flex-shrink: 0; }
-/* Per-row "copy the session identifier". The transcript's .copy-btn rules are scoped
-   under .msg, so they are restated here instead of widening that selector across every
-   transcript block. align-self: center because the row aligns on the text baseline,
-   which would hang a 12px icon below the line. */
-#picker-list .brief-row .copy-btn {
-  background: transparent; color: var(--muted); border: 0; cursor: pointer;
-  padding: 0 0 0 7px; line-height: 0; flex-shrink: 0;
-  display: inline-flex; align-items: center; align-self: center;
+/* Per-line "copy the session identifier", a sibling of the row rather than a child.
+   The transcript's .copy-btn rules are scoped under .msg, so the look is restated here
+   instead of widening that selector across every transcript block. 34px wide and full
+   row height on purpose: this gets tapped on a phone and read on an e-ink tablet, where
+   a 12px icon with 2px of padding is a coin toss. */
+#picker-list .brief-line > .copy-btn {
+  flex: 0 0 34px; margin-left: 4px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--panel2); border: 1px solid transparent; border-radius: 6px;
+  color: var(--muted); padding: 0;
 }
-#picker-list .brief-row .copy-btn:hover { color: var(--text); }
-#picker-list .brief-row .copy-btn svg { display: block; }
-#picker-list .brief-row .copy-btn.done { color: #6ee884; }
+#picker-list .brief-line > .copy-btn:hover { color: var(--text); border-color: var(--accent); }
+#picker-list .brief-line > .copy-btn svg { display: block; }
+#picker-list .brief-line > .copy-btn.done { color: #6ee884; }
 #picker-brief { flex-shrink: 0; background: var(--panel2); color: var(--muted);
   border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px;
   font-size: 12px; cursor: pointer; line-height: 1; }
@@ -6096,7 +6103,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // view keeps the management actions (rename, close tab, kill, transcript excerpts).
   // No wXtY: the numbers were noise next to the names, and the Tabs group is still SORTED
   // by tab position (the ↹/↺ toggle), so the order still carries that information.
+  // Returns the LINE: the clickable row, plus the copy button as its SIBLING rather
+  // than a child. Inside the row, a mis-aimed tap on a 12px icon opens the session —
+  // and even an accurate one relies on stopPropagation holding, which is a promise
+  // about event plumbing rather than about structure. Outside it, entering and copying
+  // are two separate targets and neither can be the other. (It also gives br-time its
+  // `span:last-child { margin-right: 0 }` back, which the button had taken.)
   function briefRow(s, singleWin) {
+    const line = document.createElement("div");
+    line.className = "brief-line";
     const row = document.createElement("div");
     const isCur = s.claude_session_id === attachedSid;
     row.className = "brief-row" + (isCur ? " current" : "");
@@ -6128,6 +6143,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // Copy the session identifier without opening the session first. Same text, same
     // builder as the transcript header's click-to-copy; makeCopyBtn already stops the
     // click from reaching the row (which would attach), and shows a ✓ for a second.
+    row.addEventListener("click", () => {
+      const label = s.user_name || s.summary_title || s.title || s.project_path || "";
+      if (s.bound) enterTranscript(s.claude_session_id, label);
+      else attachSession(s.claude_session_id, label);
+    });
+    line.appendChild(row);
     // stripTab, because the header's copy goes through metaBits() which strips: the raw
     // name carries the terminal's activity glyph ("✳ Compare Hermes…") and pasting THAT
     // into ask-peer is not the same string the header hands you. Stripped but NOT
@@ -6135,13 +6156,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const cp = makeCopyBtn(() => sessionCopyText(s.claude_session_id, stripTab(s.tab_name || "")));
     cp.title = "复制 " + (AGENT === "claude" ? "claude_code" : AGENT)
              + "_session=… (和进入会话后点顶部那一份完全一样)";
-    row.appendChild(cp);
-    row.addEventListener("click", () => {
-      const label = s.user_name || s.summary_title || s.title || s.project_path || "";
-      if (s.bound) enterTranscript(s.claude_session_id, label);
-      else attachSession(s.claude_session_id, label);
-    });
-    return row;
+    line.appendChild(cp);
+    return line;
   }
 
   function renderPicker() {
@@ -6234,10 +6250,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // the full card even in brief mode — their whole point is the matched text, and
       // /api/search returns it anyway.
       if (listBrief && !searching) {
-        const row = briefRow(s, tabsSingleWin);
+        // briefRow returns the line (row + its own copy button); the tree decorations
+        // belong to the ROW — the guides are positioned against its box — while the
+        // INDENT goes on the line, so the button moves left with the row it belongs to.
+        const line = briefRow(s, tabsSingleWin);
+        const row = line.children[0];
         if (s.__guides && s.__guides.length) {
           row.classList.add("tg-row");
-          row.style.marginLeft = treeIndent(s.__guides) + "px";
+          line.style.marginLeft = treeIndent(s.__guides) + "px";
           // PREPEND. The guides are absolutely positioned, so their position in the child
           // list is invisible — except that appending them stole :last-child from the
           // timestamp, which is where `margin-right: 0` lives, and every nested row's time
@@ -6245,7 +6265,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           // before sessionLine fills the row, so they never had it.)
           row.prepend(treeGuides(s.__guides));
         }
-        pickerListEl.appendChild(row);
+        pickerListEl.appendChild(line);
         continue;
       }
       const card = document.createElement("div");

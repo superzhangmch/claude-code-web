@@ -303,9 +303,16 @@ def main():
         check("a row is sid · [tab-name] · session name · last-use",
               all("sw-sid=" in r and "sw-tab=" in r and "sw-sess=" in r and "br-time=" in r
                   for r in rows), rows[0])
+        # The column is an AGE now ("3.0h"), not "08-17 11:38" — so the old
+        # length>=5 test no longer states the intent. The intent was: this came from a
+        # real transcript timestamp, not a guess. Which is: it parses as an age, and
+        # carries no ~ (the marker for "derived from the file mtime").
+        ages = [r.split("br-time=")[1].split("|")[0] for r in rows]
         check("...the last-use column is a real timestamp read from the transcript",
-              all(len(r.split("br-time=")[1]) >= 5 and "~" not in r.split("br-time=")[1]
-                  for r in rows), rows[0].split("br-time=")[-1])
+              all(re.fullmatch(r"(now|\d+(\.\d)?[mhd])", a) for a in ages), str(ages))
+        stamps = drv.js("return [...document.querySelectorAll('#picker-list .br-time')].map(e=>e.title)")
+        check("...with the absolute stamp kept on hover, not thrown away",
+              all(re.fullmatch(r"\d\d-\d\d \d\d:\d\d", (t or "")) for t in stamps), str(stamps))
         # The position chip is deliberately back: all three lists use the ⇆ switcher's
         # line, and that includes it.
         check("...with the position chip, like the ⇆ switcher",

@@ -79,10 +79,14 @@ const setTimeout = () => 0;
 __ROW__
 __CHROME__
 
-const parts = (row) => row.children.map(c => c.className.trim() + "=" + c.textContent);
-const text = (row) => row.children.map(c => c.textContent).join("|");
+// briefRow returns the LINE: [ clickable row | copy button ]. R() unwraps to the row,
+// so every assertion below still talks about the row's own columns; the copy button is
+// reached as the line's last child, which is the point of it being a sibling.
+const R = (line) => line.children.find(c => (c.className || "").includes("brief-row")) || line;
+const parts = (line) => R(line).children.map(c => c.className.trim() + "=" + c.textContent);
+const text = (line) => R(line).children.map(c => c.textContent).join("|");
 // pick a span by class, not by position — the row omits spans it has no data for
-const span = (row, cls) => (row.children.find(c => c.className.trim().split(/\s+/).includes(cls)) || {}).textContent;
+const span = (line, cls) => (R(line).children.find(c => c.className.trim().split(/\s+/).includes(cls)) || {}).textContent;
 
 console.log("=== a live tab row ===");
 let s = { claude_session_id: "d585bf36-aaaa-bbbb", group: "tabs", window_index: 0, tab_index: 0,
@@ -101,8 +105,9 @@ check("a single-window machine drops the wX",
 check("...then the session name", span(row, "sw-sess") === "本地AI Agent 对比", span(row, "sw-sess"));
 // Last of the TEXT columns — the copy button sits after it, at the row's right edge.
 check("...and the last-use time last", span(row, "br-time") === "08-17 11:38", span(row, "br-time"));
-check("...with the copy button after it, at the edge",
-      row.children.at(-1).tagName === "button", row.children.at(-1).tagName);
+check("...with the copy button OUTSIDE the row, as its sibling",
+      row.children.at(-1).tagName === "button" && R(row).children.every(c => c.tagName !== "button"),
+      row.children.map(c => c.tagName + "." + c.className.trim()).join(" "));
 check("a bound session is marked", parts(row).some(p => p.startsWith("br-dot=")), parts(row).join(" "));
 check("no transcript excerpt anywhere (brief carries none)", !text(row).includes("…\n"));
 
@@ -111,7 +116,7 @@ attachedSid = "d585bf36-aaaa-bbbb";
 row = briefRow(s, true);
 check("is marked with * on the position, like the switcher",
       parts(row)[0] === "sw-wt=t1*", parts(row)[0]);
-check("...and by the row's accent border", / current/.test(row.className), row.className);
+check("...and by the row's accent border", / current/.test(R(row).className), R(row).className);
 attachedSid = "";
 
 console.log("=== names: user override wins, summary is the last resort ===");
@@ -143,7 +148,7 @@ check("still marked ~ when the epoch came from the file mtime",
       age(3 * 86400, { ts_approx: true }) === "~3.0d", age(3 * 86400, { ts_approx: true }));
 // Nothing is lost: the absolute stamp moves to the hover text.
 row = briefRow({ ...s, mtime: NOW - 47 * 86400 });
-const tEl = row.children.find(c => c.className.trim() === "br-time");
+const tEl = R(row).children.find(c => c.className.trim() === "br-time");
 check("the absolute stamp is on hover", tEl.title === "08-17 11:38", String(tEl.title));
 check("an old server with no mtime still shows its formatted stamp",
       span(briefRow({ ...s, mtime: 0 }), "br-time") === "08-17 11:38",
@@ -180,11 +185,11 @@ check("a session with no tab name drops the clause instead of copying an empty o
       copied === "claude_code_session=d585bf36-aaaa-bbbb at somehost.ts.net:8443", String(copied));
 
 console.log("=== clicking ===");
-row = briefRow({ ...s, bound: true }); row.__click();
+row = briefRow({ ...s, bound: true }); R(row).__click();
 check("a bound session opens its transcript", entered && entered.sid === "d585bf36-aaaa-bbbb",
       JSON.stringify(entered));
 entered = null;
-row = briefRow({ ...s, bound: false }); row.__click();
+row = briefRow({ ...s, bound: false }); R(row).__click();
 check("an unbound one goes through attach", attached && attached.sid === "d585bf36-aaaa-bbbb",
       JSON.stringify(attached));
 
@@ -200,13 +205,13 @@ check("the marker is just the count", span(row, "sw-dup") === "Δ×2", span(row,
 const cls = parts(row).map(p => p.split("=")[0]);
 check("...and it sits immediately after the sid",
       cls.indexOf("sw-dup") === cls.indexOf("sw-sid") + 1, cls.join(" "));
-const dupEl = row.children.find(c => c.className.trim() === "sw-dup");
+const dupEl = R(row).children.find(c => c.className.trim() === "sw-dup");
 check("...with the other tab named in the tooltip, not in the row",
       /t15/.test(dupEl.title) && !/t15/.test(span(row, "sw-dup")), dupEl.title);
 row = briefRow({ ...s, tab_index: 14, tab_count: 2, tab_positions: twoTabs }, true);
 check("...and from t15 the tooltip points back at t3",
-      /t3/.test(row.children.find(c => c.className.trim() === "sw-dup").title),
-      row.children.find(c => c.className.trim() === "sw-dup").title);
+      /t3/.test(R(row).children.find(c => c.className.trim() === "sw-dup").title),
+      R(row).children.find(c => c.className.trim() === "sw-dup").title);
 check("an ordinary row carries no marker at all",
       span(briefRow({ ...s, tab_count: 1 }, true), "sw-dup") === undefined,
       String(span(briefRow({ ...s, tab_count: 1 }, true), "sw-dup")));
@@ -215,8 +220,8 @@ row = briefRow({ ...s, tab_index: 2, tab_count: 2,
                  tab_positions: [{ window_index: 0, tab_index: 2 },
                                  { window_index: 1, tab_index: 0 }] }, false);
 check("with more than one window the tooltip names the window too",
-      /w2t1/.test(row.children.find(c => c.className.trim() === "sw-dup").title),
-      row.children.find(c => c.className.trim() === "sw-dup").title);
+      /w2t1/.test(R(row).children.find(c => c.className.trim() === "sw-dup").title),
+      R(row).children.find(c => c.className.trim() === "sw-dup").title);
 // A list that only has the count (or an older server) must still mark it.
 row = briefRow({ ...s, tab_count: 2, tab_positions: undefined }, true);
 check("no positions available → still marked, never a crash",
