@@ -133,6 +133,10 @@ def _load_conf() -> dict:
         "asr": [],     # list of {label, api_base, key, model} — voice-input ASR backends
         "claude_config": "",   # path to claude's .claude.json (per-project trust); default ~/.claude.json
         "icon": "",                # override the per-host tab icon: pro|air|linux|win
+        # A few letters naming THIS machine. Predates this use — the bundled skills
+        # already read it for the peer-relay tag — and the page title wants the same
+        # fact, so it reads the same key rather than inventing a second one.
+        "name": "",
         "openai_realtime": None,   # {base, key} — realtime (streaming) ASR WS; url in conf, not code
         "soniox": None,            # {base, key} — Soniox true per-token streaming ASR WS
     }
@@ -7614,8 +7618,15 @@ async def asr_stream(ws: WebSocket):
 async def get_server_info():
     """Small facts the SPA needs to adapt its wording. `terminal` is the
     user-facing name of the terminal backend on this host — 'iTerm2' on macOS,
-    'tmux' on Linux — so the UI can say the right thing (resume prompt etc.)."""
-    return {"terminal": TERM_NAME, "platform": _platform.system(), "agent": AGENT}
+    'tmux' on Linux — so the UI can say the right thing (resume prompt etc.).
+
+    `name` is what this machine is called in the page title (`name=` in the conf — the
+    same key the ask-peer skill uses for its tag, because it is the same fact). Read
+    per request like `icon=`, and for the same reason: renaming a box should not need a
+    restart. Config-only, no hostname sniffing — a hostname is either useless
+    ('zhangmiaochang-ThinkPad-X13-Gen-1') or already the thing you'd type by hand."""
+    return {"terminal": TERM_NAME, "platform": _platform.system(), "agent": AGENT,
+            "name": (_load_conf().get("name") or "").strip()}
 
 
 @app.post("/api/resume", dependencies=[Depends(require_token)])

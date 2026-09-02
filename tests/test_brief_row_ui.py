@@ -65,6 +65,16 @@ let attachedSid = "";
 // treePlan works through this one lookup; the test states the shape directly.
 let TREE = {};
 const parentOf = (sid) => TREE[sid] || "";
+// What makeCopyBtn needs: the two icons, an agent name (the copy text is keyed by it)
+// and a clipboard. The clipboard is a SPY, not a real one — headless browsers refuse
+// both writeText and execCommand, so asserting the button's TEXT is the only way to
+// assert what it copies.
+const COPY_SVG = "<copy/>", DONE_SVG = "<done/>";
+let AGENT = "claude";
+let copied = null;
+const navigator = { clipboard: { writeText: (t) => { copied = t; return Promise.resolve(); } } };
+const location = { host: "somehost.ts.net:8443" };
+const setTimeout = () => 0;
 
 __ROW__
 __CHROME__
@@ -89,7 +99,10 @@ check("...then the terminal tab name in brackets",
 check("a single-window machine drops the wX",
       parts(briefRow(s, true))[0] === "sw-wt=t1", parts(briefRow(s, true))[0]);
 check("...then the session name", span(row, "sw-sess") === "本地AI Agent 对比", span(row, "sw-sess"));
-check("...and the last-use time last", parts(row).at(-1) === "br-time=08-17 11:38", parts(row).at(-1));
+// Last of the TEXT columns — the copy button sits after it, at the row's right edge.
+check("...and the last-use time last", span(row, "br-time") === "08-17 11:38", span(row, "br-time"));
+check("...with the copy button after it, at the edge",
+      row.children.at(-1).tagName === "button", row.children.at(-1).tagName);
 check("a bound session is marked", parts(row).some(p => p.startsWith("br-dot=")), parts(row).join(" "));
 check("no transcript excerpt anywhere (brief carries none)", !text(row).includes("…\n"));
 
@@ -112,7 +125,59 @@ check("with nothing at all it says so rather than rendering blank",
 
 console.log("=== an approximate timestamp is marked, not presented as fact ===");
 row = briefRow({ ...s, ts_approx: true });
-check("~ prefixes a mtime-derived time", parts(row).at(-1) === "br-time=~08-17 11:38", parts(row).at(-1));
+check("~ prefixes a mtime-derived time", span(row, "br-time") === "~08-17 11:38", span(row, "br-time"));
+
+console.log("=== the time column is an AGE, not a date ===");
+// "09-01 10:18" is eleven near-identical characters per row; the age is what is read.
+const NOW = Date.now() / 1000;
+const age = (secsAgo, extra) => span(briefRow({ ...s, mtime: NOW - secsAgo, ...extra }), "br-time");
+check("minutes under an hour", age(15 * 60) === "15m", age(15 * 60));
+check("...with a decimal below ten of a unit", age(3.4 * 60) === "3.4m", age(3.4 * 60));
+check("hours under a day", age(5.2 * 3600) === "5.2h", age(5.2 * 3600));
+check("...and integer hours above ten", age(18 * 3600) === "18h", age(18 * 3600));
+check("days after that", age(47 * 86400) === "47d", age(47 * 86400));
+check("...and a decimal for the first ten days", age(1.1 * 86400) === "1.1d", age(1.1 * 86400));
+check("just now reads as now, and a clock-skewed future does too",
+      age(2) === "now" && age(-600) === "now", age(2) + "/" + age(-600));
+check("still marked ~ when the epoch came from the file mtime",
+      age(3 * 86400, { ts_approx: true }) === "~3.0d", age(3 * 86400, { ts_approx: true }));
+// Nothing is lost: the absolute stamp moves to the hover text.
+row = briefRow({ ...s, mtime: NOW - 47 * 86400 });
+const tEl = row.children.find(c => c.className.trim() === "br-time");
+check("the absolute stamp is on hover", tEl.title === "08-17 11:38", String(tEl.title));
+check("an old server with no mtime still shows its formatted stamp",
+      span(briefRow({ ...s, mtime: 0 }), "br-time") === "08-17 11:38",
+      span(briefRow({ ...s, mtime: 0 }), "br-time"));
+
+console.log("=== the row copies the session identifier without opening it ===");
+row = briefRow({ ...s, bound: true });
+const btn = row.children.at(-1);
+copied = null; entered = null; attached = null;
+btn.__click({ stopPropagation() {} });
+check("clicking it copies the identifier the transcript header copies",
+      copied === "claude_code_session=d585bf36-aaaa-bbbb at somehost.ts.net:8443"
+              + ", with tab_name=Compare Hermes and the others", String(copied));
+check("...and does NOT enter or attach the session",
+      entered === null && attached === null, JSON.stringify({ entered, attached }));
+AGENT = "codex";
+row = briefRow({ ...s, bound: true }); copied = null;
+row.children.at(-1).__click({ stopPropagation() {} });
+check("on a codex instance it says codex_session=, like the header does",
+      copied.startsWith("codex_session=d585bf36"), String(copied));
+AGENT = "claude";
+// Caught live on x13: the row copied "tab_name=✳ Compare Hermes…" while the header
+// copied the same name WITHOUT the terminal's activity glyph — two strings for one
+// thing, which is the one failure this button was supposed to make impossible.
+row = briefRow({ ...s, tab_name: "✳ Compare Hermes and the others (claude)" }); copied = null;
+row.children.at(-1).__click({ stopPropagation() {} });
+check("the terminal's decorations are stripped, exactly as the header strips them",
+      copied.endsWith(", with tab_name=Compare Hermes and the others"), String(copied));
+check("...and the name is NOT clamped like the row's display is",
+      !copied.includes("…"), String(copied));
+row = briefRow({ ...s, tab_name: "" }); copied = null;
+row.children.at(-1).__click({ stopPropagation() {} });
+check("a session with no tab name drops the clause instead of copying an empty one",
+      copied === "claude_code_session=d585bf36-aaaa-bbbb at somehost.ts.net:8443", String(copied));
 
 console.log("=== clicking ===");
 row = briefRow({ ...s, bound: true }); row.__click();
@@ -240,7 +305,14 @@ process.exit(_fails.length ? 1 : 0);
     for pat, what in ((r"\n  (function shortSid\(sid\) \{.*?\n  \})\n", "shortSid"),
                       (r"\n  (function tabPos\(p\) \{.*?\n  \})\n", "tabPos"),
                       (r"\n  (function sessionLine\(el, p\) \{.*?\n  \})\n", "sessionLine"),
-                      (r"\n  (function treePlan\(items, getSid\) \{.*?\n  \})\n", "treePlan")):
+                      (r"\n  (function treePlan\(items, getSid\) \{.*?\n  \})\n", "treePlan"),
+                      # The row's own two helpers, and the copy button it hands the
+                      # text to. Extracted, not restated: a stub would let the row's
+                      # copy text drift from the transcript header's, which is the one
+                      # thing the row button promises not to do.
+                      (r"\n  (function relAge\(sec\) \{.*?\n  \})\n", "relAge"),
+                      (r"\n  (function sessionCopyText\(sid, tabName\) \{.*?\n  \})\n", "sessionCopyText"),
+                      (r"\n  (function makeCopyBtn\(getRaw\) \{.*?\n  \})\n", "makeCopyBtn")):
         hit = re.search(pat, src, re.S)
         if not hit:
             print(f"  FAIL  could not extract {what}() — briefRow depends on it"); return 1

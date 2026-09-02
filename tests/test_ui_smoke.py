@@ -143,7 +143,10 @@ def seed_home(home, sids):
                                                 "content": [{"type": "text", "text": "reply " + "y" * 200}]}}) + "\n")
     os.makedirs(os.path.join(cl, "cc_web_snapshots"), exist_ok=True)
     # snapshot_every_min=0: the timer would otherwise add entries mid-test
-    open(os.path.join(cl, "cc_web.conf"), "w").write(f"token={TOKEN}\nsnapshot_every_min=0\n")
+    # name= is the machine label the page title is built from. A value nothing else
+    # could produce, so the title assertion cannot pass by coincidence.
+    open(os.path.join(cl, "cc_web.conf"), "w").write(
+        f"token={TOKEN}\nsnapshot_every_min=0\nname=smokebox\n")
     mk = lambda n, tag, wins=1: [
         {"sid": f"{i:08d}-1111-2222-3333-44444444444{i}", "cwd": f"/tmp/{tag}{i}",
          "name": f"✳ {tag}-{i} (claude)",
@@ -275,6 +278,21 @@ def main():
         drv.js(f"localStorage.setItem('cc_web_token','{TOKEN}');"
                "localStorage.removeItem('cc_web_list_brief');")
         drv.go(base)
+
+        print("=== the tab title says WHICH machine and WHICH agent ===")
+        # Both instances of this app served the identical title, so several open tabs
+        # were told apart only by a 16px favicon. Asserted against what the server
+        # reports rather than a literal, so it stays true wherever this runs.
+        info = json.loads(urllib.request.urlopen(
+            urllib.request.Request(base + "/api/server-info",
+                                   headers={"authorization": "Bearer " + TOKEN}),
+            timeout=10).read().decode())
+        want = f"{info['name']} - {info['agent']}"
+        drv.wait("document.title === " + json.dumps(want))   # set once server-info lands
+        got = drv.js("return document.title")
+        check("title is '<machine> - <agent>'", got == want, f"{got!r} != {want!r}")
+        check("...and the machine name came from the conf, not the hostname",
+              info["name"] == "smokebox", info["name"])
 
         print("=== the session list, brief by default ===")
         n = drv.wait("document.querySelectorAll('#picker-list .brief-row').length")

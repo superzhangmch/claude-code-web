@@ -321,6 +321,18 @@ main {
 #picker-list .brief-row .sw-sess { flex: 1; }   /* takes the slack; time sits right */
 #picker-list .brief-row .br-time { color: var(--muted); font-size: 11px; flex-shrink: 0; }
 #picker-list .brief-row .br-dot { color: var(--accent); font-size: 11px; flex-shrink: 0; }
+/* Per-row "copy the session identifier". The transcript's .copy-btn rules are scoped
+   under .msg, so they are restated here instead of widening that selector across every
+   transcript block. align-self: center because the row aligns on the text baseline,
+   which would hang a 12px icon below the line. */
+#picker-list .brief-row .copy-btn {
+  background: transparent; color: var(--muted); border: 0; cursor: pointer;
+  padding: 0 0 0 7px; line-height: 0; flex-shrink: 0;
+  display: inline-flex; align-items: center; align-self: center;
+}
+#picker-list .brief-row .copy-btn:hover { color: var(--text); }
+#picker-list .brief-row .copy-btn svg { display: block; }
+#picker-list .brief-row .copy-btn.done { color: #6ee884; }
 #picker-brief { flex-shrink: 0; background: var(--panel2); color: var(--muted);
   border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px;
   font-size: 12px; cursor: pointer; line-height: 1; }
@@ -2688,6 +2700,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // Every user-visible mention of the agent goes through one of these two — a
   // hardcoded "Claude" on a codex instance is just a lie about what you are looking at.
   const agentLc = () => AGENT;
+  // A few letters naming the MACHINE, from `name=` in cc_web.conf. Every instance
+  // served the same title, so a browser holding four of them showed four tabs all
+  // reading "Claude Code — Web": the favicon was the only thing telling them apart,
+  // and a favicon is 16px — on a greyscale e-ink screen it tells you nothing at all.
+  // The title has room, so the title is where this belongs.
+  let HOST_LABEL = "";
+  // Machine and agent FIRST, and nothing else: a tab truncates from the END, and a
+  // narrow one shows about ten characters — exactly the ten that have to differ.
+  // Unset label → the old title verbatim, so an unconfigured host is unchanged.
+  function pageTitle() {
+    if (HOST_LABEL) return HOST_LABEL + " - " + agentLc();
+    return (AGENT === "claude" ? "Claude Code" : AGENT_LABEL) + " — Web";
+  }
   async function loadServerInfo() {
     try {
       const r = await authedFetch("/api/server-info");
@@ -2699,8 +2724,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         if (d && d.agent) {
           AGENT = String(d.agent);
           AGENT_LABEL = AGENT.charAt(0).toUpperCase() + AGENT.slice(1);
-          document.title = (AGENT === "claude" ? "Claude Code" : AGENT_LABEL) + " — Web";
         }
+        // Both parts of the title come from this one response, so it is written once,
+        // after both are in hand — not inside the `agent` branch, where a host that
+        // configured a label but somehow reported no agent would keep the old title.
+        HOST_LABEL = String((d && d.name) || "").trim();
+        document.title = pageTitle();
         if (d && d.terminal) { TERM = d.terminal; }
         applyTermName();
         if (d && d.agent) rebuild(true);   // relabel anything already on screen
@@ -6046,6 +6075,22 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     });
   }
 
+  // "09-01 10:18" is eleven characters, and down the column most of them repeat —
+  // on a phone the session NAME is what gets squeezed to make room for them. What the
+  // eye wants from this column is how long ago, so say that: 3.4m / 5.2h / 47d. One
+  // decimal below ten of a unit and none above, so the width is the same either way
+  // and there is no false precision like "47.3d". The absolute stamp is not lost: it
+  // moves to the hover title. Negative ages (clock skew between hosts) read as "now".
+  function relAge(sec) {
+    if (!sec) return "";
+    const age = Date.now() / 1000 - sec;
+    if (age < 45) return "now";
+    const [v, u] = age < 3600 ? [age / 60, "m"]
+                 : age < 86400 ? [age / 3600, "h"]
+                 : [age / 86400, "d"];
+    return (v < 10 ? v.toFixed(1) : String(Math.round(v))) + u;
+  }
+
   // One brief row: sid4 · [tab-name] · session-name … last-use.
   // Click = what the card's title button does (Enter when bound, else Attach); the full
   // view keeps the management actions (rename, close tab, kill, transcript excerpts).
@@ -6074,7 +6119,23 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
                        sessName: name, fallback: "(no title yet)" });
     if (s.bound) add("br-dot", "●");                                // attached to a live tab
     // ~ = the timestamp came from the file mtime because the tail held no human turn.
-    add("br-time", (s.ts_approx ? "~" : "") + (s.last_visit || ""));
+    // mtime is the epoch the server already sends as the sort key; last_visit is the
+    // preformatted stamp, kept as the fallback and as the hover text.
+    const tEl = add("br-time", (s.ts_approx ? "~" : "") + (relAge(s.mtime) || s.last_visit || ""));
+    if (tEl && s.last_visit) {
+      tEl.title = s.last_visit + (s.ts_approx ? "  (file mtime — no human turn in the tail)" : "");
+    }
+    // Copy the session identifier without opening the session first. Same text, same
+    // builder as the transcript header's click-to-copy; makeCopyBtn already stops the
+    // click from reaching the row (which would attach), and shows a ✓ for a second.
+    // stripTab, because the header's copy goes through metaBits() which strips: the raw
+    // name carries the terminal's activity glyph ("✳ Compare Hermes…") and pasting THAT
+    // into ask-peer is not the same string the header hands you. Stripped but NOT
+    // clamped — the row shows "[Compare Hermes a…]" to fit, the clipboard gets it whole.
+    const cp = makeCopyBtn(() => sessionCopyText(s.claude_session_id, stripTab(s.tab_name || "")));
+    cp.title = "复制 " + (AGENT === "claude" ? "claude_code" : AGENT)
+             + "_session=… (和进入会话后点顶部那一份完全一样)";
+    row.appendChild(cp);
     row.addEventListener("click", () => {
       const label = s.user_name || s.summary_title || s.title || s.project_path || "";
       if (s.bound) enterTranscript(s.claude_session_id, label);
@@ -6631,11 +6692,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // are addressed by different tools, and pasting one where the other is expected
   // fails in a way that reads like a bug in the peer ("no rollout found for thread
   // id …" was exactly that). claude_code_session= / codex_session=.
-  function metaCopyText() {
-    const { tn } = metaBits();
+  // The one place this string is built. The list's per-row copy button hands over a
+  // sid + tab name and gets back BYTE-IDENTICAL text to what the transcript header
+  // copies — the point of the row button is to skip opening the session, not to get a
+  // second, subtly different format that then has to be kept in sync by hand.
+  function sessionCopyText(sid, tabName) {
     const kind = AGENT === "claude" ? "claude_code" : AGENT;
-    return kind + "_session=" + attachedSid + " at " + location.host
-         + (tn ? ", with tab_name=" + tn : "");
+    return kind + "_session=" + sid + " at " + location.host
+         + (tabName ? ", with tab_name=" + tabName : "");
+  }
+  function metaCopyText() {
+    return sessionCopyText(attachedSid, metaBits().tn);
   }
   function setMeta() {
     // Hover shows exactly what a click will put on the clipboard.
@@ -7765,14 +7832,24 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         btn.innerHTML = DONE_SVG; btn.classList.add("done");
         setTimeout(() => { btn.innerHTML = COPY_SVG; btn.classList.remove("done"); }, 1000);
       };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(raw).then(done, () => btn.title = "Copy failed");
-      } else {
+      // The textarea path is the fallback for BOTH "no clipboard API" and "the API
+      // rejected" — writeText rejects on an unfocused document and in some WebViews,
+      // and the old code turned that into a dead button saying "Copy failed" while a
+      // working fallback sat in the else branch. (The transcript header's copy has
+      // always chained them; this is the same chain.)
+      const viaTextarea = () => {
         const ta = document.createElement("textarea");
-        ta.value = raw; document.body.appendChild(ta);
-        ta.select(); try { document.execCommand("copy"); done(); }
-        catch { btn.title = "Copy failed"; }
+        ta.value = raw; ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.select();
+        let ok = false;
+        try { ok = document.execCommand("copy"); } catch {}
         ta.remove();
+        ok ? done() : (btn.title = "Copy failed");
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(raw).then(done, viaTextarea);
+      } else {
+        viaTextarea();
       }
     });
     return btn;
