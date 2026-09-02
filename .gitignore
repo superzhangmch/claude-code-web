@@ -12,3 +12,9 @@ remote_mac_ctrl_static/cache/
 
 # requirements/handoff notes — local only (had private hosts/paths/ids)
 REQUIREMENTS.md
+
+# Throwaway icon/layout experiments served straight out of static/ while a design is
+# being looked at (static/_try-*.svg, static/_iconprev.html). They exist to be viewed
+# in a real browser at a real size and then deleted; only the chosen one gets a name.
+static/_try-*
+static/_iconprev.html
