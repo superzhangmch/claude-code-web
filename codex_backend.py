@@ -147,30 +147,40 @@ def _env_of(pid: int) -> dict[str, str]:
     return env
 
 
-# A pane whose foreground is one of these is at a SHELL PROMPT, not running an
-# agent. Deliberately a list of shells rather than a list of codex process names:
-# under-reporting a live session is worse than the reverse, and codex's own name
-# (`node` for the npm wrapper, a vendored binary underneath) is the thing likely to
-# change.
-_SHELL_CMDS = {"bash", "zsh", "sh", "fish", "dash", "tcsh", "ksh", "-bash", "-zsh"}
+def _has_terminal_foreground(pid: int) -> Optional[bool]:
+    """Does this process currently own its terminal? None if it cannot be told.
 
+    Holding the thread's writer lock is not enough to be TALKABLE. Measured twice, in
+    opposite directions:
 
-def _pane_foreground() -> dict:
-    """{pane_id: foreground command} from tmux, or {} if tmux is not there."""
+      * a session closed abruptly (its pane killed) can leave codex's vendored binary
+        alive and still holding the lock — the row looked live, and sending to it would
+        have typed the message at the shell prompt that replaced it, which runs it as a
+        command;
+      * a session STARTED BY cc-web has `bash` as its pane's "current command",
+        because it runs as `bash -lc 'codex; exec $SHELL'` and a non-interactive shell
+        does no job control, so the terminal's foreground group stays the shell's. A
+        first attempt at this check compared process NAMES and hid every session
+        cc-web had created — the ones that matter most.
+
+    So the question is asked at the level where it is actually defined: a process owns
+    the terminal when its process group IS the terminal's foreground group. Orphaned by
+    a dead pane, there is no terminal at all (tty 0 / tpgid -1) and this says False;
+    running normally — started by hand or by cc-web — it says True.
+    """
     try:
-        r = subprocess.run(["tmux", "list-panes", "-a", "-F",
-                            "#{pane_id}\t#{pane_current_command}"],
-                           capture_output=True, text=True, timeout=6)
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    if r.returncode != 0:
-        return {}
-    out = {}
-    for line in (r.stdout or "").splitlines():
-        parts = line.split("\t")
-        if len(parts) == 2:
-            out[parts[0]] = parts[1]
-    return out
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    try:
+        # comm can contain spaces and parens; everything after the LAST ')' is fixed.
+        f = raw[raw.rindex(")") + 2:].split()
+        tty_nr, pgrp, tpgid = int(f[4]), int(f[2]), int(f[5])
+    except (ValueError, IndexError):
+        return None
+    if tty_nr == 0 or tpgid <= 0:
+        return False                     # no controlling terminal → nobody can type at it
+    return pgrp == tpgid
 
 
 def _cwd_of(pid: int) -> str:
@@ -271,13 +281,6 @@ def _list_threads_uncached(limit: int = 60) -> list[dict]:
     except sqlite3.Error:
         return []
     holders = _lock_holders()
-    # Holding the writer lock is not enough to be TALKABLE. Measured: after a session
-    # is closed with /exit, codex's vendored binary can outlive the TUI — it keeps the
-    # lock while the pane falls back to a shell prompt. Such a row looked live and was
-    # not: sending to it would have typed the message at a bash prompt, which runs it
-    # as a command. So a session counts as live only if its pane is still running
-    # something other than a shell.
-    fg = _pane_foreground()
     out = []
     for (tid, cwd, title, upd, created, tokens, appr, provider, rollout,
          source, name) in rows:
@@ -292,9 +295,8 @@ def _list_threads_uncached(limit: int = 60) -> list[dict]:
             continue
         pid = holders.get(tid)
         env = _env_of(pid) if pid else {}
-        pane_now = env.get("TMUX_PANE", "")
-        if pid and pane_now and fg and fg.get(pane_now, "") in _SHELL_CMDS:
-            pid = None                      # lock outlived the session; not talkable
+        if pid and _has_terminal_foreground(pid) is False:
+            pid = None                      # lock outlived its terminal; not talkable
         out.append({
             "agent": "codex",
             "thread_id": tid,

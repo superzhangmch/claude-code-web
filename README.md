@@ -322,6 +322,71 @@ the supervisor (`launchctl kickstart -k …` / `systemctl --user restart …`), 
 stops the old pid and waits for it before starting the new one. Don't `pkill` —
 the supervisor races you and respawns mid-start.
 
+## Serving codex instead of claude
+
+`CC_WEB_AGENT=codex` makes this same server serve **codex** sessions. Same endpoints,
+same frontend, its own port — so opening it gives you cc-web, not a second, thinner
+thing. Run one instance per agent:
+
+```sh
+# claude, as always
+./.venv/bin/uvicorn cc_web:app --host "$TS_IP" --port 8443 \
+    --ssl-certfile ~/cc_https/tls.crt --ssl-keyfile ~/cc_https/tls.key
+
+# codex, beside it
+CC_WEB_AGENT=codex ./.venv/bin/uvicorn cc_web:app --host "$TS_IP" --port 8444 \
+    --ssl-certfile ~/cc_https/tls.crt --ssl-keyfile ~/cc_https/tls.key
+```
+
+Both instances share one token (`~/.claude/cc_web.conf`) and one certificate. Only
+the claude side should REFRESH that certificate — two services renewing the same
+pair race each other.
+
+Everything cc_web writes is suffixed per agent (`cc_web_bindings.codex.json`,
+`cc_web_tree.codex.json`, …) and its instance lock is `cc_web.codex.lock`, so the two
+cannot clobber each other. Two instances of the SAME agent are still refused.
+
+### Auto mode
+
+A codex session opened by hand starts `on-request` + `read-only`: every command waits
+for a human and nothing can be written. cc-web's "new session" therefore starts codex
+with **`--approve-for-me`** — its equivalent of claude's `⏵⏵ auto mode`: approvals go
+through automatic review, with the workspace-write sandbox. Nothing to configure; if
+you start codex yourself and want the same, pass that flag.
+
+### Watch out for
+
+- **Both instances run `uvicorn cc_web:app`.** A single-instance guard that matches
+  only the app name sees the *other agent* and refuses to start — a claude service sat
+  in a restart loop reporting "another cc_web is already running" while what it had
+  found was the codex one. Match the **port** (`linux_helpers/` scripts do).
+- **A session is only listed while it can be talked to.** codex's binary can outlive
+  its TUI when a pane is killed abruptly: it keeps the thread's writer lock, so a
+  lock-only test shows a dead session as live — and a message sent there is typed at
+  the shell prompt that replaced it, i.e. run as a command. The test is whether the
+  process still owns its terminal (its process group is the terminal's foreground
+  group), not what the pane's foreground command is *called*: a session started by
+  cc-web runs as `bash -lc 'codex; exec $SHELL'`, and a non-interactive shell does no
+  job control, so tmux reports its command as `bash` even while codex is running.
+- **The first message to a brand-new session** cannot go through `codex queue` — that
+  addresses threads through the rollout store, which does not exist until an exchange
+  has happened. cc-web types it instead, which is what a human would do.
+- **A new session opens on a trust prompt** in a directory codex has not seen. cc-web
+  answers it for you (same as the macOS bridge has always done for claude); any other
+  numbered menu it raises reaches the browser as a choice, which needs codex's cursor
+  glyph (`›`, U+203A) to be recognised alongside claude's `❯`.
+- **codex writes nothing to its log until a turn ends** — measured: 60s into a turn,
+  zero bytes appended, neither the question nor the answer. So the transcript cannot
+  say "busy" and cannot echo what you just sent. Liveness comes from
+  `thread_turns.status` in its sqlite (which does update live), and your own message is
+  echoed from a small pending registry until the log admits it exists.
+- **`codex exec` reads stdin.** Anything cc-web invokes gets `/dev/null`, or a
+  heredoc's leftovers end up inside the prompt.
+
+`skills/ask-peer-claude-code/AGENTS.codex.md` → `~/.codex/AGENTS.md` teaches a codex
+session how to talk to a claude one (and vice versa); `skills/my-session-id/codexsid`
+is its "who am I". Both are described in `skills/README.md`.
+
 ## Extras: the grammar hook
 
 `hooks/grammar/` is a **separate**, optional Claude Code `UserPromptSubmit` hook

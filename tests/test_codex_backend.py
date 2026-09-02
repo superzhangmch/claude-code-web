@@ -213,12 +213,11 @@ async def main():
 
         print("=== live = someone holds the writer lock ===")
         cx.invalidate_threads_cache()      # assert liveness, not the 1.5s cache
-        # The pane-foreground rule below is about REAL panes; this fixture's "holder"
-        # is the test process, which lives in whatever pane happens to be running the
-        # suite (a shell). Stub the lookup to "unknown" so this block tests the lock,
-        # and test the rule itself right after.
-        _real_fg = cx._pane_foreground
-        cx._pane_foreground = lambda: {}
+        # The terminal-ownership rule is tested on its own below; here the "holder" is
+        # the test process, whose own terminal state says nothing about the fixture.
+        # Stub it to "cannot tell" so this block tests the LOCK.
+        _real_fg = cx._has_terminal_foreground
+        cx._has_terminal_foreground = lambda pid: None
         lock = home / "thread-writer-locks" / "live-thread.lock"
         lock.write_text("")
         fh = open(lock, "r")                     # hold an fd, like codex's flock does
@@ -233,7 +232,7 @@ async def main():
         cx.invalidate_threads_cache()
         after = {t["thread_id"]: t for t in cx.list_threads()}["live-thread"]
         check("releasing it marks the thread finished", after["live"] is False)
-        cx._pane_foreground = _real_fg
+        cx._has_terminal_foreground = _real_fg
 
         print("=== a lock can outlive the session that held it ===")
         # Measured: closing a codex session with /exit can leave its vendored binary
@@ -242,20 +241,24 @@ async def main():
         # typed the message at a bash prompt, which runs it as a command.
         fh2 = open(lock, "r")
         try:
-            for fg, want, why in (({}, True, "tmux unknown → trust the lock"),
-                                  ({"%9": "node"}, True, "pane still running an agent"),
-                                  ({"%9": "bash"}, False, "pane back at a shell prompt")):
-                cx._pane_foreground = (lambda f: (lambda: f))(fg)
-                cx._env_of_real = cx._env_of
-                cx._env_of = lambda pid: {"TMUX_PANE": "%9"}
+            for owns, want, why in ((None, True, "cannot tell → trust the lock"),
+                                    (True, True, "still owns its terminal"),
+                                    (False, False, "orphaned: no terminal to type at")):
+                cx._has_terminal_foreground = (lambda v: (lambda pid: v))(owns)
                 cx.invalidate_threads_cache()
                 got = {t["thread_id"]: t for t in cx.list_threads()}["live-thread"]["live"]
                 check(f"{why} → live={want}", got is want, f"got {got}")
-                cx._env_of = cx._env_of_real
         finally:
             fh2.close()
-            cx._pane_foreground = _real_fg
+            cx._has_terminal_foreground = _real_fg
             cx.invalidate_threads_cache()
+
+        # And the rule itself, against real processes: this test owns its terminal only
+        # if it was started from one, so assert the shape rather than a fixed answer.
+        me = cx._has_terminal_foreground(os.getpid())
+        check("the rule answers True/False/None and nothing else", me in (True, False, None), me)
+        check("a pid that does not exist is 'cannot tell', not a crash",
+              cx._has_terminal_foreground(999999) is None)
 
         print("=== the transcript ===")
         r = cx.parse_rollout(rp)
