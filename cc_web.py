@@ -5668,6 +5668,10 @@ async def get_state(
         "epoch": cur_epoch,
         "resync": resync,
         "removed_idxs": removed_idxs,   # rewound turns to DELETE in place (live rewind)
+        # Just the mtime of this session's memo (task / standing notes), ~20 bytes.
+        # The client re-fetches the text only when this moves — so an edit made on
+        # another device shows up, without every poll carrying the strings.
+        "memo_ver": _memo_ver(claude_session_id),
     }
     # Drop null-valued fields to save bytes on every poll — the client reads them
     # all as "missing == default" (status_line/gap_before_idx/pending_confirm/
@@ -5675,6 +5679,113 @@ async def get_state(
     # treat undefined exactly like null). since_idx is None only on an empty
     # session (no cursor to advance), which the client also handles.
     return {k: v for k, v in resp.items() if v is not None}
+
+
+# ---------------------------------------------------------------------------
+# Per-session memo: what I want to keep telling this session.
+#
+# Two fields, because they age differently. `task` is what it should be doing right
+# now and is rewritten as the work moves on. `notes` are this session's standing
+# rules, true regardless of the current task ("don't restructure index.html",
+# "deploy only after the suite passes") — folding them into one box would mean
+# retyping the standing half every time the task changes, which is exactly how it
+# stops being kept up to date. A third slot, `supervisor`, is reserved and unused:
+# a watching agent will need somewhere to read the intent from, and that is here,
+# because this is the version the HUMAN wrote — a model's own summary of what it is
+# doing is least trustworthy precisely when it has drifted.
+#
+# ONE FILE PER SESSION, not one map keyed by session: two instances writing at once
+# cannot lose each other's edits, and forgetting a session is `rm` of one file.
+_MEMO_FIELDS = ("task", "notes")
+# No path separators, so a session id cannot climb out of the directory. Both id
+# shapes fit (claude's uuid4, codex's uuid7) as do codex's `pending-pane-%3` aliases.
+_MEMO_SID_RE = re.compile(r"[0-9a-zA-Z._%-]{4,80}")
+
+
+def _memo_dir() -> Path:
+    d = _state_path("cc_web_memo.d")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _memo_file(sid: str) -> Path:
+    if not sid or not _MEMO_SID_RE.fullmatch(sid):
+        raise HTTPException(status_code=400, detail="bad session id")
+    return _memo_dir() / (sid + ".json")
+
+
+def _memo_blank() -> dict:
+    z = {"text": "", "updated_at": "", "sent_at": "", "sent_count": 0}
+    return {"task": dict(z), "notes": dict(z), "supervisor": None}
+
+
+def _memo_read(sid: str) -> dict:
+    rec = _memo_blank()
+    try:
+        raw = json.loads(_memo_file(sid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return rec
+    if not isinstance(raw, dict):
+        return rec
+    for f in _MEMO_FIELDS:
+        got = raw.get(f)
+        if isinstance(got, dict):
+            rec[f].update({k: v for k, v in got.items() if k in rec[f]})
+        elif isinstance(got, str):
+            rec[f]["text"] = got          # tolerate a hand-written flat file
+    rec["supervisor"] = raw.get("supervisor")
+    return rec
+
+
+def _memo_ver(sid: str) -> Optional[int]:
+    """mtime as the version, sent on every poll so a client can tell it is stale
+    (edited on another device, or later by the supervisor) without the poll having
+    to carry the text itself — the text is fetched only when this number moves."""
+    try:
+        return int(_memo_file(sid).stat().st_mtime)
+    except (OSError, HTTPException):
+        return None
+
+
+class MemoPayload(BaseModel):
+    claude_session_id: str
+    field: str                              # task | notes
+    text: Optional[str] = None              # set the text (None = leave it alone)
+    mark_sent: bool = False                 # stamp "sent to the session just now"
+
+
+@app.get("/api/session-memo", dependencies=[Depends(require_token)])
+def get_session_memo(claude_session_id: str):
+    return _memo_read(claude_session_id)
+
+
+@app.post("/api/session-memo", dependencies=[Depends(require_token)])
+def post_session_memo(payload: MemoPayload):
+    """Set one field's text, or stamp that it was just sent. The SENDING itself is
+    not here: the client posts the message through /api/input like any other, so a
+    reminder queues behind a running turn and lands in the transcript exactly like
+    something typed by hand. This endpoint only records that it happened."""
+    import datetime as _dt          # function-local, like every other use in this file
+    if payload.field not in _MEMO_FIELDS:
+        raise HTTPException(status_code=400, detail="field must be task or notes")
+    f = _memo_file(payload.claude_session_id)
+    rec = _memo_read(payload.claude_session_id)
+    now = _dt.datetime.now().isoformat(timespec="seconds")
+    if payload.text is not None:
+        rec[payload.field]["text"] = payload.text.strip()
+        rec[payload.field]["updated_at"] = now
+    if payload.mark_sent:
+        rec[payload.field]["sent_at"] = now
+        rec[payload.field]["sent_count"] = int(rec[payload.field].get("sent_count") or 0) + 1
+    # Both fields empty and never sent → no file at all, so an untouched session
+    # costs nothing and `memo_ver` stays absent on its polls.
+    if not any(rec[x]["text"] or rec[x]["sent_count"] for x in _MEMO_FIELDS) and not rec["supervisor"]:
+        f.unlink(missing_ok=True)
+        return rec
+    tmp = f.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(f)
+    return rec
 
 
 @app.get("/api/session-procs", dependencies=[Depends(require_token)])

@@ -2078,6 +2078,26 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #links-modal .link-row a.btn:hover { border-color: var(--accent); }
 #links-modal .link-row a.btn.dim { opacity: .45; }
 #links-modal .links-empty { color: var(--muted); padding: 12px 4px; font-size: 13px; }
+/* Per-session memo. Two stacked boxes; the card is width-capped like the others and
+   the textareas grow with the card rather than the text, so the phone keyboard never
+   pushes the send button off screen. */
+/* .modal-row's flex is id-scoped per modal, so without this the ✕ drops onto its
+   own line under the title (it did). */
+#memo-modal .modal-row { display: flex; align-items: center; gap: 8px; }
+#memo-modal .modal-row h3 { margin: 0; font-size: 15px; }
+#memo-modal .memo-card { width: 92vw; max-width: 560px; display: flex; flex-direction: column; gap: 10px; }
+#memo-modal .memo-sec { display: flex; flex-direction: column; gap: 5px; }
+#memo-modal .memo-lab { font-size: 12px; color: var(--text); }
+#memo-modal .memo-hint { color: var(--muted); font-size: 11px; }
+#memo-modal .memo-ta {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 8px;
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+}
+#memo-modal .memo-row { display: flex; align-items: center; gap: 8px; }
+#memo-modal .memo-meta { flex: 1; color: var(--muted); font-size: 11px; }
+#memo-modal .memo-saved { color: var(--muted); font-size: 11px; flex: 1; }
 #files-modal .files-favs {
   display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0;
   max-height: 18vh; overflow-y: auto;
@@ -2316,6 +2336,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div class="scr-cfg-row"><span>发送后翻译</span>
       <button class="sw-item" id="mm-autotranslate">关</button>
     </div>
+    <div class="scr-cfg-row"><span>任务备忘</span>
+      <button class="sw-item" id="mm-memo"
+              title="记录这个 session 的当前任务和长期注意事项;必要时发给它">📌 <span id="mm-memo-hint">未设置</span></button>
+    </div>
     <!-- Maintaining the tree happens HERE, from inside the session being moved: the
          context ("who should this sit under?") is already on screen, so it needs no
          organise mode, no per-row widgets in the lists, and no drag surface. -->
@@ -2447,6 +2471,31 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div class="modal-card">
       <div class="modal-row"><h3 id="links-title">Links</h3><button id="links-close" class="btn" title="close">✕</button></div>
       <div id="links-list" class="links-list"></div>
+    </div>
+  </div>
+
+  <!-- Per-session memo: what I keep wanting to tell THIS session. Two boxes because
+       they age differently — the task is rewritten as the work moves on, the notes are
+       standing rules that outlive it. Each sends on its own: re-stating the goal and
+       re-stating the ground rules are different interventions. -->
+  <div id="memo-modal" class="modal">
+    <div class="modal-card memo-card">
+      <div class="modal-row"><h3>任务备忘</h3><span id="memo-saved" class="memo-saved"></span>
+        <button id="memo-close" class="btn" title="close">✕</button></div>
+      <div class="memo-sec">
+        <div class="memo-lab">当前任务 <span class="memo-hint">随进展改写</span></div>
+        <textarea id="memo-task" class="memo-ta" rows="3"
+                  placeholder="这个 session 现在该做的事 —— 你写的版本, 不是它自己总结的"></textarea>
+        <div class="memo-row"><span id="memo-task-meta" class="memo-meta"></span>
+          <button id="memo-task-send" class="btn" title="作为一条消息发给这个 session, 标注为 [当前任务]">发给 session</button></div>
+      </div>
+      <div class="memo-sec">
+        <div class="memo-lab">注意事项 <span class="memo-hint">与当前任务无关, 长期有效</span></div>
+        <textarea id="memo-notes" class="memo-ta" rows="3"
+                  placeholder="这个 session 一直要守的规矩, 例如: 不要重构 index.html 的结构; 部署前先跑测试"></textarea>
+        <div class="memo-row"><span id="memo-notes-meta" class="memo-meta"></span>
+          <button id="memo-notes-send" class="btn" title="作为一条消息发给这个 session, 标注为 [注意事项]">发给 session</button></div>
+      </div>
     </div>
   </div>
 
@@ -3175,6 +3224,112 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const modeGroup = document.getElementById("mode-group");
   const modeBtn = document.getElementById("mode-btn");
   const modeMenu = document.getElementById("mode-menu");
+  // ---------- per-session memo (current task + standing notes) ----------
+  // The server keeps one file per session; the poll carries only its mtime, so the
+  // text is fetched when it MOVES — which is also how an edit made on the phone
+  // reaches the laptop without either polling for strings it already has.
+  const memoModal = document.getElementById("memo-modal");
+  const memoTA = { task: document.getElementById("memo-task"), notes: document.getElementById("memo-notes") };
+  const memoMeta = { task: document.getElementById("memo-task-meta"), notes: document.getElementById("memo-notes-meta") };
+  const memoSavedEl = document.getElementById("memo-saved");
+  const mmMemoHint = document.getElementById("mm-memo-hint");
+  let memoRec = null, memoVerSeen = -1, memoSid = "", _memoSaveT = {};
+  const MEMO_TAG = { task: "[当前任务]", notes: "[注意事项]" };
+  function memoRender() {
+    const r = memoRec || { task: {}, notes: {} };
+    for (const f of ["task", "notes"]) {
+      const cur = r[f] || {};
+      // Don't stomp what is being typed right now — a poll-driven refresh landing
+      // mid-sentence would eat the sentence.
+      if (memoTA[f] && document.activeElement !== memoTA[f]) memoTA[f].value = cur.text || "";
+      if (memoMeta[f]) {
+        const n = cur.sent_count || 0;
+        // relAge()'s "now" is a word, not a duration — "now前" was the first thing this
+        // printed. An unparsable stamp degrades to just the count rather than "?前".
+        const ago = relAge(Date.parse(cur.sent_at) / 1000);
+        memoMeta[f].textContent = !n ? (cur.text ? "还没发过" : "")
+          : ago === "now" ? `刚刚发送 · 共 ${n} 次`
+          : ago ? `${ago} 前发送 · 共 ${n} 次`
+          : `已发送 ${n} 次`;
+      }
+    }
+    // The gear row says whether there is anything, and shows the task's first words —
+    // otherwise you have to open the modal to find out if you ever wrote one.
+    if (mmMemoHint) {
+      const t = (r.task && r.task.text || "").trim(), n = (r.notes && r.notes.text || "").trim();
+      mmMemoHint.textContent = t ? clampU(t, 12) : (n ? "仅注意事项" : "未设置");
+    }
+  }
+  async function memoLoad(sid, ver) {
+    if (!sid) { memoRec = null; memoSid = ""; memoVerSeen = -1; memoRender(); return; }
+    try {
+      const r = await authedFetch("/api/session-memo?claude_session_id=" + encodeURIComponent(sid));
+      if (!r.ok || sid !== attachedSid) return;
+      memoRec = await r.json(); memoSid = sid; memoVerSeen = ver;
+      memoRender();
+    } catch {}
+  }
+  // Called from the poll: the version moved (or we just attached elsewhere).
+  function memoSync(ver) {
+    const v = (ver == null ? 0 : ver);
+    if (attachedSid !== memoSid || v !== memoVerSeen) memoLoad(attachedSid, v);
+  }
+  async function memoPost(body) {
+    const r = await authedFetch("/api/session-memo", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ claude_session_id: attachedSid, ...body }),
+    });
+    if (r.ok) { memoRec = await r.json(); memoVerSeen = -1; memoRender(); }   // -1: let the next poll confirm
+    return r.ok;
+  }
+  function memoSave(f) {           // debounced: typing should not be one request per keystroke
+    clearTimeout(_memoSaveT[f]);
+    _memoSaveT[f] = setTimeout(async () => {
+      if (!attachedSid) return;
+      const ok = await memoPost({ field: f, text: memoTA[f].value });
+      memoSavedEl.textContent = ok ? "已保存" : "保存失败";
+      setTimeout(() => { memoSavedEl.textContent = ""; }, 1500);
+    }, 600);
+  }
+  async function memoSend(f) {
+    const text = (memoTA[f].value || "").trim();
+    if (!attachedSid || !text) return;
+    // Same door as the composer: it queues behind a running turn and shows up in the
+    // transcript like anything else typed here. The tag is there so the model reads it
+    // as a re-statement of standing intent, not as a brand-new request — the same
+    // reason the peer-relay messages carry one.
+    const btn = document.getElementById("memo-" + f + "-send");
+    btn.disabled = true;
+    try {
+      await memoPost({ field: f, text });                       // save whatever is in the box first
+      const r = await authedFetch("/api/input", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ claude_session_id: attachedSid, text: MEMO_TAG[f] + " " + text }),
+      });
+      if (!r.ok) { alert("发送失败: " + (await r.text())); return; }
+      await memoPost({ field: f, mark_sent: true });
+      keepAlive(); schedulePoll(400);
+      memoSavedEl.textContent = "已发送";
+      setTimeout(() => { memoSavedEl.textContent = ""; }, 1500);
+    } finally { btn.disabled = false; }
+  }
+  for (const f of ["task", "notes"]) {
+    if (memoTA[f]) memoTA[f].addEventListener("input", () => memoSave(f));
+    const sb = document.getElementById("memo-" + f + "-send");
+    if (sb) sb.addEventListener("click", () => memoSend(f));
+  }
+  document.getElementById("memo-close").addEventListener("click", () => memoModal.classList.remove("show"));
+  memoModal.addEventListener("click", (e) => { if (e.target === memoModal) memoModal.classList.remove("show"); });
+  const mmMemo = document.getElementById("mm-memo");
+  if (mmMemo) mmMemo.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
+    modeMenu.style.display = "none";
+    memoLoad(attachedSid, memoVerSeen);   // open on the server's copy, not a stale one
+    memoModal.classList.add("show");
+    if (!isPhone()) setTimeout(() => memoTA.task.focus(), 50);
+  });
+
   const mmExitClose = document.getElementById("mm-exit-close");
   if (mmExitClose) mmExitClose.addEventListener("click", async (e) => {
     e.stopPropagation();
@@ -9224,6 +9379,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (sid !== attachedSid) return;   // switched away during json() → don't ingest into the new session
       claudeIdle = m.claude_idle === true;
       setStatus("ok"); setReady(m.claude_idle); updateAutoload();
+      memoSync(m.memo_ver);   // mtime moved (or another session) → refetch the memo text
       // heartbeat: poll while busy; freeze (show last diff, "idle") when idle;
       // fully hide when hidden/paused/detached.
       syncHeartbeat();
