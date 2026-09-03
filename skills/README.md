@@ -104,6 +104,44 @@ would drop the reply body while the call still looked like it succeeded.
 What no check can decide is whether an answer should be given at all, which is why
 the skill keeps a short list of what not to do on a stranger's request.
 
+## self-check
+
+Checks THIS session against the two boxes a human filled in for it in cc-web
+(`⚙ → Task`: the current task, and the standing notes) and writes an
+evidence-bearing report to one fixed place:
+
+```sh
+cp -R skills/self-check ~/.claude/skills/
+# then in the session: "自检" / "self-check"
+python3 ~/.claude/skills/self-check/selfcheck.py show     # read the last one
+```
+
+A self-check is a self-graded exam — the failure mode of drift is that the model
+believes it is on task, so its verdict passes exactly when it is most wrong. So the
+value here is not what the model writes, it is **what it cannot write down**.
+`selfcheck.py` owns the deterministic half and REFUSES the shapes of report that rot:
+
+| Refused | Why |
+|---|---|
+| a status with no evidence | "done" must cite the command and its real output, or be marked `unverifiable` with what would make it checkable |
+| a checklist changed while the task text is unchanged | otherwise the awkward item quietly disappears on the day it matters; the rejection names what was dropped |
+| a report claiming a task version | the script stamps `memo_ver`/`checked_at` itself, so a stale green cannot pretend to be current (and `show` warns when the task moved on) |
+| `not_mine` as a bare assertion | the most convenient verdict available, so it costs a reason plus evidence |
+| `ok` with unfinished items, `deviations` with none | the verdict has to match the items |
+
+Two rules the skill states and the script cannot enforce: **report only, never fix**
+(a check that repairs things destroys the thing being asked), and **if the task is not
+this session's work, say so and stop** — never go along with it.
+
+Reports live at `~/.claude/cc_web_check.d/<sid>.json` (codex: `cc_web_check.codex.d`),
+one file per session, deliberately NOT inside the human's memo file: an agent's
+read-modify-write must never be able to clobber a sentence a human typed.
+
+Self-check is good for mechanical constraints ("was the suite run?", "was that file
+touched?") and near-useless for judgement ones ("did it stay on task?") — for those,
+something that did not live through the session has to look. The reasoning, and the
+layers around this one, are in `notes/ai-se-control.md`.
+
 ## my-session-id
 
 Finds THIS claude-code session's own session id + pid — authoritatively,
