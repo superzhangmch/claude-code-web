@@ -120,24 +120,46 @@ def main():
           else cc_web._state_path("cc_web_memo.d").name == "cc_web_memo.codex.d",
           cc_web._state_path("cc_web_memo.d").name)
 
-    print("=== the client sends it as a message, through the ordinary door ===")
+    print("=== the button fills the composer; it does not send ===")
     src = open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8").read()
     tag = re.search(r"const MEMO_TAG = \{ (.*?) \};", src)
     check("each field has its own tag, so the model can tell them apart",
           bool(tag) and 'task: "[当前任务]"' in tag.group(1) and 'notes: "[注意事项]"' in tag.group(1),
           tag.group(1) if tag else "not found")
-    send = re.search(r"async function memoSend\(f\) \{.*?\n  \}", src, re.S)
-    body = send.group(0) if send else ""
-    check("sent via /api/input — the same door the composer uses, so it queues behind "
-          "a running turn", '"/api/input"' in body, "found" if body else "memoSend not found")
-    check("...with the tag in front of the text", 'MEMO_TAG[f] + " " + text' in body)
-    check("...saving the box before sending, so what was sent is what is stored",
-          body.index("memoPost({ field: f, text })") < body.index('"/api/input"'))
-    check("...and stamping sent only AFTER the send succeeded",
-          body.index('"/api/input"') < body.index("mark_sent: true"))
+    fill = re.search(r"function memoToInput\(f\) \{.*?\n  \}", src, re.S)
+    body = fill.group(0) if fill else ""
+    check("memoToInput exists", bool(body), "not found")
+    # The whole point of the change: one button press must not reach the session. You
+    # look at it in the box, add the sentence that made you reach for it, then send.
+    check("it does NOT post to /api/input — nothing is sent by pressing it",
+          "/api/input" not in body, body[:80])
+    check("...it writes into the composer instead", "inputEl.value =" in body)
+    check("...with the tag leading", 'MEMO_TAG[f] + " " + text' in body)
+    check("...and a half-written draft kept, not overwritten",
+          'cur.trim() ? line + "\\n" + cur : line' in body, body[body.find("const cur"):][:120])
+    check("...and it saves the box before filling, so the two cannot disagree",
+          "memoPost({ field: f, text })" in body)
+    check("...then closes the modal", 'memoModal.classList.remove("show")' in body)
+
+    print("=== 'sent' is counted on the real send, wherever the text came from ===")
+    send = re.search(r"async function send\(\) \{.*?\n  \}", src, re.S)
+    sbody = send.group(0) if send else ""
+    check("send() recognises a memo by its leading tag",
+          "body.startsWith(MEMO_TAG[k])" in sbody, "found" if sbody else "send() not found")
+    check("...and stamps mark_sent then — so a reminder typed by hand counts too",
+          "mark_sent: true" in sbody)
     check("a refresh landing mid-typing does not overwrite the box",
           "document.activeElement !== memoTA[f]" in src)
     check("the poll drives the refresh off memo_ver", "memoSync(m.memo_ver)" in src)
+
+    print("=== the popup is full screen, not a dialog ===")
+    css = re.search(r"#memo-modal \.memo-card \{(.*?)\}", src, re.S)
+    cbody = css.group(1) if css else ""
+    check("the card fills the viewport", "100vw" in cbody and "max-width: 100vw" in cbody, cbody.strip()[:70])
+    # Without min-height:0 a textarea will not shrink under its rows= and shoves the
+    # second box (and its button) off the bottom — measured before this was added.
+    check("...and both boxes split the height rather than the card scrolling",
+          "flex: 1; min-height: 0" in src and "min-height: 64px" in src)
 
     print("" if not _fails else "")
     print("FAILED: " + ", ".join(_fails) if _fails else "all pass")

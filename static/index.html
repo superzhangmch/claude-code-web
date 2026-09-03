@@ -2085,12 +2085,25 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
    own line under the title (it did). */
 #memo-modal .modal-row { display: flex; align-items: center; gap: 8px; }
 #memo-modal .modal-row h3 { margin: 0; font-size: 15px; }
-#memo-modal .memo-card { width: 92vw; max-width: 560px; display: flex; flex-direction: column; gap: 10px; }
-#memo-modal .memo-sec { display: flex; flex-direction: column; gap: 5px; }
+/* Full screen, not a dialog. What you type here is prose you come back and edit —
+   a 3-row box in the middle of a dimmed page is the wrong shape for that, and on a
+   phone the keyboard leaves almost nothing of it. So: fill the viewport, and let the
+   two boxes SPLIT the height instead of scrolling the card. */
+#memo-modal.modal { padding: 4px; padding-top: calc(4px + env(safe-area-inset-top)); }
+#memo-modal .memo-card {
+  width: 100vw; max-width: 100vw;
+  height: 100%; max-height: none;
+  padding: 12px; overflow: hidden;      /* the boxes scroll, the card does not */
+  display: flex; flex-direction: column; gap: 10px;
+}
+/* flex:1 + min-height:0 on both levels — without min-height a textarea refuses to
+   shrink below its rows= and pushes the second section off the bottom. */
+#memo-modal .memo-sec { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 5px; }
 #memo-modal .memo-lab { font-size: 12px; color: var(--text); }
 #memo-modal .memo-hint { color: var(--muted); font-size: 11px; }
 #memo-modal .memo-ta {
-  width: 100%; box-sizing: border-box; resize: vertical;
+  width: 100%; box-sizing: border-box; resize: none;   /* it already fills its half */
+  flex: 1; min-height: 64px;
   background: var(--panel2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px; padding: 7px 8px;
   font: 13px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
@@ -2487,14 +2500,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <textarea id="memo-task" class="memo-ta" rows="3"
                   placeholder="这个 session 现在该做的事 —— 你写的版本, 不是它自己总结的"></textarea>
         <div class="memo-row"><span id="memo-task-meta" class="memo-meta"></span>
-          <button id="memo-task-send" class="btn" title="作为一条消息发给这个 session, 标注为 [当前任务]">发给 session</button></div>
+          <button id="memo-task-send" class="btn" title="把它放进下面的输入框(标注为 [当前任务]),你确认后再发">填入输入框</button></div>
       </div>
       <div class="memo-sec">
         <div class="memo-lab">注意事项 <span class="memo-hint">与当前任务无关, 长期有效</span></div>
         <textarea id="memo-notes" class="memo-ta" rows="3"
                   placeholder="这个 session 一直要守的规矩, 例如: 不要重构 index.html 的结构; 部署前先跑测试"></textarea>
         <div class="memo-row"><span id="memo-notes-meta" class="memo-meta"></span>
-          <button id="memo-notes-send" class="btn" title="作为一条消息发给这个 session, 标注为 [注意事项]">发给 session</button></div>
+          <button id="memo-notes-send" class="btn" title="把它放进下面的输入框(标注为 [注意事项]),你确认后再发">填入输入框</button></div>
       </div>
     </div>
   </div>
@@ -3291,32 +3304,26 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       setTimeout(() => { memoSavedEl.textContent = ""; }, 1500);
     }, 600);
   }
-  async function memoSend(f) {
+  // NOT a send. The text goes into the composer and stops there: you get to look at
+  // it, add the sentence that made you reach for it, and decide. A button that fires
+  // straight into a session is one misclick from an interruption you did not mean.
+  function memoToInput(f) {
     const text = (memoTA[f].value || "").trim();
     if (!attachedSid || !text) return;
-    // Same door as the composer: it queues behind a running turn and shows up in the
-    // transcript like anything else typed here. The tag is there so the model reads it
-    // as a re-statement of standing intent, not as a brand-new request — the same
-    // reason the peer-relay messages carry one.
-    const btn = document.getElementById("memo-" + f + "-send");
-    btn.disabled = true;
-    try {
-      await memoPost({ field: f, text });                       // save whatever is in the box first
-      const r = await authedFetch("/api/input", {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ claude_session_id: attachedSid, text: MEMO_TAG[f] + " " + text }),
-      });
-      if (!r.ok) { alert("发送失败: " + (await r.text())); return; }
-      await memoPost({ field: f, mark_sent: true });
-      keepAlive(); schedulePoll(400);
-      memoSavedEl.textContent = "已发送";
-      setTimeout(() => { memoSavedEl.textContent = ""; }, 1500);
-    } finally { btn.disabled = false; }
+    memoPost({ field: f, text });                    // save whatever is in the box first
+    const line = MEMO_TAG[f] + " " + text;
+    const cur = inputEl.value;
+    // Never eat a half-written draft. The memo goes in FRONT, because send() reads the
+    // leading tag to know a memo was actually sent; the draft follows it.
+    inputEl.value = cur.trim() ? line + "\n" + cur : line;
+    inputEl.dispatchEvent(new Event("input"));        // autogrow + per-tab draft save
+    memoModal.classList.remove("show");
+    if (!isPhone()) inputEl.focus();
   }
   for (const f of ["task", "notes"]) {
     if (memoTA[f]) memoTA[f].addEventListener("input", () => memoSave(f));
     const sb = document.getElementById("memo-" + f + "-send");
-    if (sb) sb.addEventListener("click", () => memoSend(f));
+    if (sb) sb.addEventListener("click", () => memoToInput(f));
   }
   document.getElementById("memo-close").addEventListener("click", () => memoModal.classList.remove("show"));
   memoModal.addEventListener("click", (e) => { if (e.target === memoModal) memoModal.classList.remove("show"); });
@@ -9782,6 +9789,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // A rename changes what every list calls this session, and the tab bar reads
         // that from the server — so ask again once the agent has had a moment.
         if (/^\s*\/rename\b/.test(body)) scheduleRenameRefresh(attachedSid);
+        // A memo counts as sent when it is SENT, not when it was dropped into the box —
+        // and this way a reminder typed by hand counts too, since the tag is all it reads.
+        const mtag = Object.keys(MEMO_TAG).find((k) => body.startsWith(MEMO_TAG[k]));
+        if (mtag) memoPost({ field: mtag, mark_sent: true });
         inputEl.value = ""; inputEl.style.height = "auto";
         pendingUploads = []; renderUploadRow();
         keepAlive(); schedulePoll(400);
