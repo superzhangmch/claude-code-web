@@ -2349,10 +2349,6 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div class="scr-cfg-row"><span>发送后翻译</span>
       <button class="sw-item" id="mm-autotranslate">关</button>
     </div>
-    <div class="scr-cfg-row"><span>任务备忘</span>
-      <button class="sw-item" id="mm-memo"
-              title="记录这个 session 的当前任务和长期注意事项;必要时发给它">📌 <span id="mm-memo-hint">未设置</span></button>
-    </div>
     <!-- Maintaining the tree happens HERE, from inside the session being moved: the
          context ("who should this sit under?") is already on screen, so it needs no
          organise mode, no per-row widgets in the lists, and no drag surface. -->
@@ -2363,6 +2359,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div class="scr-cfg-row"><span>结束这个 session</span>
       <button class="sw-item" id="mm-exit-close"
               id="exit-close-btn" title="退出 claude 并关闭它的终端 tab(有后台作业时不关)">⏏ exit &amp; close</button>
+    </div>
+    <div class="scr-cfg-row"><span>Task</span>
+      <button class="sw-item" id="mm-memo"
+              title="记录这个 session 的当前任务和长期注意事项;必要时发给它">📌 <span id="mm-memo-hint">未设置</span></button>
     </div>
   </div>
 
@@ -2493,7 +2493,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
        re-stating the ground rules are different interventions. -->
   <div id="memo-modal" class="modal">
     <div class="modal-card memo-card">
-      <div class="modal-row"><h3>任务备忘</h3><span id="memo-saved" class="memo-saved"></span>
+      <div class="modal-row"><h3>Task</h3><span id="memo-saved" class="memo-saved"></span>
         <button id="memo-close" class="btn" title="close">✕</button></div>
       <div class="memo-sec">
         <div class="memo-lab">当前任务 <span class="memo-hint">随进展改写</span></div>
