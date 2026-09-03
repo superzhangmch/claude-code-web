@@ -9303,7 +9303,23 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       hbFrame = [],      // last reconstructed frame (string[]) — the delta baseline (mirrors server region)
       hbBuf = [],        // accumulating buffer of line objects (full mode)
       hbSimple = [],     // plain string lines (2-line concise mode; no buffer)
-      hbBusy = false, hbTicker = null, hbEl = null, hbFrozen = false, _lineSeq = 0;
+      hbBusy = false, hbTicker = null, hbEl = null, hbFrozen = false, _lineSeq = 0,
+      hbLastChange = 0,  // when the live tail last actually changed (ms)
+      hbAwayAt = 0;      // when the page last stopped watching this session (hidden/paused/detached)
+  // The commit box ("gone in 10s · keep 5m · remove") is an offer: the turn just
+  // ended, the live tail is about to go, say so if you are mid-read. That only makes
+  // sense if you were HERE when it ended. Come back to a session whose turn finished
+  // while you were away and the same box appears fresh — offering to keep something
+  // you never started reading, and duplicating messages that are already in the
+  // transcript below. So: not watching since it last changed, or it last changed long
+  // enough ago that no read is in progress → no offer, just drop it.
+  //
+  // 90s, not 5min: the fetch interval itself backs off to 48s while a turn is quiet,
+  // so anything under ~60s could fire on someone who IS watching, and anything above
+  // a couple of minutes is the very complaint this fixes.
+  const STALE_MS = 90 * 1000;
+  const hbStale = () => hbLastChange > 0
+    && (hbAwayAt > hbLastChange || Date.now() - hbLastChange > STALE_MS);
   function _normMatch(s) { return (s || "").toLowerCase().replace(/[^0-9a-z一-鿿]+/g, ""); }
   function mkLine(raw) { return { id: ++_lineSeq, raw, norm: _normMatch(raw), committed: false, expireAt: 0, kept: false }; }
   // Stitch a reconstructed frame into hbBuf: align frame-head to buffer-tail by
@@ -9369,8 +9385,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const endChar = pos + a.length;
     let bline = hbBuf.length - 1;
     for (let i = 0; i < ends.length; i++) { if (ends[i] >= endChar) { bline = i; break; } }
-    const exp = Date.now() + COMMIT_TTL;
+    // Catching up after being away runs this for every message that arrived while
+    // the page was not watching — which is what re-armed a 10s countdown on content
+    // minutes old. expireAt 0 = already expired, so the next sweep just takes it.
+    const stale = hbStale();
+    const exp = stale ? 0 : Date.now() + COMMIT_TTL;
     for (let i = 0; i <= bline; i++) { hbBuf[i].committed = true; if (!hbBuf[i].kept) hbBuf[i].expireAt = exp; }
+    if (stale) { sweepBuf(); return; }
     // Too short to bother holding — you read a line or two instantly; drop it now
     // (no outline/countdown) rather than make you wait for the timer. Skip if kept.
     let c = 0; while (c < hbBuf.length && hbBuf[c].committed) c++;
@@ -9452,8 +9473,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // queued → message flow. The buttons stay at the very bottom.
   function hbShow() { const el = ensureHb(); if (el.nextSibling !== autoloadEl) tvEl.insertBefore(el, autoloadEl); }
   function hbHide() { if (hbEl && hbEl.parentNode) hbEl.parentNode.removeChild(hbEl); }
-  function _hbReset() { hbSid = attachedSid; hbVer = ""; hbFrame = []; hbBuf = []; hbSimple = []; if (hbEl) hbEl._sig = null; }
+  function _hbReset() { hbSid = attachedSid; hbVer = ""; hbFrame = []; hbBuf = []; hbSimple = [];
+    hbLastChange = 0; hbAwayAt = 0;   // another session's tail: neither stamp means anything here
+    if (hbEl) hbEl._sig = null; }
   function stopHeartbeat() {                          // fully hide (hidden / paused / detached)
+    // Stamp when watching stopped. hbStale() compares this against the last content
+    // change, which is how "the turn ended while you were away" is told apart from
+    // "the turn ended while you were sitting here" — a wall-clock threshold alone
+    // cannot tell those apart on a phone that never fires a hidden event.
+    hbAwayAt = Date.now();
     if (hbTicker) { clearInterval(hbTicker); hbTicker = null; }
     hbFrozen = false; if (hbEl) hbEl.classList.remove("idle");
     hbHide();
@@ -9473,7 +9501,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (attachedSid !== hbSid) { _hbReset(); hbNextAt = Date.now(); }
     if (claudeIdle) {                          // idle: turn done → whatever's still shown is final. Convert the
       hbFrozen = true;                         // whole tail to committed so it fades on a countdown instead of
-      if (hbBuf.length < 5) {                  // vanishing while you may still be reading — UNLESS it's <5 lines
+      // …or the turn ended while nobody was looking, in which case there is no read to
+      // interrupt: clear it the same way a 1-line tail is cleared. An explicitly kept
+      // block still survives here — that was a deliberate pin — and is retired by its
+      // own expiry in sweepBuf() below.
+      if (hbBuf.length < 5 || hbStale()) {     // vanishing while you may still be reading — UNLESS it's <5 lines
         hbBuf = hbBuf.filter((l) => l.kept);   // (read instantly, just clear; keep any pinned block)
       } else {
         const exp = Date.now() + COMMIT_TTL;
@@ -9506,7 +9538,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         const d = await r.json();
         if (sid !== attachedSid) return;
         if (d.same) { hbDelay = Math.min(hbDelay * 2, HB_MAX); _st.textContent = "·"; }
-        else { hbDelay = HB_BASE; hbVer = d.ver || ""; hbSimple = (d.lines || []).filter(Boolean);
+        else { hbDelay = HB_BASE; hbVer = d.ver || ""; hbLastChange = Date.now();
+               hbSimple = (d.lines || []).filter(Boolean);
                _st.textContent = `${hbSimple.join("").length}B/${hbSimple.length}L`; }
       } else {
         // Full mode: reconstruct the current frame (delta vs hbFrame), then stitch
@@ -9523,9 +9556,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         if (d.same) { hbDelay = Math.min(hbDelay * 2, HB_MAX); _st.textContent = "·"; }
         else if (typeof d.full === "string") {
           hbDelay = HB_BASE; hbFrame = d.full ? d.full.split("\n") : []; hbVer = d.ver || "";
+          hbLastChange = Date.now();
           stitchFrame(hbFrame); _st.textContent = `${d.full.length}B/${hbFrame.length}L`;
         } else if (d.changed && d.base === hbVer) {
-          hbDelay = HB_BASE;
+          hbDelay = HB_BASE; hbLastChange = Date.now();
           const k = d.scroll || 0, prev = hbFrame, lines = [];
           for (let i = 0; i < d.n; i++) { const j = i + k; lines[i] = (j >= 0 && j < prev.length) ? prev[j] : ""; }
           for (const [i, v] of d.changed) if (i >= 0 && i < d.n) lines[i] = (typeof v === "string") ? v : v.c.repeat(v.n);
