@@ -2513,6 +2513,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   <div id="memo-modal" class="modal">
     <div class="modal-card memo-card">
       <div class="modal-row"><h3>Task</h3><span id="memo-saved" class="memo-saved"></span>
+        <button id="memo-save" class="btn" title="保存两个框(改动本来也会自动存,这个按钮让你能确认)">保存</button>
         <button id="memo-close" class="btn" title="close">✕</button></div>
       <div class="memo-sec">
         <div class="memo-lab">当前任务 <span class="memo-hint">随进展改写</span></div>
@@ -3273,8 +3274,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const memoTA = { task: document.getElementById("memo-task"), notes: document.getElementById("memo-notes") };
   const memoMeta = { task: document.getElementById("memo-task-meta"), notes: document.getElementById("memo-notes-meta") };
   const memoSavedEl = document.getElementById("memo-saved");
+  const memoSaveBtn = document.getElementById("memo-save");
   const mmMemoHint = document.getElementById("mm-memo-hint");
-  let memoRec = null, memoVerSeen = -1, memoSid = "", _memoSaveT = {};
+  let memoRec = null, memoVerSeen = -1, memoSid = "";
   const MEMO_TAG = { task: "[当前任务]", notes: "[注意事项]" };
   function memoRender() {
     const r = memoRec || { task: {}, notes: {} };
@@ -3387,6 +3389,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (!r.ok || sid !== attachedSid) return;
       memoRec = await r.json(); memoSid = sid; memoVerSeen = ver;
       memoRender();
+      memoMark(false);   // just read from the server: what is in the boxes IS stored
     } catch {}
   }
   // Called from the poll: the version moved (or we just attached elsewhere).
@@ -3402,14 +3405,28 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (r.ok) { memoRec = await r.json(); memoVerSeen = -1; memoRender(); }   // -1: let the next poll confirm
     return r.ok;
   }
-  function memoSave(f) {           // debounced: typing should not be one request per keystroke
-    clearTimeout(_memoSaveT[f]);
-    _memoSaveT[f] = setTimeout(async () => {
-      if (!attachedSid) return;
-      const ok = await memoPost({ field: f, text: memoTA[f].value });
-      memoSavedEl.textContent = ok ? "已保存" : "保存失败";
-      setTimeout(() => { memoSavedEl.textContent = ""; }, 1500);
-    }, 600);
+  // Saving is the BUTTON, and only the button. No debounce writing behind your back:
+  // what is stored should be what you decided to store, not wherever your typing
+  // happened to pause. The hint is therefore a STATE, not a flash — "已保存" that
+  // clears itself after a second and a half answers nothing a moment later, and with
+  // no autosave the question "is what I see stored?" has to be answerable at a glance.
+  let memoDirty = false;
+  function memoMark(dirty) {
+    memoDirty = dirty;
+    memoSavedEl.textContent = dirty ? "未保存…" : "已保存";
+    if (memoSaveBtn) memoSaveBtn.disabled = !dirty;
+  }
+  function memoTyped() { memoMark(true); }   // typing only marks; the button writes
+  // ONE request carrying both boxes. It used to be two, fired with Promise.all, and
+  // since the endpoint is read-modify-write on one file they raced: the loser wrote
+  // over the winner, and on one run it read a half-replaced file, decided both boxes
+  // were empty and deleted the record. The server is locked now too, but not needing
+  // concurrency here is the better half of the fix.
+  async function memoSaveAll() {
+    if (!attachedSid) return;
+    const ok = await memoPost({ task: memoTA.task.value, notes: memoTA.notes.value });
+    if (ok) memoMark(false);
+    else memoSavedEl.textContent = "保存失败";
   }
   // NOT a send. The text goes into the composer and stops there: you get to look at
   // it, add the sentence that made you reach for it, and decide. A button that fires
@@ -3417,7 +3434,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   function memoToInput(f) {
     const text = (memoTA[f].value || "").trim();
     if (!attachedSid || !text) return;
-    memoPost({ field: f, text });                    // save whatever is in the box first
+    // Deliberately does NOT save: saving is the button. So the box can read
+    // "未保存…" while its text sits in the composer — which is honest, and lets you
+    // send a one-off variation without committing it to the memo.
     const line = MEMO_TAG[f] + " " + text;
     const cur = inputEl.value;
     // Never eat a half-written draft. The memo goes in FRONT, because send() reads the
@@ -3428,12 +3447,21 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (!isPhone()) inputEl.focus();
   }
   for (const f of ["task", "notes"]) {
-    if (memoTA[f]) memoTA[f].addEventListener("input", () => memoSave(f));
+    if (memoTA[f]) memoTA[f].addEventListener("input", memoTyped);
     const sb = document.getElementById("memo-" + f + "-send");
     if (sb) sb.addEventListener("click", () => memoToInput(f));
   }
-  document.getElementById("memo-close").addEventListener("click", () => memoModal.classList.remove("show"));
-  memoModal.addEventListener("click", (e) => { if (e.target === memoModal) memoModal.classList.remove("show"); });
+  if (memoSaveBtn) memoSaveBtn.addEventListener("click", memoSaveAll);
+  // Nothing is saved on the way out — but nothing is silently thrown away either.
+  // Discarding a paragraph you just typed without a word is the one thing worse than
+  // asking.
+  function memoDismiss() {
+    if (memoDirty && !confirm("有未保存的改动 —— 放弃?\n(取消: 留在这里,点「保存」)")) return;
+    memoModal.classList.remove("show");
+    if (memoDirty) { memoRender(); memoMark(false); }   // discarded → back to the stored copy
+  }
+  document.getElementById("memo-close").addEventListener("click", memoDismiss);
+  memoModal.addEventListener("click", (e) => { if (e.target === memoModal) memoDismiss(); });
   const mmMemo = document.getElementById("mm-memo");
   if (mmMemo) mmMemo.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -9918,7 +9946,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // A memo counts as sent when it is SENT, not when it was dropped into the box —
         // and this way a reminder typed by hand counts too, since the tag is all it reads.
         const mtag = Object.keys(MEMO_TAG).find((k) => body.startsWith(MEMO_TAG[k]));
-        if (mtag) memoPost({ field: mtag, mark_sent: true });
+        if (mtag) memoPost({ mark_sent: mtag });
         inputEl.value = ""; inputEl.style.height = "auto";
         pendingUploads = []; renderUploadRow();
         keepAlive(); schedulePoll(400);

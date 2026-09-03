@@ -51,8 +51,7 @@ def main():
             return False, str(e.detail)
 
     def memo(task="修进度条, 别动 UI 布局", notes="部署前先跑测试套件"):
-        cc_web.post_session_memo(MP(claude_session_id=SID, field="task", text=task))
-        cc_web.post_session_memo(MP(claude_session_id=SID, field="notes", text=notes))
+        cc_web.post_session_memo(MP(claude_session_id=SID, task=task, notes=notes))
 
     ev = [{"cmd": "git log --oneline -1", "out": "abc123 fix progress bar"}]
 

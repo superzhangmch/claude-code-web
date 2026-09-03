@@ -53,23 +53,23 @@ def main():
           str(cc_web._memo_ver(SID)))
 
     print("=== the two fields are independent ===")
-    cc_web.post_session_memo(P(claude_session_id=SID, field="task", text="  修进度条, 别动布局  "))
-    cc_web.post_session_memo(P(claude_session_id=SID, field="notes", text="不要引入新依赖"))
+    cc_web.post_session_memo(P(claude_session_id=SID, task="  修进度条, 别动布局  "))
+    cc_web.post_session_memo(P(claude_session_id=SID, notes="不要引入新依赖"))
     rec = cc_web.get_session_memo(claude_session_id=SID)
     check("the task is stored, trimmed", rec["task"]["text"] == "修进度条, 别动布局", rec["task"]["text"])
     check("the standing notes are stored separately", rec["notes"]["text"] == "不要引入新依赖", rec["notes"]["text"])
     check("...each with its own updated_at", bool(rec["task"]["updated_at"]) and bool(rec["notes"]["updated_at"]))
     # This is the whole reason for two boxes: rewriting the task must not cost you the
     # standing rules, or you stop keeping them.
-    cc_web.post_session_memo(P(claude_session_id=SID, field="task", text="改成: 查缓存问题"))
+    cc_web.post_session_memo(P(claude_session_id=SID, task="改成: 查缓存问题"))
     rec = cc_web.get_session_memo(claude_session_id=SID)
     check("rewriting the task leaves the notes alone",
           rec["task"]["text"] == "改成: 查缓存问题" and rec["notes"]["text"] == "不要引入新依赖",
           rec["task"]["text"] + " | " + rec["notes"]["text"])
 
     print("=== 'I sent this' is recorded, per field ===")
-    cc_web.post_session_memo(P(claude_session_id=SID, field="task", mark_sent=True))
-    cc_web.post_session_memo(P(claude_session_id=SID, field="task", mark_sent=True))
+    cc_web.post_session_memo(P(claude_session_id=SID, mark_sent="task"))
+    cc_web.post_session_memo(P(claude_session_id=SID, mark_sent="task"))
     rec = cc_web.get_session_memo(claude_session_id=SID)
     check("counted", rec["task"]["sent_count"] == 2, str(rec["task"]["sent_count"]))
     check("...and stamped", bool(rec["task"]["sent_at"]), rec["task"]["sent_at"])
@@ -86,14 +86,14 @@ def main():
     for bad in ("../../etc/passwd", "a/b", "", "x", "a\\b"):
         got = None
         try:
-            cc_web.post_session_memo(P(claude_session_id=bad, field="task", text="x"))
+            cc_web.post_session_memo(P(claude_session_id=bad, task="x"))
         except HTTPException as e:
             got = e.status_code
         except Exception as e:
             got = type(e).__name__
         check(f"refused: {bad!r}", got == 400, str(got))
     # codex's pre-binding aliases must still work — they are real session keys
-    cc_web.post_session_memo(P(claude_session_id="pending-pane-%35", field="task", text="ok"))
+    cc_web.post_session_memo(P(claude_session_id="pending-pane-%35", task="ok"))
     check("a codex pending-pane alias is accepted",
           cc_web.get_session_memo(claude_session_id="pending-pane-%35")["task"]["text"] == "ok")
     check("...and nothing escaped the memo dir",
@@ -101,16 +101,68 @@ def main():
           == sorted([SID + ".json", "pending-pane-%35.json"]),
           str(os.listdir(os.path.join(home, ".claude", "cc_web_memo.d"))))
 
-    print("=== an unknown field is refused, so a typo cannot invent one ===")
+    print("=== only the two boxes are writable ===")
+    # The reserved supervisor slot is not a third notes field: there is no way to put
+    # anything in it through this door, by typo or otherwise.
+    check("the payload has no supervisor field at all",
+          "supervisor" not in P.model_fields, str(list(P.model_fields)))
     got = None
     try:
-        cc_web.post_session_memo(P(claude_session_id=SID, field="supervisor", text="x"))
+        cc_web.post_session_memo(P(claude_session_id=SID, mark_sent="supervisor"))
     except HTTPException as e:
         got = e.status_code
-    check("field must be task or notes", got == 400, str(got))
+    check("mark_sent must name one of the two", got == 400, str(got))
+    got = None
+    try:
+        cc_web.post_session_memo(P(claude_session_id=SID))
+    except HTTPException as e:
+        got = e.status_code
+    check("a request that would do nothing is refused rather than rewriting the file",
+          got == 400, str(got))
+
+    print("=== two writes at once must not eat each other ===")
+    # THE bug: the save button posted its two fields concurrently. Both writers used
+    # the same <sid>.json.tmp, the second replace() died FileNotFoundError, and the
+    # loser had read a half-replaced file, concluded both boxes were empty and deleted
+    # the record. What the human had typed was gone.
+    import threading as _th
+    cc_web.post_session_memo(P(claude_session_id=SID, task="并发前的任务", notes="并发前的注意事项"))
+    errs = []
+
+    def _hammer(which, n):
+        for i in range(n):
+            try:
+                cc_web.post_session_memo(P(claude_session_id=SID, **{which: f"{which}-{i}"}))
+            except Exception as e:                       # noqa: BLE001 — any escape is a fail
+                errs.append(f"{which}: {type(e).__name__}: {e}")
+
+    ts = [_th.Thread(target=_hammer, args=("task", 25)), _th.Thread(target=_hammer, args=("notes", 25))]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    check("no writer blew up", not errs, "; ".join(errs[:2]))
+    rec = cc_web.get_session_memo(claude_session_id=SID)
+    check("...the record still exists", bool(rec["task"]["text"] or rec["notes"]["text"]),
+          json.dumps(rec)[:60])
+    check("...and NEITHER field was wiped by the other",
+          rec["task"]["text"].startswith("task-") and rec["notes"]["text"].startswith("notes-"),
+          f'{rec["task"]["text"]!r} / {rec["notes"]["text"]!r}')
+    check("...one request can carry both, which is why the button needs no concurrency",
+          set(["task", "notes"]).issubset(P.model_fields))
+
+    print("=== a file that exists but will not parse is not overwritten ===")
+    # One bad read must not become "the boxes were empty, so I deleted them".
+    open(os.path.join(home, ".claude", "cc_web_memo.d", SID + ".json"), "w").write("{ this is not json")
+    got = None
+    try:
+        cc_web.post_session_memo(P(claude_session_id=SID, task="踩上去"))
+    except HTTPException as e:
+        got = e.status_code
+    check("refused, loudly", got == 500, str(got))
+    check("...and the file is untouched, for a human to look at",
+          open(os.path.join(home, ".claude", "cc_web_memo.d", SID + ".json")).read().startswith("{ this"))
+    os.remove(os.path.join(home, ".claude", "cc_web_memo.d", SID + ".json"))
 
     print("=== emptied completely → the file goes away ===")
-    cc_web.post_session_memo(P(claude_session_id="pending-pane-%35", field="task", text=""))
+    cc_web.post_session_memo(P(claude_session_id="pending-pane-%35", task=""))
     check("no text and never sent → nothing left on disk",
           not os.path.exists(os.path.join(home, ".claude", "cc_web_memo.d", "pending-pane-%35.json")))
 
@@ -137,8 +189,11 @@ def main():
     check("...with the tag leading", 'MEMO_TAG[f] + " " + text' in body)
     check("...and a half-written draft kept, not overwritten",
           'cur.trim() ? line + "\\n" + cur : line' in body, body[body.find("const cur"):][:120])
-    check("...and it saves the box before filling, so the two cannot disagree",
-          "memoPost({ field: f, text })" in body)
+    # It deliberately does NOT save: saving is the button and only the button, so a
+    # one-off variation can be sent without committing it to the memo. The box keeps
+    # saying 未保存… while its text sits in the composer, which is the honest state.
+    check("...and does NOT quietly save on the way (no autosave anywhere)",
+          "memoPost" not in body, body[:60])
     check("...then closes the modal", 'memoModal.classList.remove("show")' in body)
 
     print("=== 'sent' is counted on the real send, wherever the text came from ===")
@@ -146,8 +201,13 @@ def main():
     sbody = send.group(0) if send else ""
     check("send() recognises a memo by its leading tag",
           "body.startsWith(MEMO_TAG[k])" in sbody, "found" if sbody else "send() not found")
-    check("...and stamps mark_sent then — so a reminder typed by hand counts too",
-          "mark_sent: true" in sbody)
+    check("...and stamps mark_sent for THAT field — so a reminder typed by hand counts too",
+          "memoPost({ mark_sent: mtag })" in sbody)
+    check("nothing saves on a timer — typing only marks the state",
+          "function memoTyped() { memoMark(true); }" in src and "setTimeout" not in
+          src[src.index("function memoTyped"):src.index("async function memoSaveAll")])
+    check("...and closing with unsaved text asks instead of discarding silently",
+          "有未保存的改动" in src)
     check("a refresh landing mid-typing does not overwrite the box",
           "document.activeElement !== memoTA[f]" in src)
     check("the poll drives the refresh off memo_ver", "memoSync(m.memo_ver)" in src)

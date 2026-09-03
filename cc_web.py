@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import fcntl
+import itertools
 import hashlib
 import json
 import logging
@@ -5698,6 +5699,22 @@ async def get_state(
 # ONE FILE PER SESSION, not one map keyed by session: two instances writing at once
 # cannot lose each other's edits, and forgetting a session is `rm` of one file.
 _MEMO_FIELDS = ("task", "notes")
+# Both of these endpoints are read-modify-write on ONE file, and they are `def`, so
+# FastAPI runs them in a threadpool — two requests really do run at once. That bit:
+# the save button posted its two fields concurrently, both writers used the SAME
+# `<sid>.json.tmp`, the second `replace()` died with FileNotFoundError because the
+# first had already moved it, and the loser had meanwhile read a half-replaced file,
+# seen "both boxes empty" and taken the delete-the-record branch. The human's memo was
+# gone. So: one lock around every read-modify-write here, and a tmp name that cannot
+# collide even if something outside this lock ever writes too.
+_STATE_WRITE_LOCK = threading.RLock()
+_tmp_seq = itertools.count()
+
+
+def _write_json_atomic(path: Path, obj) -> None:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{next(_tmp_seq)}.tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(path)
 # No path separators, so a session id cannot climb out of the directory. Both id
 # shapes fit (claude's uuid4, codex's uuid7) as do codex's `pending-pane-%3` aliases.
 _MEMO_SID_RE = re.compile(r"[0-9a-zA-Z._%-]{4,80}")
@@ -5725,11 +5742,21 @@ def _memo_blank() -> dict:
     return {"task": dict(z), "notes": dict(z), "rev": 0, "supervisor": None}
 
 
-def _memo_read(sid: str) -> dict:
+def _memo_read(sid: str, strict: bool = False) -> dict:
+    """strict=True is for the write path: a file that EXISTS but will not parse must
+    not be quietly treated as "empty" and overwritten — that would turn one bad read
+    into deleting what the human typed. Reads stay lenient (show blank, carry on)."""
     rec = _memo_blank()
+    f = _memo_file(sid)
     try:
-        raw = json.loads(_memo_file(sid).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        raw = json.loads(f.read_text(encoding="utf-8"))
+    except OSError:
+        return rec                      # not there yet — fine, this is the blank one
+    except ValueError:
+        if strict:
+            raise HTTPException(status_code=500,
+                                detail=f"{f.name} is on disk but unreadable — refusing to "
+                                       f"overwrite it; look at it by hand")
         return rec
     if not isinstance(raw, dict):
         return rec
@@ -5758,10 +5785,13 @@ def _memo_ver(sid: str) -> Optional[int]:
 
 
 class MemoPayload(BaseModel):
+    """One request can carry BOTH boxes, which is how the save button avoids needing
+    two concurrent writes to the same file at all (belt as well as the braces of the
+    lock above). A field left as None is left alone; "" clears it."""
     claude_session_id: str
-    field: str                              # task | notes
-    text: Optional[str] = None              # set the text (None = leave it alone)
-    mark_sent: bool = False                 # stamp "sent to the session just now"
+    task: Optional[str] = None
+    notes: Optional[str] = None
+    mark_sent: Optional[str] = None          # "task" | "notes" — stamp "just sent this"
 
 
 @app.get("/api/session-memo", dependencies=[Depends(require_token)])
@@ -5776,28 +5806,32 @@ def post_session_memo(payload: MemoPayload):
     reminder queues behind a running turn and lands in the transcript exactly like
     something typed by hand. This endpoint only records that it happened."""
     import datetime as _dt          # function-local, like every other use in this file
-    if payload.field not in _MEMO_FIELDS:
-        raise HTTPException(status_code=400, detail="field must be task or notes")
+    if payload.mark_sent is not None and payload.mark_sent not in _MEMO_FIELDS:
+        raise HTTPException(status_code=400, detail="mark_sent must be task or notes")
+    if payload.task is None and payload.notes is None and payload.mark_sent is None:
+        raise HTTPException(status_code=400, detail="nothing to do")
     f = _memo_file(payload.claude_session_id)
-    rec = _memo_read(payload.claude_session_id)
     now = _dt.datetime.now().isoformat(timespec="seconds")
-    if payload.text is not None:
-        new = payload.text.strip()
-        if new != rec[payload.field]["text"]:
-            rec["rev"] = int(rec.get("rev") or 0) + 1
-        rec[payload.field]["text"] = new
-        rec[payload.field]["updated_at"] = now
-    if payload.mark_sent:
-        rec[payload.field]["sent_at"] = now
-        rec[payload.field]["sent_count"] = int(rec[payload.field].get("sent_count") or 0) + 1
-    # Both fields empty and never sent → no file at all, so an untouched session
-    # costs nothing and `memo_ver` stays absent on its polls.
-    if not any(rec[x]["text"] or rec[x]["sent_count"] for x in _MEMO_FIELDS) and not rec["supervisor"]:
-        f.unlink(missing_ok=True)
-        return rec
-    tmp = f.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp.replace(f)
+    with _STATE_WRITE_LOCK:
+        rec = _memo_read(payload.claude_session_id, strict=True)
+        for field, new in (("task", payload.task), ("notes", payload.notes)):
+            if new is None:
+                continue
+            new = new.strip()
+            if new != rec[field]["text"]:
+                rec["rev"] = int(rec.get("rev") or 0) + 1
+            rec[field]["text"] = new
+            rec[field]["updated_at"] = now
+        if payload.mark_sent:
+            g = payload.mark_sent
+            rec[g]["sent_at"] = now
+            rec[g]["sent_count"] = int(rec[g].get("sent_count") or 0) + 1
+        # Both boxes empty and never sent → no file at all, so an untouched session
+        # costs nothing and `memo_ver` stays absent on its polls.
+        if not any(rec[x]["text"] or rec[x]["sent_count"] for x in _MEMO_FIELDS) and not rec["supervisor"]:
+            f.unlink(missing_ok=True)
+            return rec
+        _write_json_atomic(f, rec)
     return rec
 
 
@@ -5977,9 +6011,8 @@ def post_session_check(payload: CheckPayload):
         "not_mine_evidence": payload.not_mine_evidence or [],
         "pinned": pinned,
     }
-    tmp = f.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp.replace(f)
+    with _STATE_WRITE_LOCK:
+        _write_json_atomic(f, out)
     return out
 
 
