@@ -2108,6 +2108,23 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   border: 1px solid var(--border); border-radius: 6px; padding: 7px 8px;
   font: 13px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
 }
+#memo-modal .memo-sec.memo-check { flex: 0 0 auto; }
+#memo-modal .memo-checkline { font-size: 12px; cursor: pointer; padding: 5px 0; }
+#memo-modal .memo-checkline .mc-ok { color: #6ee884; }
+#memo-modal .memo-checkline .mc-bad { color: #ffb4b4; }
+#memo-modal .memo-checkline .mc-stale { color: var(--muted); }
+#memo-modal .memo-checkdetail {
+  display: none; max-height: 34vh; overflow: auto;
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 8px;
+  font-size: 12px; line-height: 1.5;
+}
+#memo-modal .memo-checkdetail.show { display: block; }
+#memo-modal .memo-checkdetail .mc-item { margin-bottom: 7px; }
+#memo-modal .memo-checkdetail .mc-claim { color: var(--text); }
+#memo-modal .memo-checkdetail .mc-ev {
+  color: var(--muted); font: 11px/1.45 ui-monospace, Menlo, monospace;
+  white-space: pre-wrap; word-break: break-all; margin-left: 10px;
+}
 #memo-modal .memo-row { display: flex; align-items: center; gap: 8px; }
 #memo-modal .memo-meta { flex: 1; color: var(--muted); font-size: 11px; }
 #memo-modal .memo-saved { color: var(--muted); font-size: 11px; flex: 1; }
@@ -2363,6 +2380,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div class="scr-cfg-row"><span>Task</span>
       <button class="sw-item" id="mm-memo"
               title="记录这个 session 的当前任务和长期注意事项;必要时发给它">📌 <span id="mm-memo-hint">未设置</span></button>
+      <button class="sw-item" id="mm-check"
+              title="看这个 session 的自检结果(逐项 + 证据)">自检 <span id="mm-check-hint">—</span></button>
     </div>
   </div>
 
@@ -2508,6 +2527,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
                   placeholder="这个 session 一直要守的规矩, 例如: 不要重构 index.html 的结构; 部署前先跑测试"></textarea>
         <div class="memo-row"><span id="memo-notes-meta" class="memo-meta"></span>
           <button id="memo-notes-send" class="btn" title="把它放进下面的输入框(标注为 [注意事项]),你确认后再发">填入输入框</button></div>
+      </div>
+      <!-- The session's own answer to the two boxes above. ONE line by default and
+           flex:0 so the two textareas keep their height: a report that unfolds twelve
+           green ticks every time you open this is a report you stop reading. Tap it
+           for the evidence. -->
+      <div class="memo-sec memo-check">
+        <div class="memo-lab">自检 <span class="memo-hint" id="memo-check-when"></span></div>
+        <div id="memo-check-line" class="memo-checkline" title="点开看逐项与证据"></div>
+        <div id="memo-check-detail" class="memo-checkdetail"></div>
       </div>
     </div>
   </div>
@@ -3273,6 +3301,85 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       mmMemoHint.textContent = t ? clampU(t, 12) : (n ? "仅注意事项" : "未设置");
     }
   }
+  // The session's self-check, read back. Deliberately in the SAME modal as the two
+  // boxes it is about: the report only means anything next to the intent it was
+  // checked against, and a separate entry would mean opening two things to answer one
+  // question. Statuses come from cc-web, which is what refuses a report with no
+  // evidence in the first place — so what is rendered here is already constrained.
+  const memoCheckLine = document.getElementById("memo-check-line");
+  const memoCheckDetail = document.getElementById("memo-check-detail");
+  const memoCheckWhen = document.getElementById("memo-check-when");
+  const mmCheckHint = document.getElementById("mm-check-hint");
+  let checkRec = null, checkVerSeen = -1, checkSid = "";
+  const _MC_LABEL = { done: "✓", not_done: "✗", partial: "◐", unverifiable: "?" };
+  function memoCheckRender() {
+    const got = checkRec;
+    memoCheckDetail.classList.remove("show");
+    if (!got || !got.exists) {
+      memoCheckLine.innerHTML = '<span class="mc-stale">还没有自检报告 —— 在这个 session 里说「自检」</span>';
+      memoCheckWhen.textContent = "";
+      memoCheckDetail.textContent = "";
+      return;
+    }
+    const r = got.report || {}, items = r.items || [];
+    const bad = items.filter((i) => i.status === "not_done" || i.status === "partial");
+    const unk = items.filter((i) => i.status === "unverifiable");
+    const age = relAge(Date.parse(r.checked_at) / 1000);
+    memoCheckWhen.textContent = (age ? (age === "now" ? "刚刚" : age + " 前") : "") +
+      (got.stale ? " · 任务此后被改过" : "");
+    let head;
+    if (r.verdict === "not_mine") head = '<span class="mc-bad">⚠ 这个任务不是给这个 session 的</span>';
+    else if (r.verdict === "no_task") head = '<span class="mc-stale">当时没有任务可检</span>';
+    else if (bad.length) head = `<span class="mc-bad">✗ ${bad.length}/${items.length} 项未满足</span>`
+                              + (unk.length ? `<span class="mc-stale"> · ${unk.length} 项无法验证</span>` : "");
+    else head = `<span class="mc-ok">✓ 全部符合 (${items.length} 项)</span>`;
+    // A report about a rewritten task certifies the wrong thing, so say so before the
+    // verdict rather than under it.
+    if (got.stale) head = '<span class="mc-stale">⚠ 已过期 · </span>' + head;
+    if ((r.disputes || []).length) head += '<span class="mc-bad"> · 对任务有异议</span>';
+    memoCheckLine.innerHTML = head + '<span class="mc-stale"> — ' + _escHtml(r.summary || "") + "</span>";
+    // Detail: deviations and disputes first, then the rest — the order you read in.
+    const parts = [];
+    for (const d of r.disputes || [])
+      parts.push(`<div class="mc-item"><span class="mc-bad">异议[${_escHtml(d.about || "")}]</span> ${_escHtml(d.reason || "")}</div>`);
+    if (r.verdict === "not_mine") {
+      parts.push(`<div class="mc-item"><span class="mc-bad">理由</span> ${_escHtml(r.not_mine_reason || "")}</div>`);
+      for (const e of r.not_mine_evidence || [])
+        parts.push(`<div class="mc-ev">$ ${_escHtml(e.cmd || "")}\n${_escHtml(String(e.out || ""))}</div>`);
+    }
+    for (const it of bad.concat(unk, items.filter((i) => i.status === "done"))) {
+      parts.push(`<div class="mc-item"><span class="${it.status === "done" ? "mc-ok" : "mc-bad"}">`
+        + `${_MC_LABEL[it.status] || "?"}</span> <span class="mc-claim">${_escHtml(it.claim || "")}</span>`
+        + (it.note ? `<div class="mc-ev">note: ${_escHtml(it.note)}</div>` : "")
+        + (it.evidence || []).map((e) => `<div class="mc-ev">$ ${_escHtml(e.cmd || "")}\n${_escHtml(String(e.out || ""))}</div>`).join("")
+        + "</div>");
+    }
+    memoCheckDetail.innerHTML = parts.join("") || '<span class="mc-stale">(无细节)</span>';
+    // The ⚙ row carries the verdict too: the point of a check is to be noticed, and a
+    // result you have to open a modal to discover is one you discover late.
+    if (mmCheckHint) {
+      mmCheckHint.textContent = !got || !got.exists ? "—"
+        : r.verdict === "not_mine" ? "⚠"
+        : bad.length ? "✗" + bad.length
+        : got.stale ? "✓过期" : "✓";
+    }
+  }
+  memoCheckLine.addEventListener("click", () => {
+    if (checkRec && checkRec.exists) memoCheckDetail.classList.toggle("show");
+  });
+  async function checkLoad(sid, ver) {
+    if (!sid) { checkRec = null; checkSid = ""; checkVerSeen = -1; memoCheckRender(); return; }
+    try {
+      const r = await authedFetch("/api/session-check?claude_session_id=" + encodeURIComponent(sid));
+      if (!r.ok || sid !== attachedSid) return;
+      checkRec = await r.json(); checkSid = sid; checkVerSeen = ver;
+      memoCheckRender();
+    } catch {}
+  }
+  function checkSync(ver) {
+    const v = (ver == null ? 0 : ver);
+    if (attachedSid !== checkSid || v !== checkVerSeen) checkLoad(attachedSid, v);
+  }
   async function memoLoad(sid, ver) {
     if (!sid) { memoRec = null; memoSid = ""; memoVerSeen = -1; memoRender(); return; }
     try {
@@ -3333,8 +3440,26 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
     modeMenu.style.display = "none";
     memoLoad(attachedSid, memoVerSeen);   // open on the server's copy, not a stale one
+    checkLoad(attachedSid, checkVerSeen);
     memoModal.classList.add("show");
     if (!isPhone()) setTimeout(() => memoTA.task.focus(), 50);
+  });
+
+  // Second button on the Task row: the same modal, opened with the report already
+  // unfolded. Not a second modal — the report is only meaningful beside the intent it
+  // was checked against, so there is one place, reached two ways.
+  const mmCheck = document.getElementById("mm-check");
+  if (mmCheck) mmCheck.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
+    modeMenu.style.display = "none";
+    memoLoad(attachedSid, memoVerSeen);
+    await checkLoad(attachedSid, checkVerSeen);
+    memoModal.classList.add("show");
+    if (checkRec && checkRec.exists) {
+      memoCheckDetail.classList.add("show");
+      memoCheckDetail.scrollIntoView({ block: "nearest" });
+    }
   });
 
   const mmExitClose = document.getElementById("mm-exit-close");
@@ -9387,6 +9512,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       claudeIdle = m.claude_idle === true;
       setStatus("ok"); setReady(m.claude_idle); updateAutoload();
       memoSync(m.memo_ver);   // mtime moved (or another session) → refetch the memo text
+      checkSync(m.check_ver);  // ...same for the self-check report
       // heartbeat: poll while busy; freeze (show last diff, "idle") when idle;
       // fully hide when hidden/paused/detached.
       syncHeartbeat();

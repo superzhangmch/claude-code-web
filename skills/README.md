@@ -119,7 +119,17 @@ python3 ~/.claude/skills/self-check/selfcheck.py show     # read the last one
 A self-check is a self-graded exam — the failure mode of drift is that the model
 believes it is on task, so its verdict passes exactly when it is most wrong. So the
 value here is not what the model writes, it is **what it cannot write down**.
-`selfcheck.py` owns the deterministic half and REFUSES the shapes of report that rot:
+The refusals live in **cc-web** (`POST /api/session-check`), not in `selfcheck.py`: a
+validator inside a script the agent runs is advice — whatever runs it can write the
+report file directly instead. Behind the endpoint that owns the file it is a gate, and
+both agents get the same one. The script is a thin client: it works out which session
+it is in, gathers the deterministic facts, and prints the result short. Its only
+configuration is the project's single config file (`~/.claude/cc_web.conf`, for the
+token) — where reports live and which agent this is are asked of cc-web rather than
+re-derived, which is how a skill ends up silently reading an empty directory after the
+server renames one.
+
+Refused:
 
 | Refused | Why |
 |---|---|
@@ -133,9 +143,11 @@ Two rules the skill states and the script cannot enforce: **report only, never f
 (a check that repairs things destroys the thing being asked), and **if the task is not
 this session's work, say so and stop** — never go along with it.
 
-Reports live at `~/.claude/cc_web_check.d/<sid>.json` (codex: `cc_web_check.codex.d`),
-one file per session, deliberately NOT inside the human's memo file: an agent's
-read-modify-write must never be able to clobber a sentence a human typed.
+Reports are stored by cc-web, one file per session, per agent — deliberately NOT inside
+the human's memo file: an agent's read-modify-write must never be able to clobber a
+sentence a human typed. Read them back three ways: `selfcheck.py show`, the second
+button on cc-web's `⚙ → Task` row (which shows `✓` / `✗2` / `⚠` without opening
+anything), or `GET /api/session-check` for the watchdog and peer-check layers later.
 
 Self-check is good for mechanical constraints ("was the suite run?", "was that file
 touched?") and near-useless for judgement ones ("did it stay on task?") — for those,

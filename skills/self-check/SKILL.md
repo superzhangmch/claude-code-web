@@ -33,6 +33,10 @@ SC=~/.claude/skills/self-check/selfcheck.py
 python3 "$SC" facts          # 要检查什么 + 确定性事实(JSON)
 ```
 
+配置只有一份:`~/.claude/cc_web.conf`(取 `token=`)。报告存哪、这是哪个 agent,
+都**问 cc-web**,不在这里重新推导 —— 否则 cc-web 改了目录名,这个 skill 会静默读到空。
+因此它需要本机的 cc-web 在跑(那份任务备忘本来就住在里面)。
+
 `facts` 给你:`task` / `notes` 原文、`memo_ver`(任务版本)、`pinned`(已固定的检查项清单,
 可能为 null)、以及 git 状态(分支、HEAD、脏文件、未 push、最近提交)。
 
@@ -70,6 +74,9 @@ JSON
 python3 "$SC" save --file /tmp/selfcheck.json
 ```
 
+脚本把报告**交给 cc-web 的门禁**(`POST /api/session-check`),不是自己写文件 ——
+校验规则住在服务端:住在这个脚本里的话,agent 直接写 JSON 文件就绕过去了。
+
 `verdict` 取值:`ok`(全部符合)、`deviations`(有未满足/部分满足)、`not_mine`、
 `disputed`(任务/注意事项本身有问题)、`no_task`。
 `status` 取值:`done` / `not_done` / `partial` / `unverifiable`。
@@ -78,14 +85,14 @@ python3 "$SC" save --file /tmp/selfcheck.json
 `not_mine` 没给理由和证据。`memo_ver`、`checked_at`、`git` 由脚本自己盖,你不要填 ——
 报告不能声称自己针对的是另一个版本的任务。
 
-## 报告放哪
+## 报告放哪 / 怎么看
 
-```
-~/.claude/cc_web_check.d/<session-id>.json          (codex: cc_web_check.codex.d)
-```
+由 cc-web 存,一个 session 一个文件(它自己决定路径,按 agent 分域)。三种看法:
 
-一个 session 一个文件,固定位置。`python3 "$SC" show` 打印上一份;如果任务在那之后被改过,
-它会先警告"这份报告针对更早版本的任务"。
+- `python3 "$SC" show` —— 终端里看上一份;任务在那之后被改过时会先警告"针对更早版本"。
+- **cc-web:`⚙ → Task` 那一行的第二个按钮「自检」** —— 按钮上直接显示 `✓` / `✗2` / `⚠`,
+  点开就是逐项 + 证据。
+- `GET /api/session-check?claude_session_id=<sid>` —— 给将来的看门狗/他检用。
 
 **它故意不写进人的备忘文件** —— 那份是人拥有的,agent 的读-改-写不该有机会盖掉人写的话。
 

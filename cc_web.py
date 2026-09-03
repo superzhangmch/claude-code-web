@@ -5672,6 +5672,7 @@ async def get_state(
         # The client re-fetches the text only when this moves — so an edit made on
         # another device shows up, without every poll carrying the strings.
         "memo_ver": _memo_ver(claude_session_id),
+        "check_ver": _check_ver(claude_session_id),
     }
     # Drop null-valued fields to save bytes on every poll — the client reads them
     # all as "missing == default" (status_line/gap_before_idx/pending_confirm/
@@ -5716,7 +5717,12 @@ def _memo_file(sid: str) -> Path:
 
 def _memo_blank() -> dict:
     z = {"text": "", "updated_at": "", "sent_at": "", "sent_count": 0}
-    return {"task": dict(z), "notes": dict(z), "supervisor": None}
+    # `rev` is the task VERSION a self-check report pins itself to. It is a counter and
+    # not the updated_at timestamps, because those have second resolution: two edits
+    # inside one second were indistinguishable, and the "the checklist must not change
+    # while the task has not" rule then rejected an honest re-derivation. Bumped only
+    # when the TEXT of a box changes — sending a reminder is not a change of intent.
+    return {"task": dict(z), "notes": dict(z), "rev": 0, "supervisor": None}
 
 
 def _memo_read(sid: str) -> dict:
@@ -5734,6 +5740,10 @@ def _memo_read(sid: str) -> dict:
         elif isinstance(got, str):
             rec[f]["text"] = got          # tolerate a hand-written flat file
     rec["supervisor"] = raw.get("supervisor")
+    try:
+        rec["rev"] = int(raw.get("rev") or 0)
+    except (TypeError, ValueError):
+        rec["rev"] = 0
     return rec
 
 
@@ -5772,7 +5782,10 @@ def post_session_memo(payload: MemoPayload):
     rec = _memo_read(payload.claude_session_id)
     now = _dt.datetime.now().isoformat(timespec="seconds")
     if payload.text is not None:
-        rec[payload.field]["text"] = payload.text.strip()
+        new = payload.text.strip()
+        if new != rec[payload.field]["text"]:
+            rec["rev"] = int(rec.get("rev") or 0) + 1
+        rec[payload.field]["text"] = new
         rec[payload.field]["updated_at"] = now
     if payload.mark_sent:
         rec[payload.field]["sent_at"] = now
@@ -5786,6 +5799,188 @@ def post_session_memo(payload: MemoPayload):
     tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(f)
     return rec
+
+
+# ---------------------------------------------------------------------------
+# Self-check reports: the session's own answer to the memo, and the rules about
+# what shape that answer may take.
+#
+# The checks live HERE and not in the skill that produces them, for one reason: a
+# validator inside a script the agent runs is advice — the agent can write the JSON
+# file itself and skip it. Behind the endpoint that owns the file, it is a gate. Both
+# agents get the same gate for free, and neither has to know where reports are kept.
+#
+# What is refused (each one is a way this kind of report rots):
+#   * a status with no evidence — "done" must cite a command and its real output
+#   * a checklist edited while the task text has not changed — otherwise the awkward
+#     item quietly disappears on the day it matters
+#   * `not_mine` as a bare assertion — the most convenient verdict there is
+#   * `ok` alongside unfinished items, and the reverse
+# And `memo_ver`/`checked_at` are stamped here, never taken from the report: a stale
+# green must not be able to present itself as current.
+_CHECK_STATUSES = ("done", "not_done", "partial", "unverifiable")
+_CHECK_VERDICTS = ("ok", "deviations", "not_mine", "disputed", "no_task")
+
+
+def _check_dir() -> Path:
+    d = _state_path("cc_web_check.d")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _check_file(sid: str) -> Path:
+    if not sid or not _MEMO_SID_RE.fullmatch(sid):
+        raise HTTPException(status_code=400, detail="bad session id")
+    return _check_dir() / (sid + ".json")
+
+
+def _check_read(sid: str) -> dict:
+    try:
+        raw = json.loads(_check_file(sid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _check_ver(sid: str) -> Optional[int]:
+    try:
+        return int(_check_file(sid).stat().st_mtime)
+    except (OSError, HTTPException):
+        return None
+
+
+class CheckPayload(BaseModel):
+    claude_session_id: str
+    verdict: str
+    summary: str = ""
+    items: list = []
+    disputes: list = []
+    not_mine_reason: str = ""
+    not_mine_evidence: list = []
+
+
+def _reject(msg: str):
+    raise HTTPException(status_code=422, detail=msg)
+
+
+@app.get("/api/session-check", dependencies=[Depends(require_token)])
+def get_session_check(claude_session_id: str):
+    """The stored report, plus whether it still describes the CURRENT task. A report
+    about a rewritten task is worse than none — it certifies the wrong thing — so
+    staleness is computed here rather than left to whoever reads it."""
+    rep = _check_read(claude_session_id)
+    if not rep:
+        return {"exists": False, "report": None, "stale": False,
+                "memo_ver": _memo_ver_str(claude_session_id)}
+    cur = _memo_ver_str(claude_session_id)
+    return {"exists": True, "report": rep, "stale": rep.get("memo_ver") != cur,
+            "memo_ver": cur}
+
+
+def _memo_ver_str(sid: str) -> str:
+    """The task VERSION a report pins itself to.
+
+    One counter for BOTH boxes on purpose: the checklist is derived from the task and
+    the standing notes together, so rewriting either one has to invalidate it. A
+    counter rather than the timestamps because those are second-resolution — see
+    _memo_blank()."""
+    return f"r{(_memo_read(sid) or {}).get('rev', 0)}"
+
+
+@app.post("/api/session-check", dependencies=[Depends(require_token)])
+def post_session_check(payload: CheckPayload):
+    import datetime as _dt
+    sid = payload.claude_session_id
+    f = _check_file(sid)                      # validates the id
+    memo = _memo_read(sid)
+    task = (memo.get("task") or {}).get("text") or ""
+    notes = (memo.get("notes") or {}).get("text") or ""
+    prev = _check_read(sid)
+    verdict = payload.verdict
+
+    if verdict not in _CHECK_VERDICTS:
+        _reject(f"verdict must be one of {_CHECK_VERDICTS}")
+    if not (task or notes) and verdict != "no_task":
+        _reject("there is no task or notes for this session, so the only honest verdict "
+                "is no_task")
+    items = payload.items or []
+    if verdict in ("ok", "deviations") and not items:
+        _reject("a verdict about the task needs at least one checked item")
+
+    for i, it in enumerate(items, 1):
+        if not isinstance(it, dict):
+            _reject(f"item {i} must be an object")
+        if not (it.get("claim") or "").strip():
+            _reject(f"item {i} has no claim")
+        if it.get("status") not in _CHECK_STATUSES:
+            _reject(f"item {i}: status must be one of {_CHECK_STATUSES}")
+        if it["status"] == "unverifiable":
+            if not (it.get("note") or "").strip():
+                _reject(f"item {i} is unverifiable, so it must say what would make it "
+                        f"checkable")
+            continue
+        ev = it.get("evidence") or []
+        if not isinstance(ev, list) or not ev:
+            _reject(f"item {i} claims '{it['status']}' with no evidence — run something "
+                    f"that shows it, or mark it unverifiable")
+        for e in ev:
+            if not isinstance(e, dict) or not (e.get("cmd") or "").strip() \
+               or not str(e.get("out") or "").strip():
+                _reject(f"item {i}: each evidence entry needs a cmd and its real output "
+                        f"(no paraphrasing)")
+
+    ver = _memo_ver_str(sid)
+    pinned = prev.get("pinned") if isinstance(prev.get("pinned"), dict) else None
+    claims = [(it.get("claim") or "").strip() for it in items]
+    if pinned and pinned.get("memo_ver") == ver and verdict in ("ok", "deviations"):
+        if claims != list(pinned.get("claims") or []):
+            old = list(pinned.get("claims") or [])
+            _reject("the task has not changed, so the checklist must not either. "
+                    f"dropped: {[c for c in old if c not in claims]}; "
+                    f"added: {[c for c in claims if c not in old]}. "
+                    "(if an item is genuinely wrong, change the task or the notes — that "
+                    "re-derives the list on purpose and on the record)")
+    else:
+        pinned = {"memo_ver": ver, "claims": claims,
+                  "pinned_at": _dt.datetime.now().isoformat(timespec="seconds")}
+
+    if verdict == "not_mine":
+        if not (payload.not_mine_reason or "").strip():
+            _reject("not_mine needs not_mine_reason: what the task is about vs what this "
+                    "session is")
+        if not payload.not_mine_evidence:
+            _reject("not_mine needs not_mine_evidence (this session's cwd, the repo it is "
+                    "in, the files it has touched)")
+    if verdict == "disputed" and not payload.disputes:
+        _reject("disputed needs disputes: which part of the task or notes is wrong, and why")
+
+    bad = [it for it in items if it.get("status") in ("not_done", "partial")]
+    if bad and verdict == "ok":
+        _reject("some items are not done, so the verdict cannot be ok")
+    if not bad and verdict == "deviations":
+        _reject("nothing deviates, so the verdict should be ok")
+
+    out = {
+        "schema": 1,
+        "session_id": sid,
+        "agent": AGENT,
+        "memo_ver": ver,
+        "task": task,
+        "notes": notes,
+        "checked_at": _dt.datetime.now().isoformat(timespec="seconds"),
+        "verdict": verdict,
+        "summary": (payload.summary or "").strip(),
+        "items": items,
+        "deviations": [it.get("claim") for it in bad],
+        "disputes": payload.disputes or [],
+        "not_mine_reason": payload.not_mine_reason or "",
+        "not_mine_evidence": payload.not_mine_evidence or [],
+        "pinned": pinned,
+    }
+    tmp = f.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(f)
+    return out
 
 
 @app.get("/api/session-procs", dependencies=[Depends(require_token)])
