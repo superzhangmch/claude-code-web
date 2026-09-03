@@ -6752,11 +6752,19 @@ def fs_list(path: str = "", offset: int = 0, limit: int = FS_PAGE_SIZE, q: str =
             "entries": entries}
 
 
-@app.get("/api/fs/file")
+@app.api_route("/api/fs/file", methods=["GET", "HEAD"])
 def fs_file(path: str, token: str = "",
             authorization: Optional[str] = Header(default=None)):
     """Serve a local file inline (browser guesses how to render via the
     Content-Type FileResponse sets from the extension). Size-capped.
+
+    HEAD as well as GET, so "is this file there?" is one cheap question with no body
+    transferred and no second endpoint to keep in step with this one's auth and
+    path rules. The links popup asks it: a path written in a transcript is often
+    relative to the session's cwd — with a leading slash, so it LOOKS absolute — and
+    the only way to tell which reading is real is to ask. (Starlette's FileResponse
+    sends headers only for HEAD, so the size cap below still applies but nothing is
+    read.) A previewable-text endpoint could not answer for images or PDFs.
 
     Auth accepts EITHER the Bearer header (in-app fetch) OR a ?token=
     query param — the latter so a copied URL works when pasted straight

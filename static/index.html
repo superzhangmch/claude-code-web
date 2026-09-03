@@ -2066,6 +2066,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #links-modal .link-row a.lk:hover { text-decoration: underline; }
 #links-modal .link-row .lk.path { color: var(--text); }
 #links-modal .link-row .btn { flex-shrink: 0; }
+/* The direct-jump control is a real <a> (so copy-link-address and open-in-new-tab
+   work), which means it does not get the look a <button> gets from the browser for
+   free. body.pure — the e-ink theme — already covers a.btn, so this is for the others. */
+#links-modal .link-row a.btn {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  font-size: 13px; line-height: 1; padding: 4px 7px;
+  text-decoration: none; cursor: pointer; align-self: flex-start;
+}
+#links-modal .link-row a.btn:hover { border-color: var(--accent); }
+#links-modal .link-row a.btn.dim { opacity: .45; }
 #links-modal .links-empty { color: var(--muted); padding: 12px 4px; font-size: 13px; }
 #files-modal .files-favs {
   display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0;
@@ -7926,6 +7937,32 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // the endpoint accepts a ?token= (an <img> can't set an auth header).
   const fsFileUrl = (p) => location.origin + "/api/fs/file?path="
     + encodeURIComponent(p) + "&token=" + encodeURIComponent(authToken);
+  // A path written in a transcript is often relative to the session's cwd AND written
+  // with a leading slash — "/differential_geometry/riemannian_geometry.html" — so it
+  // looks absolute and is not. Nothing in the string says which reading is right, so
+  // ask: HEAD /api/fs/file, which transfers no body and answers for images and PDFs
+  // too (a text-preview probe could not). Cached per cwd+path, because three things
+  // on one row want the answer and they should not ask three times.
+  const _fsResolved = new Map();
+  function fsResolve(p) {
+    const cwd = _sessionCwd().replace(/\/+$/, "");
+    const key = cwd + " " + p;
+    if (_fsResolved.has(key)) return _fsResolved.get(key);
+    const cands = [p];
+    if (cwd && p !== cwd && !p.startsWith(cwd + "/"))
+      cands.push(cwd + "/" + p.replace(/^\/+/, ""));
+    const probe = (async () => {
+      for (const c of cands) {
+        try {
+          const r = await authedFetch("/api/fs/file?path=" + encodeURIComponent(c), { method: "HEAD" });
+          if (r.ok) return c;
+        } catch {}
+      }
+      return null;
+    })();
+    _fsResolved.set(key, probe);
+    return probe;
+  }
   function showLinks(text) {
     const { urls, paths } = extractLinks(text);
     linksTitleEl.textContent = "Links";
@@ -7950,6 +7987,16 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       tag.className = "ltag " + (it.t === "url" ? "ltag-url" : "ltag-path");
       tag.textContent = it.t === "url" ? "URL" : "PATH";
       const img = it.t === "path" && isImagePath(it.v);
+      // One resolution per row, shared by everything that needs a path that EXISTS:
+      // the in-app viewer, the direct link, the image preview and its thumbnail. They
+      // all read `best`, so when the probe answers they are all corrected at once.
+      const best = { path: it.v, url: fsFileUrl(it.v) };
+      const resolved = it.t === "path"
+        ? fsResolve(it.v).then(hit => {
+            if (hit) { best.path = hit; best.url = fsFileUrl(hit); }
+            return hit;
+          })
+        : Promise.resolve(null);
       let node;
       if (it.t === "url") {
         node = document.createElement("a"); node.className = "lk";
@@ -7960,7 +8007,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         node.textContent = elideLink(it.v); node.title = it.v;
         if (img) {   // image → click the link to preview full-screen in THIS window (no new page)
           node.classList.add("lk-img"); node.title = "click to preview";
-          node.addEventListener("click", () => openImagePreview(fsFileUrl(it.v), it.v));
+          node.addEventListener("click", async () => { await resolved; openImagePreview(best.url, best.path); });
         }
       }
       if (img) tag.textContent = "IMG";
@@ -7968,8 +8015,28 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (it.t === "path") {
         const open = document.createElement("button");
         open.className = "btn"; open.textContent = "open"; open.title = "Open in the file viewer";
-        open.addEventListener("click", () => openPathInFiles(it.v));
+        // The resolved path, not the raw one: the viewer looks up a parent dir and
+        // searches it, so a cwd-relative path used to send it to "/differential_geometry"
+        // — a directory that does not exist — and it quietly found nothing.
+        open.addEventListener("click", async () => { await resolved; openPathInFiles(best.path); });
         li.appendChild(open);
+        // Direct jump: a real <a>, so the BROWSER renders the file (html, pdf, image)
+        // in a new tab, and right-click → copy link address / long-press → open in new
+        // tab work like any link. href starts at the raw reading and is corrected when
+        // the probe answers; dimmed if the file is nowhere to be found, which is worth
+        // knowing before you click rather than after.
+        const jump = document.createElement("a");
+        jump.className = "btn lk-jump"; jump.textContent = "↗ raw";
+        jump.target = "_blank"; jump.rel = "noopener noreferrer";
+        jump.href = best.url;
+        jump.title = "在浏览器新标签页直接打开(/api/fs/file?path=…&token=…)";
+        resolved.then(hit => {
+          jump.href = best.url;
+          jump.title = hit ? "在浏览器新标签页直接打开:\n" + hit
+                           : "找不到这个文件 —— 原样和 " + (_sessionCwd() || "(cwd 未知)") + " 下面都试过了";
+          if (!hit) jump.classList.add("dim");
+        });
+        li.appendChild(jump);
       }
       li.appendChild(mkCopy(it.v));
       linksListEl.appendChild(li);
@@ -7977,8 +8044,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // Inline thumbnail via the fs/file API; click to open the full image.
         const wrap = document.createElement("div"); wrap.className = "link-thumb";
         const im = document.createElement("img");
-        im.loading = "lazy"; im.src = fsFileUrl(it.v); im.alt = it.v; im.title = "click to open full image";
-        im.addEventListener("click", () => openImagePreview(fsFileUrl(it.v), it.v));   // full-screen in-window, not a new page
+        // src only once the path is resolved: setting the raw reading first made the
+        // error handler fire and replace the thumbnail with "(couldn't load)" before
+        // the correct URL was even known.
+        im.loading = "lazy"; im.alt = it.v; im.title = "click to open full image";
+        resolved.then(() => { im.src = best.url; });
+        im.addEventListener("click", () => openImagePreview(best.url, best.path));   // full-screen in-window, not a new page
         im.addEventListener("error", () => { wrap.textContent = "(couldn't load image preview)"; wrap.classList.add("thumb-err"); });
         wrap.appendChild(im);
         linksListEl.appendChild(wrap);
