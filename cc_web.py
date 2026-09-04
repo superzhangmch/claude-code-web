@@ -3841,10 +3841,18 @@ async def _whip_check(b, now: float, dry: bool = False) -> dict:
         pend = None            # the user's own "1. … 2. …" echoed back, not a menu
     pending = bool(pend)
     if pending:
-        # A text message does not pick a menu item, and "send ESC to decline, then
-        # delegate" depends on what claude does with ESC at that prompt — not measured
-        # yet. Shipping an unmeasured keystroke into a permission dialog is the exact
-        # thing this design exists to avoid.
+        # NOT a macOS dialog — claude's own in-terminal prompt, characters in the pane
+        # ("Bash(git push origin main) / Do you want to proceed? ❯ 1. Yes …"), which is
+        # why the screen text is what detects it.
+        #
+        # Escalating is the FINAL behaviour here, not a stub. Two reasons, and the
+        # second is the real one:
+        #   * those options are chosen with a keypress; a text message cannot pick one.
+        #   * with auto mode on, the prompts that still appear are exactly the ones auto
+        #     mode decided need a human. Answering them on your behalf would make this
+        #     a human-shaped rubber stamp, which is the thing the whole design refuses.
+        # So it reports WHAT is being asked and stops. Do not "improve" this by sending
+        # keystrokes.
         m = re.search(r"(?m)^\s*(?:[│|]\s*)?((?:Bash|Edit|Write|Read|WebFetch|WebSearch|"
                       r"Task|NotebookEdit)\(.{0,120}?\))", screen or "")
         return _whip_escalate(sid, st, "它卡在一个权限确认上"
