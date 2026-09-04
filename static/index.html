@@ -2115,6 +2115,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 /* The value on a Task-row button (the task preview, the verdict) is context, not
    the label — dimmed so the word you are looking for stays the word. */
 .switch-menu .scr-cfg-row .mm-dim { color: var(--muted); }
+#memo-modal .memo-verbar { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+#memo-modal .memo-verlabel { flex: 1; color: var(--muted); font-size: 11px; }
+#memo-modal .memo-vers {
+  display: none; flex-shrink: 0; max-height: 22vh; overflow: auto;
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; font-size: 12px;
+}
+#memo-modal .memo-vers.show { display: block; }
+#memo-modal .memo-vers .mv-row { display: flex; align-items: baseline; gap: 6px; padding: 3px 0; }
+#memo-modal .memo-vers .mv-id { color: var(--muted); flex-shrink: 0; min-width: 22px; }
+#memo-modal .memo-vers .mv-txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#memo-modal .memo-vers .mv-cur { color: var(--accent); flex-shrink: 0; }
 #memo-modal .memo-sec.memo-check { flex: 0 0 auto; }
 #memo-modal .memo-lab { display: flex; align-items: center; gap: 6px; }
 #memo-modal .memo-runbtn { margin-left: auto; font-size: 11px; padding: 2px 8px; }
@@ -2528,6 +2539,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
                 title="把两个框的内容 + 「起一个每 30 分钟检查一次的 watcher」填进输入框(不发送)">set periodic check</button>
         <button id="memo-save" class="btn" title="保存两个框(只有这个按钮会写入)">保存</button>
         <button id="memo-close" class="btn" title="close">✕</button></div>
+      <!-- Versions. Editing rewrites the current one; `fork` is what makes a new one.
+           The list is collapsed until you ask for it: most of the time there is one
+           version and a row saying so would be furniture. -->
+      <div class="memo-verbar">
+        <span id="memo-vercur" class="memo-verlabel"></span>
+        <button id="memo-verlist" class="btn memo-smallbtn" title="列出所有版本,可切换当前版本">versions</button>
+        <button id="memo-fork" class="btn memo-smallbtn" title="以当前内容为起点建立一个新版本(不影响旧版本)">fork</button>
+      </div>
+      <div id="memo-vers" class="memo-vers"></div>
       <div class="memo-sec">
         <div class="memo-lab">当前任务 <span class="memo-hint">随进展改写</span></div>
         <textarea id="memo-task" class="memo-ta" rows="3"
@@ -3323,6 +3343,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       mmMemoHint.textContent = (t || n) ? " ✓" : "";
     }
     memoAskBtns();
+    memoVerRender();
   }
   // The session's self-check, read back. Deliberately in the SAME modal as the two
   // boxes it is about: the report only means anything next to the intent it was
@@ -3418,6 +3439,52 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const v = (ver == null ? 0 : ver);
     if (attachedSid !== memoSid || v !== memoVerSeen) memoLoad(attachedSid, v);
   }
+  const memoVerCur = document.getElementById("memo-vercur");
+  const memoVersEl = document.getElementById("memo-vers");
+  function memoVerRender() {
+    const r = memoRec || {}, vs = r.versions || [];
+    if (memoVerCur) {
+      memoVerCur.textContent = vs.length > 1
+        ? `版本 v${r.current} / 共 ${vs.length}` : (vs.length ? `版本 v${r.current}` : "");
+    }
+    if (!memoVersEl) return;
+    // Newest first: the one you are most likely to be switching back FROM is the one
+    // you just made.
+    memoVersEl.innerHTML = vs.slice().reverse().map((v) => {
+      const when = (v.updated_at || v.created_at || "").replace("T", " ").slice(5, 16);
+      const txt = _escHtml(v.label || v.task || v.notes || "(空)");
+      return `<div class="mv-row" data-id="${v.id}">`
+        + `<span class="mv-id">v${v.id}</span>`
+        + `<span class="mv-txt" title="${_escHtml(v.task || "")}">${txt}</span>`
+        + `<span class="mc-stale">${when}</span>`
+        + (v.current ? '<span class="mv-cur">当前</span>'
+                     : `<button class="btn memo-smallbtn mv-set" data-id="${v.id}">设为当前</button>`
+                       + `<button class="btn memo-smallbtn mv-del" data-id="${v.id}" title="删除这个版本">✕</button>`)
+        + "</div>";
+    }).join("");
+  }
+  if (memoVersEl) memoVersEl.addEventListener("click", async (e) => {
+    const set = e.target.closest(".mv-set"), del = e.target.closest(".mv-del");
+    if (!set && !del) return;
+    e.stopPropagation();
+    // Unsaved edits belong to the version you are LEAVING, so switching away would
+    // quietly drop them. Say so instead.
+    if (memoDirty && !confirm("当前版本有未保存的改动 —— 切换会丢弃它, 继续?")) return;
+    const id = parseInt((set || del).dataset.id, 10);
+    const r = await memoPost(set ? { set_current: id } : { delete: id });
+    if (r) memoMark(false);
+  });
+  document.getElementById("memo-verlist").addEventListener("click", (e) => {
+    e.stopPropagation(); memoVersEl.classList.toggle("show");
+  });
+  document.getElementById("memo-fork").addEventListener("click", async (e) => {
+    e.stopPropagation();
+    // Fork carries whatever is in the boxes right now, saved or not: you pressed fork
+    // BECAUSE of what you were typing, and making you save into the old version first
+    // would put it in the wrong place.
+    const ok = await memoPost({ fork: true, task: memoTA.task.value, notes: memoTA.notes.value });
+    if (ok) { memoMark(false); memoVersEl.classList.add("show"); }
+  });
   async function memoPost(body) {
     const r = await authedFetch("/api/session-memo", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -10141,7 +10208,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
       // Post the ONE field: the endpoint leaves the other alone, so this cannot
       // clobber whatever is in the other box (which may not even be loaded here).
-      const ok = await memoPost(field === "task" ? { task: text } : { notes: text });
+      // Through the composer means a NEW version, per the panel's rule: the boxes are
+      // edited in place, and anything arriving from outside is a turn the work took.
+      const ok = await memoPost(field === "task" ? { fork: true, task: text }
+                                                 : { fork: true, notes: text });
       if (!ok) { alert("保存失败"); return; }
       inputEl.value = ""; inputEl.style.height = "auto"; inputEl.dispatchEvent(new Event("input"));
       await memoLoad(attachedSid, memoVerSeen);   // read back the stored copy

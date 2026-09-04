@@ -76,6 +76,91 @@ def main():
     check("...without touching the other field's count", rec["notes"]["sent_count"] == 0)
     check("mark_sent alone does not alter the text", rec["task"]["text"] == "改成: 查缓存问题")
 
+    print("=== versions: editing is not a version, forking is ===")
+    cc_web.post_session_memo(P(claude_session_id=SID, task="第一版任务", notes="长期规矩"))
+    got = cc_web.get_session_memo(claude_session_id=SID)
+    check("one version to begin with", len(got["versions"]) == 1 and got["current"] == 1,
+          json.dumps(got["versions"])[:60])
+    cc_web.post_session_memo(P(claude_session_id=SID, task="第一版任务(改了措辞)"))
+    got = cc_web.get_session_memo(claude_session_id=SID)
+    check("...and editing does NOT make another one — that is the whole split",
+          len(got["versions"]) == 1 and got["task"]["text"] == "第一版任务(改了措辞)",
+          str(len(got["versions"])))
+    r2 = cc_web.post_session_memo(P(claude_session_id=SID, fork=True))
+    check("fork makes one and switches to it", len(r2["versions"]) == 2 and r2["current"] == 2,
+          f'{len(r2["versions"])} / v{r2["current"]}')
+    # A fork starts from the current content, not from blank: it is "this task, but
+    # going a different way", and an empty start means retyping the half that has not
+    # changed — which is how the standing notes stop being kept up to date.
+    check("...copied from the one you were on", r2["task"]["text"] == "第一版任务(改了措辞)"
+          and r2["notes"]["text"] == "长期规矩", r2["task"]["text"])
+    check("...and it has sent nothing yet, whatever the old one had sent",
+          r2["task"]["sent_count"] == 0)
+    cc_web.post_session_memo(P(claude_session_id=SID, task="第二版: 换个方向"))
+    check("editing the fork leaves the older version alone",
+          [v["task"] for v in cc_web.get_session_memo(claude_session_id=SID)["versions"]]
+          == ["第一版任务(改了措辞)", "第二版: 换个方向"],
+          str([v["task"] for v in cc_web.get_session_memo(claude_session_id=SID)["versions"]]))
+
+    print("=== ...and one of them is current ===")
+    r3 = cc_web.post_session_memo(P(claude_session_id=SID, set_current=1))
+    check("set_current switches which boxes everything else sees",
+          r3["current"] == 1 and r3["task"]["text"] == "第一版任务(改了措辞)", r3["task"]["text"])
+    check("...and that counts as a change of intent, so a self-check re-derives",
+          cc_web._memo_ver_str(SID) == f"r{r3['rev']}" and r3["rev"] > r2["rev"],
+          f"{r2['rev']} -> {r3['rev']}")
+    got = None
+    try:
+        cc_web.post_session_memo(P(claude_session_id=SID, delete=1))
+    except HTTPException as e:
+        got = e.detail
+    check("deleting the CURRENT version is refused — a delete must not silently change "
+          "what the session is working to", got and "current" in str(got), str(got)[:60])
+    cc_web.post_session_memo(P(claude_session_id=SID, delete=2))
+    check("...a non-current one goes",
+          len(cc_web.get_session_memo(claude_session_id=SID)["versions"]) == 1)
+    got = None
+    try:
+        cc_web.post_session_memo(P(claude_session_id=SID, delete=1))
+    except HTTPException as e:
+        got = e.detail
+    check("...and the last one cannot be deleted at all", got and "only version" in str(got), str(got)[:50])
+    got = None
+    try:
+        cc_web.post_session_memo(P(claude_session_id=SID, set_current=99))
+    except HTTPException as e:
+        got = e.status_code
+    check("a version that does not exist is a 404, not a new blank one", got == 404, str(got))
+
+    print("=== a file written by the pre-versions build still opens ===")
+    # Those files were written by an earlier build of this same panel; "please re-type
+    # it" would be an odd thing to say about a memo.
+    flat = {"task": {"text": "旧格式任务", "updated_at": "2026-09-01T10:00:00",
+                     "sent_at": "", "sent_count": 3},
+            "notes": {"text": "旧格式注意事项", "updated_at": "2026-09-01T10:00:00",
+                      "sent_at": "", "sent_count": 0},
+            "rev": 7, "supervisor": None}
+    open(os.path.join(home, ".claude", "cc_web_memo.d", SID + ".json"), "w").write(
+        json.dumps(flat, ensure_ascii=False))
+    got = cc_web.get_session_memo(claude_session_id=SID)
+    check("it becomes version 1, with its text and its counts intact",
+          got["current"] == 1 and got["task"]["text"] == "旧格式任务"
+          and got["task"]["sent_count"] == 3 and got["notes"]["text"] == "旧格式注意事项",
+          json.dumps(got["task"], ensure_ascii=False)[:70])
+    check("...and its rev is kept, so an existing self-check report is not made stale "
+          "by the migration alone", got["rev"] == 7, str(got["rev"]))
+
+    print("=== the composer route makes a version, the boxes are edited in place ===")
+    src0 = open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8").read()
+    menu0 = re.search(r"const setBox = \(field\) => async \(\) => \{.*?\n    \};", src0, re.S)
+    check("set task desc/constrain forks",
+          menu0 and "fork: true" in menu0.group(0), (menu0.group(0)[:60] if menu0 else "?"))
+    check("...while 保存 does not", "memoPost({ task: memoTA.task.value, notes: memoTA.notes.value })" in src0)
+    check("fork takes what is in the boxes right now, saved or not",
+          "memoPost({ fork: true, task: memoTA.task.value, notes: memoTA.notes.value })" in src0)
+    check("switching away with unsaved edits warns instead of dropping them",
+          "当前版本有未保存的改动" in src0)
+
     print("=== the poll only carries a version, not the strings ===")
     v1 = cc_web._memo_ver(SID)
     check("memo_ver is an int once there is a file", isinstance(v1, int), str(v1))
@@ -220,8 +305,12 @@ def main():
     check("both items exist", '"set task desc"' in src and '"set task constrain"' in src)
     # One field per request: the other box may not even be loaded in this view, and
     # posting both would write whatever stale value happens to be in the DOM.
-    check("it posts ONE field, so the other box cannot be clobbered",
-          'field === "task" ? { task: text } : { notes: text }' in mb, mb[:60])
+    # Names ONE field: the other box may not even be loaded in this view, so sending
+    # both would write whatever stale value is sitting in the DOM. The fork copies the
+    # other one server-side, from the stored record.
+    check("it names ONE field, so the other box cannot be clobbered",
+          "{ fork: true, task: text }" in mb and "{ fork: true, notes: text }" in mb,
+          mb[mb.find("const ok"):][:90])
     check("...clears the composer (the box owns the text now)", 'inputEl.value = ""' in mb)
     check("...then re-reads the stored copy and opens the modal, so 'saved' is visible",
           "memoLoad(attachedSid" in mb and 'memoModal.classList.add("show")' in mb)

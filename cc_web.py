@@ -5732,46 +5732,125 @@ def _memo_file(sid: str) -> Path:
     return _memo_dir() / (sid + ".json")
 
 
-def _memo_blank() -> dict:
+def _memo_now() -> str:
+    import datetime as _dt
+    return _dt.datetime.now().isoformat(timespec="seconds")
+
+
+def _memo_blank_version(vid: int = 1) -> dict:
     z = {"text": "", "updated_at": "", "sent_at": "", "sent_count": 0}
-    # `rev` is the task VERSION a self-check report pins itself to. It is a counter and
-    # not the updated_at timestamps, because those have second resolution: two edits
-    # inside one second were indistinguishable, and the "the checklist must not change
-    # while the task has not" rule then rejected an honest re-derivation. Bumped only
-    # when the TEXT of a box changes — sending a reminder is not a change of intent.
-    return {"task": dict(z), "notes": dict(z), "rev": 0, "supervisor": None}
+    return {"id": vid, "created_at": _memo_now(), "label": "",
+            "task": dict(z), "notes": dict(z)}
+
+
+def _memo_blank() -> dict:
+    """Several VERSIONS of the two boxes, one of them current.
+
+    Not every edit is a version — editing and saving rewrites the current one, and
+    `fork` is what makes a new one. That is the useful split: you fiddle with the
+    wording of the task you are on all the time, and only occasionally does the task
+    itself become a different task. A version per keystroke would be a list nobody
+    reads; a version only when you say so is a list of the turns the work took.
+
+    `rev` is what a self-check report pins itself to. It counts changes of EFFECTIVE
+    intent — the current version's text changing, a fork, or switching which version
+    is current — and not `updated_at`, whose second resolution made two edits inside
+    one second indistinguishable. Sending a reminder is not a change of intent.
+    """
+    return {"versions": [_memo_blank_version(1)], "current": 1, "rev": 0,
+            "supervisor": None}
+
+
+def _memo_cur(rec: dict) -> dict:
+    """The current version, always something: a file hand-edited into naming a
+    version that does not exist must not take the whole panel down with it."""
+    for v in rec["versions"]:
+        if v["id"] == rec["current"]:
+            return v
+    return rec["versions"][0]
 
 
 def _memo_read(sid: str, strict: bool = False) -> dict:
     """strict=True is for the write path: a file that EXISTS but will not parse must
     not be quietly treated as "empty" and overwritten — that would turn one bad read
-    into deleting what the human typed. Reads stay lenient (show blank, carry on)."""
+    into deleting what the human typed. Reads stay lenient (show blank, carry on).
+
+    Also migrates the pre-versions shape (task/notes at the top level) into version 1,
+    in place and without asking: those files were written by an earlier build of this
+    same panel, and a "please re-type it" would be an odd thing to say about a memo.
+    """
     rec = _memo_blank()
-    f = _memo_file(sid)
+    path = _memo_file(sid)
     try:
-        raw = json.loads(f.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except OSError:
         return rec                      # not there yet — fine, this is the blank one
     except ValueError:
         if strict:
             raise HTTPException(status_code=500,
-                                detail=f"{f.name} is on disk but unreadable — refusing to "
-                                       f"overwrite it; look at it by hand")
+                                detail=f"{path.name} is on disk but unreadable — refusing "
+                                       f"to overwrite it; look at it by hand")
         return rec
     if not isinstance(raw, dict):
         return rec
-    for f in _MEMO_FIELDS:
-        got = raw.get(f)
-        if isinstance(got, dict):
-            rec[f].update({k: v for k, v in got.items() if k in rec[f]})
-        elif isinstance(got, str):
-            rec[f]["text"] = got          # tolerate a hand-written flat file
+
+    def _one(src: dict, vid: int) -> dict:
+        v = _memo_blank_version(vid)
+        for k in ("created_at", "label"):
+            if isinstance(src.get(k), str):
+                v[k] = src[k]
+        for fld in _MEMO_FIELDS:
+            got = src.get(fld)
+            if isinstance(got, dict):
+                v[fld].update({k: x for k, x in got.items() if k in v[fld]})
+            elif isinstance(got, str):
+                v[fld]["text"] = got      # tolerate a hand-written flat file
+        return v
+
+    vs = raw.get("versions")
+    if isinstance(vs, list) and vs:
+        out = []
+        for i, src in enumerate(vs, 1):
+            if isinstance(src, dict):
+                try:
+                    vid = int(src.get("id") or i)
+                except (TypeError, ValueError):
+                    vid = i
+                out.append(_one(src, vid))
+        if out:
+            rec["versions"] = out
+            try:
+                rec["current"] = int(raw.get("current") or out[-1]["id"])
+            except (TypeError, ValueError):
+                rec["current"] = out[-1]["id"]
+    else:
+        rec["versions"] = [_one(raw, 1)]   # the old flat shape → version 1
+        rec["current"] = 1
     rec["supervisor"] = raw.get("supervisor")
     try:
         rec["rev"] = int(raw.get("rev") or 0)
     except (TypeError, ValueError):
         rec["rev"] = 0
     return rec
+
+
+def _memo_flat(rec: dict) -> dict:
+    """What a client gets: the CURRENT version's two boxes at the top level (so the
+    panel needs no idea that versions exist to render), plus the list to choose from —
+    previews only, because the full text of ten versions on every open is silly."""
+    cur = _memo_cur(rec)
+    return {
+        "task": cur["task"], "notes": cur["notes"],
+        "current": cur["id"], "rev": rec.get("rev", 0),
+        "supervisor": rec.get("supervisor"),
+        "versions": [{"id": v["id"], "label": v.get("label", ""),
+                      "created_at": v.get("created_at", ""),
+                      "current": v["id"] == cur["id"],
+                      "task": (v["task"]["text"] or "")[:80],
+                      "notes": (v["notes"]["text"] or "")[:80],
+                      "updated_at": v["task"].get("updated_at") or v.get("created_at", "")}
+                     for v in rec["versions"]],
+    }
 
 
 def _memo_ver(sid: str) -> Optional[int]:
@@ -5787,52 +5866,106 @@ def _memo_ver(sid: str) -> Optional[int]:
 class MemoPayload(BaseModel):
     """One request can carry BOTH boxes, which is how the save button avoids needing
     two concurrent writes to the same file at all (belt as well as the braces of the
-    lock above). A field left as None is left alone; "" clears it."""
+    lock above). A field left as None is left alone; "" clears it.
+
+    Applied in this order, so one request can say "fork and put this in it": delete,
+    then set_current, then fork, then the text.
+    """
     claude_session_id: str
     task: Optional[str] = None
     notes: Optional[str] = None
     mark_sent: Optional[str] = None          # "task" | "notes" — stamp "just sent this"
+    fork: bool = False                       # new version, copied from the current one
+    set_current: Optional[int] = None
+    delete: Optional[int] = None
+    label: Optional[str] = None              # name the current version
 
 
 @app.get("/api/session-memo", dependencies=[Depends(require_token)])
 def get_session_memo(claude_session_id: str):
-    return _memo_read(claude_session_id)
+    return _memo_flat(_memo_read(claude_session_id))
 
 
 @app.post("/api/session-memo", dependencies=[Depends(require_token)])
 def post_session_memo(payload: MemoPayload):
-    """Set one field's text, or stamp that it was just sent. The SENDING itself is
-    not here: the client posts the message through /api/input like any other, so a
-    reminder queues behind a running turn and lands in the transcript exactly like
-    something typed by hand. This endpoint only records that it happened."""
-    import datetime as _dt          # function-local, like every other use in this file
+    """Set the current version's text, switch/fork/delete a version, or stamp that a
+    box was just sent. The SENDING itself is not here: the client posts the message
+    through /api/input like any other, so a reminder queues behind a running turn and
+    lands in the transcript exactly like something typed by hand."""
     if payload.mark_sent is not None and payload.mark_sent not in _MEMO_FIELDS:
         raise HTTPException(status_code=400, detail="mark_sent must be task or notes")
-    if payload.task is None and payload.notes is None and payload.mark_sent is None:
+    if (payload.task is None and payload.notes is None and payload.mark_sent is None
+            and payload.label is None and not payload.fork
+            and payload.set_current is None and payload.delete is None):
         raise HTTPException(status_code=400, detail="nothing to do")
     f = _memo_file(payload.claude_session_id)
-    now = _dt.datetime.now().isoformat(timespec="seconds")
+    now = _memo_now()
     with _STATE_WRITE_LOCK:
         rec = _memo_read(payload.claude_session_id, strict=True)
-        for field, new in (("task", payload.task), ("notes", payload.notes)):
-            if new is None:
+
+        if payload.delete is not None:
+            if len(rec["versions"]) <= 1:
+                raise HTTPException(status_code=400, detail="that is the only version")
+            if payload.delete == rec["current"]:
+                raise HTTPException(status_code=400,
+                                    detail="that version is current — make another one "
+                                           "current first, so a delete cannot silently "
+                                           "change what the session is working to")
+            keep = [v for v in rec["versions"] if v["id"] != payload.delete]
+            if len(keep) == len(rec["versions"]):
+                raise HTTPException(status_code=404, detail="no such version")
+            rec["versions"] = keep
+
+        if payload.set_current is not None:
+            if not any(v["id"] == payload.set_current for v in rec["versions"]):
+                raise HTTPException(status_code=404, detail="no such version")
+            if payload.set_current != rec["current"]:
+                rec["current"] = payload.set_current
+                rec["rev"] = int(rec.get("rev") or 0) + 1   # effective intent changed
+
+        if payload.fork:
+            # A copy of the current one, not a blank: a fork is "this task, but going
+            # a different way", and starting from empty would mean retyping the half
+            # of it that has not changed — which is how the standing notes stop being
+            # kept up to date.
+            src = _memo_cur(rec)
+            vid = max((v["id"] for v in rec["versions"]), default=0) + 1
+            new_v = json.loads(json.dumps(src))
+            new_v.update({"id": vid, "created_at": now, "label": ""})
+            for fld in _MEMO_FIELDS:                        # a fork has sent nothing yet
+                new_v[fld]["sent_at"] = ""
+                new_v[fld]["sent_count"] = 0
+            rec["versions"].append(new_v)
+            rec["current"] = vid
+            rec["rev"] = int(rec.get("rev") or 0) + 1
+
+        cur = _memo_cur(rec)
+        if payload.label is not None:
+            cur["label"] = payload.label.strip()[:40]
+        for field, new_text in (("task", payload.task), ("notes", payload.notes)):
+            if new_text is None:
                 continue
-            new = new.strip()
-            if new != rec[field]["text"]:
+            new_text = new_text.strip()
+            if new_text != cur[field]["text"]:
                 rec["rev"] = int(rec.get("rev") or 0) + 1
-            rec[field]["text"] = new
-            rec[field]["updated_at"] = now
+            cur[field]["text"] = new_text
+            cur[field]["updated_at"] = now
         if payload.mark_sent:
             g = payload.mark_sent
-            rec[g]["sent_at"] = now
-            rec[g]["sent_count"] = int(rec[g].get("sent_count") or 0) + 1
-        # Both boxes empty and never sent → no file at all, so an untouched session
-        # costs nothing and `memo_ver` stays absent on its polls.
-        if not any(rec[x]["text"] or rec[x]["sent_count"] for x in _MEMO_FIELDS) and not rec["supervisor"]:
+            cur[g]["sent_at"] = now
+            cur[g]["sent_count"] = int(cur[g].get("sent_count") or 0) + 1
+
+        # Nothing anywhere and never sent → no file at all, so an untouched session
+        # costs nothing and `memo_ver` stays absent on its polls. Only when there is a
+        # single version: once you have kept several, an empty current one is a state
+        # you chose, not an absence.
+        empty = not any(v[x]["text"] or v[x]["sent_count"]
+                        for v in rec["versions"] for x in _MEMO_FIELDS)
+        if empty and len(rec["versions"]) <= 1 and not rec["supervisor"]:
             f.unlink(missing_ok=True)
-            return rec
+            return _memo_flat(rec)
         _write_json_atomic(f, rec)
-    return rec
+    return _memo_flat(rec)
 
 
 # ---------------------------------------------------------------------------
@@ -5926,7 +6059,7 @@ def post_session_check(payload: CheckPayload):
     import datetime as _dt
     sid = payload.claude_session_id
     f = _check_file(sid)                      # validates the id
-    memo = _memo_read(sid)
+    memo = _memo_flat(_memo_read(sid))     # the CURRENT version's two boxes
     task = (memo.get("task") or {}).get("text") or ""
     notes = (memo.get("notes") or {}).get("text") or ""
     prev = _check_read(sid)
