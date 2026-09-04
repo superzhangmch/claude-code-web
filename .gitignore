@@ -18,3 +18,7 @@ REQUIREMENTS.md
 # in a real browser at a real size and then deleted; only the chosen one gets a name.
 static/_try-*
 static/_iconprev.html
+
+# Written by tests/run_all.sh on a green run; read by the deploy gate. Machine
+# state about one working tree, not source.
+.suite-stamp

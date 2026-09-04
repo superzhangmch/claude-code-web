@@ -47,6 +47,21 @@ for t in tests/test_*.py; do
   fi
 done
 
+# ---- stamp ------------------------------------------------------------------
+# On a green run, record WHICH bytes were green. The deploy refuses to ship a tree
+# whose fingerprint has no stamp — so "run the suite before deploying" stops being a
+# sentence someone has to remember. Only on success, and the stamp is removed on
+# failure so a stale green cannot vouch for a red tree.
+STAMP=".suite-stamp"
+if [ $fail -eq 0 ]; then
+  fp=$("$PY" tests/tree_fingerprint.py | tail -1)
+  printf '{"fingerprint":"%s","when":"%s","head":"%s","dirty":%s}\n' \
+    "$fp" "$(date '+%F %T')" "$(git rev-parse --short HEAD 2>/dev/null || echo none)" \
+    "$([ -n "$(git status --porcelain 2>/dev/null)" ] && echo true || echo false)" > "$STAMP"
+else
+  rm -f "$STAMP"
+fi
+
 echo
 [ $fail -eq 0 ] && echo "all good" || echo "SOMETHING FAILED (see above)"
 exit $fail
