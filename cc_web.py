@@ -3710,8 +3710,10 @@ _WHIP_AT_STDIN = re.compile(
 _WHIP_TRIAGE_SYS = (
     "你是一个看门程序的分流器。只回答:这个 session 现在是否需要外部介入。\n"
     "判据完全以「策略」为准 —— 那是人写给你的。\n"
-    "需要介入的典型:它停在一个只要一句话就能继续的地方(等一个方案选择的答复、"
-    "报告了部分完成就停下、任务改了但它还在照旧做)。\n"
+    "最常见、也最该介入的一种:**它用文字反问人**(「需要我…吗?」「要不要我先…」"
+    "「你希望用哪种方案?」)然后停住等答复 —— 看「它最后说的话」和"
+    "「它最后是在反问吗」。这种几乎总是需要介入,因为它问的东西通常它自己就能定。\n"
+    "其它需要介入的:报告了部分完成就停下、任务改了但它还在照旧做。\n"
     "不需要介入的典型:它在忙;它已经完成;它停在只有人能提供的东西上"
     "(密码、验证码、只有人知道的决定)。\n"
     '严格输出 JSON: {"intervene": true|false, "why": "一句话"}'
@@ -3724,14 +3726,45 @@ _WHIP_DECIDE_SYS = (
     "  nothing  —— 什么都不做\n"
     "规则:\n"
     "1. 只有人能提供的东西(密码、验证码、账号选择、付款、只有人知道的事实)→ escalate。\n"
-    "2. 方案/路线选择 → nudge, 让它自己选最能推进任务的那个, 并把任务原文带上。\n"
-    "3. 不可逆或对外的动作(push、部署、删除、给别人发东西、花钱)→ 除非策略明确允许,"
+    "2. **它反问「需要我…吗?」这类** → nudge, 而且要**把那个问题答掉**:告诉它按自己"
+    "判断最能推进任务的方式做、不用等人, 并把任务原文带上。不要只回一句「继续」——"
+    "它停下来往往正是因为没抓住重点。\n"
+    "3. 方案/路线选择 → 同上: 让它自己选最能推进任务的那个。\n"
+    "4. 不可逆或对外的动作(push、部署、删除、给别人发东西、花钱)→ 除非策略明确允许,"
     "否则 escalate。\n"
-    "4. nudge 的话要具体:说出它该接着做的那一件事;拼不出具体的一件事就 escalate。\n"
-    "5. 你不能批准任何东西。\n"
+    "5. nudge 的话要具体:说出它该接着做的那一件事;拼不出具体的一件事就 escalate。\n"
+    "6. 你不能批准任何东西。\n"
     '严格输出 JSON: {"action":"nudge"|"escalate"|"nothing","text":"nudge 时要发的话",'
     '"reason":"一句话,进日志"}'
 )
+
+
+# The main case, in the human's words: claude stops and asks "需要我…吗?" — and the
+# whole point of the whip is that the answer is almost always "yes, and you did not
+# need to ask". So the question itself is fed to the models as a fact, from the
+# TRANSCRIPT rather than the screen: on screen it is wrapped, scrolled and mixed in
+# with a status bar, and the one sentence that decides everything must not arrive
+# truncated.
+_WHIP_ASKS = re.compile(
+    r"(需要我|要不要|是否需要|要我(继续|先|帮你)|我可以.{0,12}(吗|么)|"
+    r"你希望|请确认|确认一下|哪一个|哪种|选哪|"
+    r"(shall|should|would you like|do you want) I|which (one|approach|option)|"
+    r"let me know|confirm)", re.I)
+
+
+def _whip_last_say(entries: list[dict]) -> tuple[str, bool]:
+    """(what it said last, does that end in a question). Tool calls and meta turns are
+    skipped: the last TEXT is what a human would have been answering."""
+    for e in reversed(entries[-40:]):
+        if e.get("type") != "assistant":
+            continue
+        t = _entry_text(e)
+        if not t:
+            continue
+        tail = t[-400:]
+        asks = bool(re.search(r"[?？]\s*$", tail.strip())) or bool(_WHIP_ASKS.search(tail))
+        return t[-1200:], asks
+    return "", False
 
 
 def _whip_json(text: str) -> Optional[dict]:
@@ -3855,13 +3888,20 @@ async def _whip_check(b, now: float, dry: bool = False) -> dict:
         # keystrokes.
         m = re.search(r"(?m)^\s*(?:[│|]\s*)?((?:Bash|Edit|Write|Read|WebFetch|WebSearch|"
                       r"Task|NotebookEdit)\(.{0,120}?\))", screen or "")
-        return _whip_escalate(sid, st, "它卡在一个权限确认上"
-                              + (f": {m.group(1)}" if m else "") + " —— 文字选不中菜单项,我不动手", dry)
+        # SKIP, not escalate — asked for explicitly. A pending confirmation is already
+        # a first-class state in the panel (the prompt row shows it, with its options),
+        # so a notification about it is a second copy of something you can already see,
+        # and the whip's notifications are only worth reading if they are rare.
+        return {"action": "skip",
+                "why": "权限确认(界面上已经能看到,不另行通知)" + (f": {m.group(1)}" if m else "")}
 
     rep = _check_read(sid)
+    last_say, asks = _whip_last_say(entries)
     facts = json.dumps({
         "任务": task, "注意事项": notes, "策略": policy,
         "已经安静了(秒)": int(quiet),
+        "它最后说的话": last_say,
+        "它最后是在反问吗": asks,
         "上次自检": ({"verdict": rep.get("verdict"), "deviations": rep.get("deviations"),
                       "stale": rep.get("memo_ver") != _memo_ver_str(sid)} if rep else None),
         "我最近做过": st.get("log", [])[-3:],

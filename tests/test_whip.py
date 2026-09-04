@@ -93,15 +93,19 @@ def main():
     check("...and the only thing it can send is text",
           set(sends) <= {"bridge.send_text_to(", "bridge.input_typed_text(",
                          "bridge.get_screen_for("}, str(sorted(set(sends))))
-    # Settled, not pending: those options need a keypress, and with auto mode on the
-    # prompts that still appear are the ones auto mode said need a human. Answering
-    # them would make this a rubber stamp.
-    check("a permission dialog is escalated, never answered",
-          "文字选不中菜单项" in body and "_detect_pending_confirm_from_screen" in body)
+    # Settled: those options need a keypress, and with auto mode on the prompts that
+    # still appear are the ones auto mode said need a human. And it does not even
+    # notify — the panel already shows a pending confirmation as its own state, so a
+    # notification would be a second copy of something visible, and these are only
+    # worth reading while they stay rare.
+    pend_block = body[body.index("if pending:"):body.index("rep = _check_read")]
+    check("a permission dialog is neither answered nor notified about",
+          '"action": "skip"' in pend_block and "_whip_escalate" not in pend_block,
+          pend_block[pend_block.index("return"):][:60].replace("\n", " "))
     check("...and the code says so as a decision, not as a TODO",
           "FINAL behaviour" in body and "Do not \"improve\" this by sending" in body)
-    check("...while still saying WHAT was being asked",
-          "Bash|Edit|Write" in body or "Bash|Edit" in body, "tool+target extracted")
+    check("...while still recording WHAT was being asked, for a dry run",
+          "Bash|Edit|Write" in pend_block, "tool+target extracted")
     check("the nudge says it is NOT permission for anything",
           "不构成对任何需要人确认的动作的许可" in body)
 
