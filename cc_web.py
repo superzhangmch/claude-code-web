@@ -5835,9 +5835,15 @@ def _memo_read(sid: str, strict: bool = False) -> dict:
 
 
 def _memo_flat(rec: dict) -> dict:
-    """What a client gets: the CURRENT version's two boxes at the top level (so the
-    panel needs no idea that versions exist to render), plus the list to choose from —
-    previews only, because the full text of ten versions on every open is silly."""
+    """What a client gets.
+
+    The CURRENT version's two boxes at the top level, so everything downstream — the
+    self-check, the report, the skill — needs no idea that versions exist. And every
+    version IN FULL, because an old version has to be openable and editable, not just
+    selectable: a list you can only switch to is a list of things you cannot fix. The
+    whole record is a few hundred bytes per version, and this is fetched when the
+    memo's mtime moves, not on every poll.
+    """
     cur = _memo_cur(rec)
     return {
         "task": cur["task"], "notes": cur["notes"],
@@ -5846,9 +5852,7 @@ def _memo_flat(rec: dict) -> dict:
         "versions": [{"id": v["id"], "label": v.get("label", ""),
                       "created_at": v.get("created_at", ""),
                       "current": v["id"] == cur["id"],
-                      "task": (v["task"]["text"] or "")[:80],
-                      "notes": (v["notes"]["text"] or "")[:80],
-                      "updated_at": v["task"].get("updated_at") or v.get("created_at", "")}
+                      "task": v["task"], "notes": v["notes"]}
                      for v in rec["versions"]],
     }
 
@@ -5878,7 +5882,11 @@ class MemoPayload(BaseModel):
     fork: bool = False                       # new version, copied from the current one
     set_current: Optional[int] = None
     delete: Optional[int] = None
-    label: Optional[str] = None              # name the current version
+    label: Optional[str] = None              # name the version being written
+    # Which version the text/label/mark_sent apply to. Default: whichever is current.
+    # An old version must be editable WITHOUT being made current — otherwise fixing a
+    # typo in one means telling the session, for a moment, that it is working to it.
+    version: Optional[int] = None
 
 
 @app.get("/api/session-memo", dependencies=[Depends(require_token)])
@@ -5939,14 +5947,22 @@ def post_session_memo(payload: MemoPayload):
             rec["current"] = vid
             rec["rev"] = int(rec.get("rev") or 0) + 1
 
-        cur = _memo_cur(rec)
+        if payload.version is not None and not payload.fork:
+            cur = next((v for v in rec["versions"] if v["id"] == payload.version), None)
+            if cur is None:
+                raise HTTPException(status_code=404, detail="no such version")
+        else:
+            cur = _memo_cur(rec)     # a fork writes into the version it just made
+        # `rev` is about the EFFECTIVE intent, so editing a version that is not current
+        # must not bump it: nothing the session is working to has changed.
+        bump = cur["id"] == rec["current"]
         if payload.label is not None:
             cur["label"] = payload.label.strip()[:40]
         for field, new_text in (("task", payload.task), ("notes", payload.notes)):
             if new_text is None:
                 continue
             new_text = new_text.strip()
-            if new_text != cur[field]["text"]:
+            if new_text != cur[field]["text"] and bump:
                 rec["rev"] = int(rec.get("rev") or 0) + 1
             cur[field]["text"] = new_text
             cur[field]["updated_at"] = now

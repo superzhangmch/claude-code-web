@@ -2126,6 +2126,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #memo-modal .memo-vers .mv-id { color: var(--muted); flex-shrink: 0; min-width: 22px; }
 #memo-modal .memo-vers .mv-txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #memo-modal .memo-vers .mv-cur { color: var(--accent); flex-shrink: 0; }
+#memo-modal .memo-vers .mv-open { cursor: pointer; }
+#memo-modal .memo-vers .mv-open:hover { text-decoration: underline; }
+#memo-modal .memo-vers .mv-row.editing { outline: 1px solid var(--border); border-radius: 4px; }
+#memo-modal .mv-warn { color: #e0a04a; }
 #memo-modal .memo-sec.memo-check { flex: 0 0 auto; }
 #memo-modal .memo-lab { display: flex; align-items: center; gap: 6px; }
 #memo-modal .memo-runbtn { margin-left: auto; font-size: 11px; padding: 2px 8px; }
@@ -3316,14 +3320,29 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const memoSaveBtn = document.getElementById("memo-save");
   const mmMemoHint = document.getElementById("mm-memo-hint");
   let memoRec = null, memoVerSeen = -1, memoSid = "";
+  // Which version is loaded in the boxes. Usually the current one, but ANY version can
+  // be opened and edited: a list you can only switch to is a list of things you cannot
+  // fix, and fixing a typo in an old version should not mean telling the session — even
+  // for a moment — that it is now working to it.
+  let memoEditing = 0;
+  function memoVer(id) {
+    const vs = (memoRec || {}).versions || [];
+    return vs.find((v) => v.id === id) || vs.find((v) => v.current) || null;
+  }
   const MEMO_TAG = { task: "[当前任务]", notes: "[注意事项]" };
-  function memoRender() {
+  // force=true for an EXPLICIT load (opening another version). The don't-stomp guard
+  // below is there for a poll landing mid-sentence; it must not also refuse the one
+  // thing you just asked for — which it did: after loading v1 the box had focus, so
+  // clicking back to v2 left v1's text sitting there under a "editing v2" label.
+  function memoRender(force) {
     const r = memoRec || { task: {}, notes: {} };
+    const v = memoVer(memoEditing) || { task: r.task || {}, notes: r.notes || {} };
+    if (v && v.id) memoEditing = v.id;
     for (const f of ["task", "notes"]) {
-      const cur = r[f] || {};
+      const cur = v[f] || {};
       // Don't stomp what is being typed right now — a poll-driven refresh landing
       // mid-sentence would eat the sentence.
-      if (memoTA[f] && document.activeElement !== memoTA[f]) memoTA[f].value = cur.text || "";
+      if (memoTA[f] && (force || document.activeElement !== memoTA[f])) memoTA[f].value = cur.text || "";
       if (memoMeta[f]) {
         const n = cur.sent_count || 0;
         // relAge()'s "now" is a word, not a duration — "now前" was the first thing this
@@ -3429,7 +3448,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     try {
       const r = await authedFetch("/api/session-memo?claude_session_id=" + encodeURIComponent(sid));
       if (!r.ok || sid !== attachedSid) return;
+      const was = memoSid;
       memoRec = await r.json(); memoSid = sid; memoVerSeen = ver;
+      if (was !== sid) memoEditing = memoRec.current;   // another session → its current
       memoRender();
       memoMark(false);   // just read from the server: what is in the boxes IS stored
     } catch {}
@@ -3444,8 +3465,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   function memoVerRender() {
     const r = memoRec || {}, vs = r.versions || [];
     if (memoVerCur) {
-      memoVerCur.textContent = vs.length > 1
-        ? `版本 v${r.current} / 共 ${vs.length}` : (vs.length ? `版本 v${r.current}` : "");
+      const editingCur = memoEditing === r.current;
+      // Say WHICH version the boxes are showing, and shout when it is not the live
+      // one — otherwise you edit history thinking you are editing the task.
+      memoVerCur.innerHTML = !vs.length ? ""
+        : editingCur
+          ? `正在编辑 v${memoEditing}(当前)` + (vs.length > 1 ? ` · 共 ${vs.length} 版` : "")
+          : `<span class="mv-warn">正在编辑 v${memoEditing} —— 不是当前版本(当前 v${r.current})</span>`;
     }
     if (!memoVersEl) return;
     // Newest first: the one you are most likely to be switching back FROM is the one
@@ -3453,9 +3479,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     memoVersEl.innerHTML = vs.slice().reverse().map((v) => {
       const when = (v.updated_at || v.created_at || "").replace("T", " ").slice(5, 16);
       const txt = _escHtml(v.label || v.task || v.notes || "(空)");
-      return `<div class="mv-row" data-id="${v.id}">`
+      return `<div class="mv-row${v.id === memoEditing ? " editing" : ""}" data-id="${v.id}">`
         + `<span class="mv-id">v${v.id}</span>`
-        + `<span class="mv-txt" title="${_escHtml(v.task || "")}">${txt}</span>`
+        + `<span class="mv-txt mv-open" data-id="${v.id}" title="点开载入这个版本编辑">${txt}</span>`
         + `<span class="mc-stale">${when}</span>`
         + (v.current ? '<span class="mv-cur">当前</span>'
                      : `<button class="btn memo-smallbtn mv-set" data-id="${v.id}">设为当前</button>`
@@ -3464,15 +3490,22 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     }).join("");
   }
   if (memoVersEl) memoVersEl.addEventListener("click", async (e) => {
+    const open = e.target.closest(".mv-open");
     const set = e.target.closest(".mv-set"), del = e.target.closest(".mv-del");
-    if (!set && !del) return;
+    if (!open && !set && !del) return;
     e.stopPropagation();
-    // Unsaved edits belong to the version you are LEAVING, so switching away would
+    // Unsaved edits belong to the version you are LEAVING, so moving away would
     // quietly drop them. Say so instead.
-    if (memoDirty && !confirm("当前版本有未保存的改动 —— 切换会丢弃它, 继续?")) return;
-    const id = parseInt((set || del).dataset.id, 10);
+    if (memoDirty && !confirm("当前编辑的版本有未保存的改动 —— 离开会丢弃它, 继续?")) return;
+    const id = parseInt((open || set || del).dataset.id, 10);
+    if (open) {                       // load it into the boxes; current stays current
+      memoEditing = id;
+      memoRender(true); memoVerRender(); memoMark(false);
+      memoTA.task.focus();
+      return;
+    }
     const r = await memoPost(set ? { set_current: id } : { delete: id });
-    if (r) memoMark(false);
+    if (r) { if (set) { memoEditing = id; memoRender(true); memoVerRender(); } memoMark(false); }
   });
   document.getElementById("memo-verlist").addEventListener("click", (e) => {
     e.stopPropagation(); memoVersEl.classList.toggle("show");
@@ -3512,7 +3545,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // concurrency here is the better half of the fix.
   async function memoSaveAll() {
     if (!attachedSid) return;
-    const ok = await memoPost({ task: memoTA.task.value, notes: memoTA.notes.value });
+    const ok = await memoPost({ version: memoEditing || undefined,
+                                task: memoTA.task.value, notes: memoTA.notes.value });
     if (ok) memoMark(false);
     else memoSavedEl.textContent = "保存失败";
   }
@@ -10096,7 +10130,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // A memo counts as sent when it is SENT, not when it was dropped into the box —
         // and this way a reminder typed by hand counts too, since the tag is all it reads.
         const mtag = Object.keys(MEMO_TAG).find((k) => body.startsWith(MEMO_TAG[k]));
-        if (mtag) memoPost({ mark_sent: mtag });
+        if (mtag) memoPost({ mark_sent: mtag, version: memoEditing || undefined });
         inputEl.value = ""; inputEl.style.height = "auto";
         pendingUploads = []; renderUploadRow();
         keepAlive(); schedulePoll(400);

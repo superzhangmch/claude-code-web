@@ -132,6 +132,52 @@ def main():
         got = e.status_code
     check("a version that does not exist is a 404, not a new blank one", got == 404, str(got))
 
+    print("=== an OLD version can be opened, edited and saved — without going current ===")
+    # A list you can only switch to is a list of things you cannot fix. And fixing a
+    # typo in an old version must not mean telling the session, even for a moment,
+    # that it is now working to it.
+    cc_web.post_session_memo(P(claude_session_id=SID, task="v1 的任务", notes="规矩"))
+    cc_web.post_session_memo(P(claude_session_id=SID, fork=True, task="v2 的任务"))
+    before = cc_web.get_session_memo(claude_session_id=SID)
+    r = cc_web.post_session_memo(P(claude_session_id=SID, version=1, task="v1 被修好了"))
+    check("the write lands in the version named", 
+          [v["task"]["text"] for v in r["versions"]] == ["v1 被修好了", "v2 的任务"],
+          str([v["task"]["text"] for v in r["versions"]]))
+    check("...current is untouched", r["current"] == before["current"] == 2, str(r["current"]))
+    check("...and so are the boxes everything downstream reads",
+          r["task"]["text"] == "v2 的任务", r["task"]["text"])
+    # rev is the EFFECTIVE intent. Editing a version nobody is working to changes none.
+    check("...and rev does not move, so a self-check report stays valid",
+          r["rev"] == before["rev"], f"{before['rev']} -> {r['rev']}")
+    check("editing the current one DOES move rev",
+          cc_web.post_session_memo(P(claude_session_id=SID, version=2, task="v2 改了"))["rev"]
+          > before["rev"])
+    got = None
+    try:
+        cc_web.post_session_memo(P(claude_session_id=SID, version=99, task="x"))
+    except HTTPException as e:
+        got = e.status_code
+    check("a version that does not exist is a 404, not a new one", got == 404, str(got))
+    r = cc_web.post_session_memo(P(claude_session_id=SID, fork=True, version=1, task="进了新版本"))
+    check("fork ignores `version` — a fork writes into the one it just made",
+          r["current"] == 3 and r["task"]["text"] == "进了新版本", f'v{r["current"]} {r["task"]["text"]}')
+    check("...and every version comes back IN FULL, or it could not be edited",
+          all(isinstance(v["task"], dict) and "text" in v["task"] for v in r["versions"]),
+          str(type(r["versions"][0]["task"])))
+
+    print("=== ...and the panel loads it without the guard fighting the click ===")
+    src1 = open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8").read()
+    check("opening a version forces the boxes to redraw",
+          "memoRender(true); memoVerRender(); memoMark(false);" in src1)
+    # The don't-stomp-what-you-are-typing guard is for a poll landing mid-sentence; it
+    # must not refuse the load you just asked for. It did: after loading v1 the box had
+    # focus, so clicking back to v2 left v1's text under a "editing v2" label.
+    check("...over the mid-typing guard, which is what force is for",
+          "(force || document.activeElement !== memoTA[f])" in src1)
+    check("saving names the version being edited", "version: memoEditing || undefined" in src1)
+    check("the bar says when the boxes are NOT the live version",
+          "不是当前版本" in src1)
+
     print("=== a file written by the pre-versions build still opens ===")
     # Those files were written by an earlier build of this same panel; "please re-type
     # it" would be an odd thing to say about a memo.
