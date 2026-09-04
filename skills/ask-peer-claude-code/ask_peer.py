@@ -253,6 +253,73 @@ def _resolve_to(base, token, to):
     return None, f"'{to}' is ambiguous — matches {hits}; use a longer id"
 
 
+def _memo_and_check(base, token, sid):
+    """The two things a supervisor needs about a session: what a human said it should
+    be doing, and what its own last check said about that. Both are plain GETs on
+    cc-web — the memo is not in the transcript and cannot be inferred from it, which
+    is the point of it existing."""
+    out = {"task": "", "notes": "", "version": None, "versions": 0, "check": None}
+    try:
+        m = _req("GET", f"{base}/api/session-memo?claude_session_id={sid}", token, timeout=20)
+        cur = m.get("task") or {}
+        out.update({"task": (cur.get("text") or ""),
+                    "notes": ((m.get("notes") or {}).get("text") or ""),
+                    "version": m.get("current"), "versions": len(m.get("versions") or [])})
+    except Exception as e:
+        out["note"] = f"memo unreadable: {e}"
+    try:
+        c = _req("GET", f"{base}/api/session-check?claude_session_id={sid}", token, timeout=20)
+        if c.get("exists"):
+            r = c.get("report") or {}
+            out["check"] = {"verdict": r.get("verdict"), "checked_at": r.get("checked_at"),
+                            # A report about a rewritten task certifies the wrong thing,
+                            # so this travels with the verdict, never separately.
+                            "stale": bool(c.get("stale")),
+                            "summary": r.get("summary", ""),
+                            "deviations": r.get("deviations") or [],
+                            "disputes": [d.get("reason") for d in (r.get("disputes") or [])]}
+    except Exception as e:
+        out["check"] = {"note": f"report unreadable: {e}"}
+    return out
+
+
+def _one_task(base, token, host, sid):
+    d = {"status": "task", "host": host, "sid": sid}
+    d.update(_memo_and_check(base, token, sid))
+    return d
+
+
+def _all_tasks(host_arg, token):
+    """Every session on the searched hosts, with its task and its last verdict.
+
+    This is the supervisor's whole input: intent beside outcome, in one place, without
+    reading anybody's transcript. Sessions with no memo are listed too — "nobody said
+    what this one is for" is exactly the kind of thing worth seeing.
+    """
+    local = _local_ip()
+    hosts = [host_arg] if host_arg else [local] + [h for h in _known_hosts() if h != local]
+    out, notes = [], []
+    for h in hosts:
+        for b in _bases(h):
+            try:
+                tabs = _req("GET", f"{b}/api/tabs", token, timeout=20).get("tabs", [])
+            except Exception as e:
+                notes.append(f"{b}: {e}")
+                continue
+            for t in tabs:
+                sid = t.get("sid") or ""
+                if not sid:
+                    continue
+                row = {"host": h, "sid": sid, "name": (t.get("session_name")
+                                                       or t.get("name") or "").strip()}
+                row.update(_memo_and_check(b, token, sid))
+                out.append(row)
+            break                      # this base answered; don't ask the same host twice
+    return {"status": "tasks", "sessions": out, "count": len(out),
+            "with_task": sum(1 for r in out if r["task"] or r["notes"]),
+            "unreachable": notes}
+
+
 def _user_texts(state):
     """User-message texts from the transcript delta — used to confirm our sent
     message actually landed as a prompt in the peer's transcript (触达)."""
@@ -405,7 +472,7 @@ def _render_transcript(state):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--to", required=True)
+    ap.add_argument("--to", default=None)     # required except for --tasks
     ap.add_argument("--host", default=None)
     ap.add_argument("--token", default=None)
     ap.add_argument("--from", dest="frm", default="",
@@ -433,6 +500,16 @@ def main():
                     help="read-only: return the peer's CURRENT TUI screen snapshot "
                          "(refresh=false → non-intrusive). Current view only, not history.")
     ap.add_argument("--no-send", action="store_true")
+    # A supervisor's question is "what is this session SUPPOSED to be doing" — which
+    # lives in the human-written Task memo, not in the transcript. Reading it sends
+    # nothing and the session never learns it happened, so it is not "contacting"
+    # anyone; the don't-initiate rule does not apply.
+    ap.add_argument("--task", action="store_true",
+                    help="read the peer's Task memo (current task + standing notes) and "
+                         "its last self-check report; sends nothing")
+    ap.add_argument("--tasks", action="store_true",
+                    help="one line per session on the searched hosts: its task and its "
+                         "last self-check verdict (no --to needed) — the supervisor view")
     ap.add_argument("--no-wait", action="store_true",
                     help="fire-and-confirm: send, confirm delivery (message landed "
                          "in the peer's transcript), return WITHOUT waiting for a reply")
@@ -442,6 +519,14 @@ def main():
     a = ap.parse_args()
 
     token = a.token or _conf_token()
+
+    if a.tasks:
+        print(json.dumps(_all_tasks(a.host, token), ensure_ascii=False, indent=1))
+        return
+    if not a.to:
+        print(json.dumps({"status": "error", "note": "--to is required (except with --tasks)"},
+                         ensure_ascii=False))
+        return
 
     # Host resolution (the "sid → url" step). Explicit --host wins; otherwise
     # auto-locate the session across known hosts (local first), so the caller can
@@ -524,6 +609,9 @@ def main():
         return
     baseline = st0.get("since_idx", 0)
 
+    if a.task:
+        print(json.dumps(_one_task(base, token, host, a.to), ensure_ascii=False, indent=1))
+        return
     if a.no_send:
         print(json.dumps({"status": "peek", "host": host, "idle": st0.get("claude_idle"),
                           "pending_confirm": st0.get("pending_confirm"),

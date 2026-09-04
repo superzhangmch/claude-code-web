@@ -109,6 +109,30 @@ python3 "$PY" --to <PEER_SID> --screen
 python3 "$PY" --to <PEER_SID> --host <IP> --no-send
 ```
 
+### 看别人的**任务**(给监督/审核用): `--task` / `--tasks`
+一个监督者要问的不是"它说了什么",而是**"它本来该做什么,以及它自己上次检查怎么说"**。
+这两样都不在 transcript 里 —— cc-web 的 Task 备忘(`⚙ → Task`)就是为此存在的。
+
+```bash
+# 某一个 session: 当前任务 + 注意事项 + 当前版本 + 上一次自检结果
+python3 "$PY" --to <PEER_SID> --task
+# 所有主机上的所有 session, 每个一行: 任务 + 上次自检结论(不需要 --to)
+python3 "$PY" --tasks
+```
+
+`--task` 返回 `task` / `notes` / `version` / `versions`,以及 `check`:
+`verdict`、`checked_at`、`summary`、`deviations`(值得读的那部分)、`disputes`
+(它对任务本身的异议),外加 **`stale`** —— 报告针对的任务此后被改过。
+staleness 一定跟着 verdict 一起给,**不单独放**:一份对着改过的任务全绿的报告,
+比没有报告更糟。
+
+`--tasks` 会把**没设任务**的 session 也列出来("没人说这个 session 是干什么的"正是值得看见
+的事),把**连不上的主机**报出来而不是悄悄跳过("那边没人看着"恰恰是它该发现的东西)。
+
+这两个模式**不发任何东西**,也**不读 transcript**;被读的 session 完全不会知道 ——
+所以它们不受上面"默认绝不主动联系"的约束(那条针对的是**发消息**)。当然也别拿它去
+闲逛陌生 session。
+
 ### Read-only modes (peek / history / screen)
 All three send **nothing** — safe to read a peer you're already in contact with
 (still bound by the "don't 串门" rule above: don't read strangers unprompted).

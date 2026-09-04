@@ -38,6 +38,19 @@ echo "现在进度如何?" | python3 ~/.claude/skills/ask-peer-claude-code/ask_p
 The peer is a normal session — zero setup; it just answers, and the
 caller's poll picks up the reply. `--to` accepts a unique id prefix.
 
+Two read-only modes exist for the supervision layer rather than for conversation:
+`--task` (one session's Task memo — the human-written current task, the standing
+notes, and its last self-check verdict with deviations, disputes and staleness) and
+`--tasks` (every session on every known host, one line each). Neither sends anything
+and neither reads a transcript: the question "what is this session supposed to be
+doing" is answered by the memo, which is why the memo exists. Sessions with no task
+set and hosts that cannot be reached are both reported — "nobody said what this one is
+for" and "nobody is watching over there" are exactly what a supervisor needs to see.
+
+These live here, and not in a new skill, because ask-peer already knows how to find a
+session across hosts and how to hold the token; a second skill would be a second copy
+of that.
+
 ### To use it — what you need / what to change
 
 1. **`cc_web` running on the peer's machine** (this project). `--host` is

@@ -67,6 +67,17 @@ id 形状推断，但明写更可靠）。
 需要时读它。这里只留必须一直记着的判断规则，因为**同一件事写两份就会飘**：机制的唯一
 出处是那份 SKILL.md 和 `ask_peer.py`（脚本本身两边共用，同一个文件）。
 
+## 看别人在做什么任务(只读,不算联系)
+
+```bash
+python3 ~/.claude/skills/ask-peer-claude-code/ask_peer.py --to <对方 id> --task
+python3 ~/.claude/skills/ask-peer-claude-code/ask_peer.py --tasks   # 所有主机所有 session
+```
+
+给出的是**人写的**当前任务 + 长期注意事项 + 上一次自检结果(含 `stale`:报告针对的任务
+此后被改过)。这两个模式不发消息、不读 transcript,对方完全不会知道 —— 所以不受上面
+"默认绝不主动联系"的约束。
+
 ## 一条纪律
 
 发送前脚本会检查对方的输入框是否有人在打字，有就等（最多 2 分钟）再发。所以**不要**
