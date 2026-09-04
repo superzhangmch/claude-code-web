@@ -2108,7 +2108,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   border: 1px solid var(--border); border-radius: 6px; padding: 7px 8px;
   font: 13px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
 }
+/* The value on a Task-row button (the task preview, the verdict) is context, not
+   the label — dimmed so the word you are looking for stays the word. */
+.switch-menu .scr-cfg-row .mm-dim { color: var(--muted); }
 #memo-modal .memo-sec.memo-check { flex: 0 0 auto; }
+#memo-modal .memo-lab { display: flex; align-items: center; gap: 6px; }
+#memo-modal .memo-runbtn { margin-left: auto; font-size: 11px; padding: 2px 8px; }
 #memo-modal .memo-checkline { font-size: 12px; cursor: pointer; padding: 5px 0; }
 #memo-modal .memo-checkline .mc-ok { color: #6ee884; }
 #memo-modal .memo-checkline .mc-bad { color: #ffb4b4; }
@@ -2379,9 +2384,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     </div>
     <div class="scr-cfg-row"><span>Task</span>
       <button class="sw-item" id="mm-memo"
-              title="记录这个 session 的当前任务和长期注意事项;必要时发给它">📌 <span id="mm-memo-hint">未设置</span></button>
+              title="写这个 session 的当前任务和长期注意事项">set<span id="mm-memo-hint" class="mm-dim"></span></button>
       <button class="sw-item" id="mm-check"
-              title="看这个 session 的自检结果(逐项 + 证据)">自检 <span id="mm-check-hint">—</span></button>
+              title="看上一次自检的结果(逐项 + 证据);里面可以再发起一次">view run <span id="mm-check-hint" class="mm-dim">—</span></button>
     </div>
   </div>
 
@@ -2534,7 +2539,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
            green ticks every time you open this is a report you stop reading. Tap it
            for the evidence. -->
       <div class="memo-sec memo-check">
-        <div class="memo-lab">自检 <span class="memo-hint" id="memo-check-when"></span></div>
+        <div class="memo-lab">自检 <span class="memo-hint" id="memo-check-when"></span>
+          <button id="memo-run" class="btn memo-runbtn"
+                  title="发起一次自检(把触发语填进输入框,你确认后再发)">再跑一次</button></div>
         <div id="memo-check-line" class="memo-checkline" title="点开看逐项与证据"></div>
         <div id="memo-check-detail" class="memo-checkdetail"></div>
       </div>
@@ -3296,11 +3303,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           : `已发送 ${n} 次`;
       }
     }
-    // The gear row says whether there is anything, and shows the task's first words —
-    // otherwise you have to open the modal to find out if you ever wrote one.
+    // One character, not the task's first words: the label is what you are looking for
+    // and a clipped sentence beside it just makes the row hard to read. All it has to
+    // answer is "is there anything in there".
     if (mmMemoHint) {
       const t = (r.task && r.task.text || "").trim(), n = (r.notes && r.notes.text || "").trim();
-      mmMemoHint.textContent = t ? clampU(t, 12) : (n ? "仅注意事项" : "未设置");
+      mmMemoHint.textContent = (t || n) ? " ✓" : "";
     }
   }
   // The session's self-check, read back. Deliberately in the SAME modal as the two
@@ -3488,6 +3496,21 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       memoCheckDetail.classList.add("show");
       memoCheckDetail.scrollIntoView({ block: "nearest" });
     }
+  });
+
+  // run — start a self-check. Fills the composer with the trigger and stops there,
+  // the same gesture as 填入输入框: you may want to add "look hard at the deploy one"
+  // before sending, and a button that fires a turn on one tap is a button that fires
+  // turns you did not mean.
+  const mmRun = document.getElementById("memo-run");
+  if (mmRun) mmRun.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!attachedSid) return;
+    const cur = inputEl.value;
+    inputEl.value = cur.trim() ? "自检\n" + cur : "自检";
+    inputEl.dispatchEvent(new Event("input"));
+    memoModal.classList.remove("show");
+    if (!isPhone()) inputEl.focus();
   });
 
   const mmExitClose = document.getElementById("mm-exit-close");
