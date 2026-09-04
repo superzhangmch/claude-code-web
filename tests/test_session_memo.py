@@ -97,10 +97,9 @@ def main():
     check("...and it has sent nothing yet, whatever the old one had sent",
           r2["task"]["sent_count"] == 0)
     cc_web.post_session_memo(P(claude_session_id=SID, task="第二版: 换个方向"))
+    texts = [v["task"]["text"] for v in cc_web.get_session_memo(claude_session_id=SID)["versions"]]
     check("editing the fork leaves the older version alone",
-          [v["task"] for v in cc_web.get_session_memo(claude_session_id=SID)["versions"]]
-          == ["第一版任务(改了措辞)", "第二版: 换个方向"],
-          str([v["task"] for v in cc_web.get_session_memo(claude_session_id=SID)["versions"]]))
+          texts == ["第一版任务(改了措辞)", "第二版: 换个方向"], str(texts))
 
     print("=== ...and one of them is current ===")
     r3 = cc_web.post_session_memo(P(claude_session_id=SID, set_current=1))
@@ -201,11 +200,13 @@ def main():
     menu0 = re.search(r"const setBox = \(field\) => async \(\) => \{.*?\n    \};", src0, re.S)
     check("set task desc/constrain forks",
           menu0 and "fork: true" in menu0.group(0), (menu0.group(0)[:60] if menu0 else "?"))
-    check("...while 保存 does not", "memoPost({ task: memoTA.task.value, notes: memoTA.notes.value })" in src0)
+    check("...while 保存 does not — it writes the version being edited",
+          "version: memoEditing || undefined" in src0 and "fork" not in
+          src0[src0.index("async function memoSaveAll"):src0.index("async function memoSaveAll") + 400])
     check("fork takes what is in the boxes right now, saved or not",
           "memoPost({ fork: true, task: memoTA.task.value, notes: memoTA.notes.value })" in src0)
-    check("switching away with unsaved edits warns instead of dropping them",
-          "当前版本有未保存的改动" in src0)
+    check("moving to another version with unsaved edits warns instead of dropping them",
+          "未保存的改动 —— 离开会丢弃它" in src0)
 
     print("=== the poll only carries a version, not the strings ===")
     v1 = cc_web._memo_ver(SID)
@@ -367,7 +368,7 @@ def main():
     check("send() recognises a memo by its leading tag",
           "body.startsWith(MEMO_TAG[k])" in sbody, "found" if sbody else "send() not found")
     check("...and stamps mark_sent for THAT field — so a reminder typed by hand counts too",
-          "memoPost({ mark_sent: mtag })" in sbody)
+          "mark_sent: mtag" in sbody)
     # The intent, not the literal body: typing marks state (and refreshes which
     # prompt buttons are usable) but must not schedule a write.
     typed = src[src.index("function memoTyped()"):src.index("async function memoSaveAll")]
