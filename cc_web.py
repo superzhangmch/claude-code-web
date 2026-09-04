@@ -3636,21 +3636,330 @@ async def _maybe_auto_continue(b, now: float) -> None:
              b.claude_session_id[:8], st["attempts"], _API_ERR_MAX_ATTEMPTS, ok)
 
 
-async def _api_error_watcher(interval_sec: float = 180.0) -> None:
-    """Every ~3min, nudge any bound session stuck on a recoverable API error."""
-    while True:
+# ---------------------------------------------------------------------------
+# The whip: the general case of the loop above.
+#
+# This started as a separate cron script, on the argument that a watcher inside the
+# thing it watches dies exactly when watching matters. Reading the code settled it the
+# other way: `_api_error_watcher` IS already a whip — same 3-minute loop over bound
+# sessions, same "wait N minutes first", same attempt cap, same don't-clobber-a-human-
+# mid-typing check. A second program outside would have been a second copy of all four
+# guards with its own state and its own idea of whether you are typing, which is the
+# duplication this project keeps paying for. So it lives here, next to the special case
+# it generalises, and the API-error check still runs FIRST because it is deterministic
+# and certain where this is neither.
+#
+# What is NOT here, deliberately: knowing whether cc-web itself is alive. Nothing
+# inside can report that. If we want it, it is a five-line cron that pings /favicon.svg
+# — a far smaller thing than this, and the right tool for that one job.
+# The numbers. Everything a human might want to turn lives in cc_web.conf and is read
+# PER PASS, so changing it needs no restart; the rest are constants because there is no
+# situation where you would want them different and a knob you never turn is a knob
+# someone has to read past.
+#
+#   whip_quiet_seconds   600   only after this much silence. The rule is "do not
+#                              collide with me": ten minutes of nothing means the
+#                              conversation is not live, which is also why this alone
+#                              does most of the work of a presence sensor.
+#   whip_max_nudges        3   per task VERSION. Three unanswered nudges is not a
+#                              stuck session, it is a wrong nudge — stop and say so.
+#   whip_backoff_seconds 600,1800,7200
+#                              same situation, second/third/later look. Grows fast on
+#                              purpose: the cost of waiting is one pass, the cost of
+#                              repeating yourself is that you stop being read.
+#   whip_interval_seconds 180  the loop, shared with the API-error nudge.
+_WHIP_QUIET_DEFAULT = 600
+_WHIP_MAX_NUDGES_DEFAULT = 3
+_WHIP_BACKOFF_DEFAULT = (600, 1800, 7200)
+_WHIP_INTERVAL_DEFAULT = 180.0
+_WHIP_SCREEN_CHARS = 2500        # how much terminal the models get to read
+_WHIP_LLM_FAILS_LOUD = 5         # consecutive model failures before saying so
+_WHIP_ESCALATE_QUIET = 6 * 3600  # do not repeat the same escalation within this
+
+
+def _whip_num(cfg: dict, key: str, default):
+    try:
+        v = cfg.get(key)
+        return type(default)(v) if v not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _whip_backoff(cfg: dict) -> tuple:
+    raw = (cfg.get("whip_backoff_seconds") or "").strip()
+    if not raw:
+        return _WHIP_BACKOFF_DEFAULT
+    try:
+        out = tuple(int(x) for x in raw.split(",") if x.strip())
+        return out or _WHIP_BACKOFF_DEFAULT
+    except ValueError:
+        return _WHIP_BACKOFF_DEFAULT
+_whip_state: dict[str, dict] = {}     # sid -> {fp, decided_at, nudges, rev, llm_fails, ...}
+
+# Something other than claude is on stdin: a child process waiting on a password, an
+# ssh fingerprint question, a pager. The tab is still a claude tab so the roster still
+# lists it, but anything "sent" now goes to THAT process — a password prompt would take
+# the nudge text as the password. Used only to REFUSE, so a false positive costs one
+# skipped nudge and a false negative would be the worst thing in here.
+_WHIP_AT_STDIN = re.compile(
+    r"(?i)(\[sudo\] password|password( for [^\s:]+)?\s*:|passphrase[^\n]*:|"
+    r"Enter passphrase|Verification code|One-time code|otp\s*:|"
+    r"\(yes/no(/\[fingerprint\])?\)|Are you sure you want to continue connecting|"
+    r"\(END\)|--More--)", re.M)
+
+_WHIP_TRIAGE_SYS = (
+    "你是一个看门程序的分流器。只回答:这个 session 现在是否需要外部介入。\n"
+    "判据完全以「策略」为准 —— 那是人写给你的。\n"
+    "需要介入的典型:它停在一个只要一句话就能继续的地方(等一个方案选择的答复、"
+    "报告了部分完成就停下、任务改了但它还在照旧做)。\n"
+    "不需要介入的典型:它在忙;它已经完成;它停在只有人能提供的东西上"
+    "(密码、验证码、只有人知道的决定)。\n"
+    '严格输出 JSON: {"intervene": true|false, "why": "一句话"}'
+)
+_WHIP_DECIDE_SYS = (
+    "你是一个看门程序的决策器。人已经写下了「策略」,它高于你的判断。\n"
+    "只能选三种动作之一:\n"
+    "  nudge    —— 往它的输入框里发一句话(你不会、也不能替它按任何确认按钮)\n"
+    "  escalate —— 通知人, 你不动手\n"
+    "  nothing  —— 什么都不做\n"
+    "规则:\n"
+    "1. 只有人能提供的东西(密码、验证码、账号选择、付款、只有人知道的事实)→ escalate。\n"
+    "2. 方案/路线选择 → nudge, 让它自己选最能推进任务的那个, 并把任务原文带上。\n"
+    "3. 不可逆或对外的动作(push、部署、删除、给别人发东西、花钱)→ 除非策略明确允许,"
+    "否则 escalate。\n"
+    "4. nudge 的话要具体:说出它该接着做的那一件事;拼不出具体的一件事就 escalate。\n"
+    "5. 你不能批准任何东西。\n"
+    '严格输出 JSON: {"action":"nudge"|"escalate"|"nothing","text":"nudge 时要发的话",'
+    '"reason":"一句话,进日志"}'
+)
+
+
+def _whip_json(text: str) -> Optional[dict]:
+    """Unparseable → the caller does NOTHING. Fail closed, not open."""
+    m = re.search(r"\{.*\}", text or "", re.S)
+    if not m:
+        return None
+    try:
+        out = json.loads(m.group(0))
+        return out if isinstance(out, dict) else None
+    except ValueError:
+        return None
+
+
+def _whip_llm(model: str, system: str, user: str, max_tokens: int) -> str:
+    cfg = _load_conf()
+    base = (cfg.get("api_base") or "").rstrip("/")
+    if not base or not model:
+        raise RuntimeError("no api_base/model in cc_web.conf")
+    headers = {"content-type": "application/json"}
+    key = cfg.get("api_key") or ""
+    if key:                        # the local proxy wants none; requiring one broke it
+        headers["authorization"] = f"Bearer {key}"
+    body = {"model": model, "max_tokens": max_tokens, "temperature": 0,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}]}
+    try:
+        data = json.loads(_llm_http_post(f"{base}/v1/chat/completions", headers, body, 60.0))
+    except Exception:
+        _time.sleep(2)             # measured: the local proxy 401s now and then
+        data = json.loads(_llm_http_post(f"{base}/v1/chat/completions", headers, body, 60.0))
+    return (data["choices"][0]["message"]["content"] or "").strip()
+
+
+def _whip_log(sid: str, entry: dict) -> None:
+    import datetime as _dt
+    try:
+        f = _watch_log_file(sid)
+        e = dict(entry)
+        e["at"] = _dt.datetime.now().isoformat(timespec="seconds")
+        with _STATE_WRITE_LOCK:
+            with f.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log.debug("whip log failed: %s", e)
+
+
+def _whip_escalate(sid: str, st: dict, why: str, dry: bool) -> dict:
+    """Once per situation, not once per pass: a notification that repeats every three
+    minutes is a notification you turn off."""
+    if (st.get("escalated_why") == why
+            and _time.time() - st.get("escalated_at", 0) < _WHIP_ESCALATE_QUIET):
+        return {"action": "skip", "why": "already escalated this"}
+    st["escalated_why"] = why
+    st["escalated_at"] = _time.time()
+    if not dry:
+        _whip_log(sid, {"action": "escalate", "why": why})
+    return {"action": "escalate", "why": why}
+
+
+async def _whip_check(b, now: float, dry: bool = False) -> dict:
+    """One registered session, one pass. Returns what happened, for the dry-run view."""
+    sid = b.claude_session_id
+    memo = _memo_flat(_memo_read(sid))
+    if not memo.get("watched"):
+        return {"action": "skip", "why": "not registered"}
+    policy = (memo.get("supervisor") or {}).get("policy") or ""
+    task = (memo.get("task") or {}).get("text") or ""
+    notes = (memo.get("notes") or {}).get("text") or ""
+    st = _whip_state.setdefault(sid, {})
+
+    cfg = _load_conf()
+    quiet_min = _whip_num(cfg, "whip_quiet_seconds", _WHIP_QUIET_DEFAULT)
+
+    entries = jsonl_cache.entries(b.jsonl_path)
+    if not entries:
+        return {"action": "skip", "why": "no transcript yet"}
+    last_ts = _parse_iso_ts((entries[-1] or {}).get("timestamp") or "")
+    quiet = now - last_ts if last_ts else 0
+    if quiet < quiet_min:
+        return {"action": "skip", "why": f"only quiet for {int(quiet)}s"}
+    if not _is_claude_idle(entries):
+        return {"action": "skip", "why": "not idle"}
+
+    # Gate: the human is mid-typing. Same question the API-error path asks, same answer.
+    try:
+        typed = (await bridge.input_typed_text(b.iterm_session_id) or "").strip()
+    except Exception as e:
+        return {"action": "skip", "why": f"cannot read the input box: {e}"}
+    if typed:
+        return {"action": "skip", "why": "you have something half-typed in there"}
+
+    try:
+        # 80 lines: the same window /api/state asks for when it is about to look for a
+        # confirmation menu — a 6-line tail is enough for a status bar and not for a
+        # dialog.
+        screen = await bridge.get_screen_for(b.iterm_session_id, max_lines=80,
+                                             strip_input=False) or ""
+    except Exception:
+        screen = ""
+    tail = (screen or "")[-400:]
+    if _WHIP_AT_STDIN.search(tail):
+        return _whip_escalate(sid, st, "终端上有别的程序在等输入(看起来在要密码/口令),我一个字都不会打", dry)
+
+    pend = _detect_pending_confirm_from_screen(screen or "") if screen else None
+    if pend and _pending_is_user_echo(pend, entries):
+        pend = None            # the user's own "1. … 2. …" echoed back, not a menu
+    pending = bool(pend)
+    if pending:
+        # A text message does not pick a menu item, and "send ESC to decline, then
+        # delegate" depends on what claude does with ESC at that prompt — not measured
+        # yet. Shipping an unmeasured keystroke into a permission dialog is the exact
+        # thing this design exists to avoid.
+        m = re.search(r"(?m)^\s*(?:[│|]\s*)?((?:Bash|Edit|Write|Read|WebFetch|WebSearch|"
+                      r"Task|NotebookEdit)\(.{0,120}?\))", screen or "")
+        return _whip_escalate(sid, st, "它卡在一个权限确认上"
+                              + (f": {m.group(1)}" if m else "") + " —— 文字选不中菜单项,我不动手", dry)
+
+    rep = _check_read(sid)
+    facts = json.dumps({
+        "任务": task, "注意事项": notes, "策略": policy,
+        "已经安静了(秒)": int(quiet),
+        "上次自检": ({"verdict": rep.get("verdict"), "deviations": rep.get("deviations"),
+                      "stale": rep.get("memo_ver") != _memo_ver_str(sid)} if rep else None),
+        "我最近做过": st.get("log", [])[-3:],
+        "终端最后几屏": (screen or "")[-_WHIP_SCREEN_CHARS:],
+    }, ensure_ascii=False)
+
+    fp = hashlib.sha256(("|".join([str(memo.get("rev")), task, policy, str(pending),
+                                   (screen or "")[-1200:]])).encode()).hexdigest()[:16]
+    backoff = _whip_backoff(cfg)
+    max_nudges = _whip_num(cfg, "whip_max_nudges", _WHIP_MAX_NUDGES_DEFAULT)
+    if st.get("fp") == fp and st.get("decided_at"):
+        n = min(st.get("nudges", 0), len(backoff) - 1)
+        if now - st["decided_at"] < backoff[n]:
+            return {"action": "skip", "why": "unchanged since the last decision (backing off)"}
+    if st.get("nudges", 0) >= max_nudges and st.get("rev") == memo.get("rev"):
+        return _whip_escalate(sid, st, f"推了 {st['nudges']} 次都没动静,不再推 —— 需要你看一眼", dry)
+
+    triage = cfg.get("whip_triage_model") or cfg.get("model") or ""
+    decide = cfg.get("whip_decide_model") or triage
+    try:
+        t = _whip_json(_whip_llm(triage, _WHIP_TRIAGE_SYS, facts, 150))
+    except Exception as e:
+        st["llm_fails"] = st.get("llm_fails", 0) + 1
+        # Transient API trouble is not our business. But hours of "cannot think" must
+        # not look like "decided nothing was needed".
+        if st["llm_fails"] >= _WHIP_LLM_FAILS_LOUD:
+            return _whip_escalate(sid, st, f"连续 {st['llm_fails']} 次调不通模型,判断不了 —— "
+                                           f"这段时间等于没人看着", dry)
+        return {"action": "skip", "why": f"triage failed: {e}"}
+    st["llm_fails"] = 0
+    st.update({"fp": fp, "decided_at": now, "rev": memo.get("rev")})
+    if not t or not t.get("intervene"):
+        return {"action": "nothing", "why": (t or {}).get("why", "triage: no")}
+
+    try:
+        d = _whip_json(_whip_llm(decide, _WHIP_DECIDE_SYS, facts, 500))
+    except Exception as e:
+        return {"action": "skip", "why": f"decide failed: {e}"}
+    if not d or d.get("action") not in ("nudge", "escalate", "nothing"):
+        return {"action": "skip", "why": "unparseable decision → doing nothing"}
+    if d["action"] == "nothing":
+        return {"action": "nothing", "why": d.get("reason", "")}
+    if d["action"] == "escalate":
+        return _whip_escalate(sid, st, d.get("reason", "需要你看一眼"), dry)
+
+    text = (d.get("text") or "").strip()
+    if not text:
+        return {"action": "skip", "why": "nudge with no text"}
+    # The tag says what this is and what it is NOT: a session politely waiting for
+    # "should I deploy?" must not read a machine nudge as a yes.
+    msg = ("[驱动] " + text
+           + "\n(这是看门程序的自动唤醒,不构成对任何需要人确认的动作的许可。)")
+    if dry:
+        return {"action": "would-nudge", "why": d.get("reason", ""), "text": msg}
+    ok = await bridge.send_text_to(b.iterm_session_id, msg + "\r")
+    if not ok:
+        return {"action": "skip", "why": "send failed"}
+    st["nudges"] = (st.get("nudges", 0) + 1) if st.get("rev") == memo.get("rev") else 1
+    st["log"] = (st.get("log", []) + [{"action": "nudge", "text": text[:200]}])[-5:]
+    _whip_log(sid, {"action": "nudge", "why": d.get("reason", ""), "text": msg,
+                    "model": decide})
+    return {"action": "nudge", "why": d.get("reason", ""), "text": msg}
+
+
+async def _whip_pass(dry: bool = False) -> list[dict]:
+    out = []
+    for b in bindings.all():
         try:
-            await asyncio.sleep(interval_sec)
+            r = await _whip_check(b, _time.time(), dry=dry)
+        except Exception as e:                    # one bad session must not end the pass
+            r = {"action": "error", "why": repr(e)[:200]}
+        if r.get("action") != "skip" or dry:
+            out.append(dict(r, sid=b.claude_session_id[:8]))
+    return out
+
+
+async def _api_error_watcher(interval_sec: float = _WHIP_INTERVAL_DEFAULT) -> None:
+    """Every ~3min, two DIFFERENT things:
+
+      1. the API-error nudge, for EVERY bound session, always. It is deterministic
+         (claude wrote an isApiErrorMessage entry and gave up) and it needs no
+         permission from anybody — a turn that died on a network blip is not a
+         judgement call.
+      2. the whip, only for sessions the human REGISTERED for it. Opt-in, because it
+         acts on a model's reading of the situation.
+
+    Keeping those apart is the point: 1 must never end up gated on 2's switch.
+    """
+    while True:
+        cfg = _load_conf()
+        try:
+            await asyncio.sleep(_whip_num(cfg, "whip_interval_seconds", interval_sec))
         except asyncio.CancelledError:
             return
-        if not API_AUTO_CONTINUE:
-            continue
-        for b in bindings.all():
-            try:
-                await _maybe_auto_continue(b, _time.time())
-            except Exception as e:
-                log.debug("auto-continue check failed sid=%s: %s",
-                          b.claude_session_id[:8], e)
+        if API_AUTO_CONTINUE:
+            for b in bindings.all():
+                try:
+                    await _maybe_auto_continue(b, _time.time())
+                except Exception as e:
+                    log.debug("auto-continue check failed sid=%s: %s",
+                              b.claude_session_id[:8], e)
+        try:
+            for r in await _whip_pass(dry=False):
+                log.info("whip %s: %s — %s", r.get("sid"), r.get("action"), r.get("why", ""))
+        except Exception as e:
+            log.debug("whip pass failed: %s", e)
 
 
 # ---------- single-instance guard ----------
@@ -5757,8 +6066,14 @@ def _memo_blank() -> dict:
     is current — and not `updated_at`, whose second resolution made two edits inside
     one second indistinguishable. Sending a reminder is not a change of intent.
     """
+    # `supervisor` is the slot reserved when this file first grew versions, for the
+    # reason written then: a watching agent needs somewhere to read the intent from,
+    # and it must be the version the HUMAN wrote. It now holds the human's POLICY for
+    # that agent — what to do about a blocked command, when to wait, when to escalate —
+    # given to it verbatim as its prompt. Registration IS this field: `enabled` and a
+    # non-empty `policy`. No separate registry to drift out of step with it.
     return {"versions": [_memo_blank_version(1)], "current": 1, "rev": 0,
-            "supervisor": None}
+            "supervisor": {"enabled": False, "policy": "", "updated_at": ""}}
 
 
 def _memo_cur(rec: dict) -> dict:
@@ -5826,7 +6141,10 @@ def _memo_read(sid: str, strict: bool = False) -> dict:
     else:
         rec["versions"] = [_one(raw, 1)]   # the old flat shape → version 1
         rec["current"] = 1
-    rec["supervisor"] = raw.get("supervisor")
+    sup = raw.get("supervisor")
+    if isinstance(sup, dict):
+        rec["supervisor"].update({k: v for k, v in sup.items() if k in rec["supervisor"]})
+        rec["supervisor"]["enabled"] = bool(sup.get("enabled"))
     try:
         rec["rev"] = int(raw.get("rev") or 0)
     except (TypeError, ValueError):
@@ -5849,6 +6167,10 @@ def _memo_flat(rec: dict) -> dict:
         "task": cur["task"], "notes": cur["notes"],
         "current": cur["id"], "rev": rec.get("rev", 0),
         "supervisor": rec.get("supervisor"),
+        # Registered = armed AND told what to do. Computed here so the panel, the whip
+        # and any future reader cannot each decide it differently.
+        "watched": bool((rec.get("supervisor") or {}).get("enabled")
+                        and (rec.get("supervisor") or {}).get("policy")),
         "versions": [{"id": v["id"], "label": v.get("label", ""),
                       "created_at": v.get("created_at", ""),
                       "current": v["id"] == cur["id"],
@@ -5887,6 +6209,10 @@ class MemoPayload(BaseModel):
     # An old version must be editable WITHOUT being made current — otherwise fixing a
     # typo in one means telling the session, for a moment, that it is working to it.
     version: Optional[int] = None
+    # The whip's policy for THIS session, and whether it is armed. Both are needed for
+    # the session to count as registered — a policy with the switch off is a draft.
+    supervisor_policy: Optional[str] = None
+    supervisor_enabled: Optional[bool] = None
 
 
 @app.get("/api/session-memo", dependencies=[Depends(require_token)])
@@ -5904,7 +6230,8 @@ def post_session_memo(payload: MemoPayload):
         raise HTTPException(status_code=400, detail="mark_sent must be task or notes")
     if (payload.task is None and payload.notes is None and payload.mark_sent is None
             and payload.label is None and not payload.fork
-            and payload.set_current is None and payload.delete is None):
+            and payload.set_current is None and payload.delete is None
+            and payload.supervisor_policy is None and payload.supervisor_enabled is None):
         raise HTTPException(status_code=400, detail="nothing to do")
     f = _memo_file(payload.claude_session_id)
     now = _memo_now()
@@ -5966,6 +6293,19 @@ def post_session_memo(payload: MemoPayload):
                 rec["rev"] = int(rec.get("rev") or 0) + 1
             cur[field]["text"] = new_text
             cur[field]["updated_at"] = now
+        if payload.supervisor_policy is not None or payload.supervisor_enabled is not None:
+            sup = rec["supervisor"]
+            if payload.supervisor_policy is not None:
+                sup["policy"] = payload.supervisor_policy.strip()
+            if payload.supervisor_enabled is not None:
+                sup["enabled"] = bool(payload.supervisor_enabled)
+            # Armed with nothing to go on would be the worst of both: something acting
+            # on your behalf with no instruction from you.
+            if sup["enabled"] and not sup["policy"]:
+                raise HTTPException(status_code=400,
+                                    detail="cannot arm the watcher with an empty policy — "
+                                           "write what it should do first")
+            sup["updated_at"] = now
         if payload.mark_sent:
             g = payload.mark_sent
             cur[g]["sent_at"] = now
@@ -5977,7 +6317,8 @@ def post_session_memo(payload: MemoPayload):
         # you chose, not an absence.
         empty = not any(v[x]["text"] or v[x]["sent_count"]
                         for v in rec["versions"] for x in _MEMO_FIELDS)
-        if empty and len(rec["versions"]) <= 1 and not rec["supervisor"]:
+        sup_set = bool(rec["supervisor"]["policy"] or rec["supervisor"]["enabled"])
+        if empty and len(rec["versions"]) <= 1 and not sup_set:
             f.unlink(missing_ok=True)
             return _memo_flat(rec)
         _write_json_atomic(f, rec)
@@ -6163,6 +6504,127 @@ def post_session_check(payload: CheckPayload):
     with _STATE_WRITE_LOCK:
         _write_json_atomic(f, out)
     return out
+
+
+# ---------------------------------------------------------------------------
+# The whip's roster and its log.
+#
+# One request per host per tick, rather than the whip asking six questions about every
+# session: the facts it needs to DECIDE (task, policy, how long since anything
+# happened) all live in here already, and assembling them once is the difference
+# between a cron script and a chatty client. The expensive per-session reads —
+# screen, input-state, pending_confirm — stay where they are and the whip makes them
+# only for the sessions that pass the cheap gate.
+#
+# `watched` is computed in one place (see _memo_flat) so the panel and the whip cannot
+# disagree about who is registered.
+@app.post("/api/whip-run", dependencies=[Depends(require_token)])
+async def post_whip_run(dry: bool = True):
+    """Run a pass now. Exists so a pass can be watched instead of waited for — the
+    3-minute timer is a bad debugger, and `dry=true` decides everything and sends
+    nothing."""
+    return {"dry": dry, "results": await _whip_pass(dry=dry)}
+
+
+@app.get("/api/watch-list", dependencies=[Depends(require_token)])
+async def get_watch_list():
+    import time as _time
+    # list_claude_tabs() yields refs, not dicts, and the session id needs resolving
+    # through claude's per-pid store — the same shape /api/sessions builds. Reusing
+    # brief_picker_sessions() means the whip sees exactly the rows the human's list
+    # shows, rather than a second, subtly different view of who is running.
+    live_tabs: list[dict] = []
+    try:
+        for t in await bridge.list_claude_tabs():
+            meta = _claude_session_meta(t.pid)
+            sid = (meta or {}).get("sessionId") or (t.claude_session_id or "")
+            if not sid:
+                continue
+            live_tabs.append({"sid": sid, "name": t.name, "pid": t.pid,
+                              "proc_start": (meta or {}).get("startedAt"),
+                              "cwd": t.cwd or "", "iterm_session_id": t.iterm_session_id,
+                              "window_index": t.window_index, "tab_index": t.tab_index})
+    except Exception as e:
+        return {"agent": AGENT, "sessions": [], "bridge_error": _bridge_reason(e)}
+    live = live_tabs
+    now = _time.time()
+    out = []
+    seen = set()
+    for row in brief_picker_sessions(live):
+        sid = row.get("claude_session_id") or ""
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        m = _memo_flat(_memo_read(sid))
+        if not m.get("watched"):
+            continue
+        rep = _check_read(sid)
+        mt = row.get("mtime") or 0
+        out.append({
+            "sid": sid,
+            "name": (row.get("user_name") or row.get("summary_title")
+                     or row.get("title") or "").strip(),
+            "cwd": row.get("project_path") or "",
+            "task": (m.get("task") or {}).get("text") or "",
+            "notes": (m.get("notes") or {}).get("text") or "",
+            "policy": (m.get("supervisor") or {}).get("policy") or "",
+            "rev": m.get("rev"),
+            # Seconds since the last thing in the transcript. The whip's first gate is
+            # "nothing has happened for a while", and this is that, cheaply — no
+            # transcript re-read, no screen grab.
+            "quiet_seconds": int(now - mt) if mt else None,
+            "bound": bool(row.get("bound")),
+            "check": ({"verdict": rep.get("verdict"), "checked_at": rep.get("checked_at"),
+                       "stale": rep.get("memo_ver") != _memo_ver_str(sid),
+                       "deviations": rep.get("deviations") or []} if rep else None),
+        })
+    return {"agent": AGENT, "sessions": out, "count": len(out)}
+
+
+def _watch_log_file(sid: str) -> Path:
+    d = _state_path("cc_web_watch.d")
+    d.mkdir(parents=True, exist_ok=True)
+    if not sid or not _MEMO_SID_RE.fullmatch(sid):
+        raise HTTPException(status_code=400, detail="bad session id")
+    return d / (sid + ".jsonl")
+
+
+class WatchLogPayload(BaseModel):
+    claude_session_id: str
+    entry: dict
+
+
+@app.post("/api/watch-log", dependencies=[Depends(require_token)])
+def post_watch_log(payload: WatchLogPayload):
+    """Append one thing the whip did. It acts while nobody is looking, so every action
+    has to be reviewable afterwards — and reviewable in the place the human already
+    looks, which is why this goes through cc-web instead of into a file only the whip
+    knows about. Append-only: the record of a bad nudge must not be editable by the
+    thing that made it."""
+    import datetime as _dt
+    f = _watch_log_file(payload.claude_session_id)
+    e = dict(payload.entry or {})
+    e["at"] = _dt.datetime.now().isoformat(timespec="seconds")
+    with _STATE_WRITE_LOCK:
+        with f.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+    return {"ok": True}
+
+
+@app.get("/api/watch-log", dependencies=[Depends(require_token)])
+def get_watch_log(claude_session_id: str, lines: int = 20):
+    f = _watch_log_file(claude_session_id)
+    try:
+        raw = f.read_text(encoding="utf-8").splitlines()[-max(1, min(lines, 200)):]
+    except OSError:
+        return {"entries": []}
+    out = []
+    for ln in raw:
+        try:
+            out.append(json.loads(ln))
+        except ValueError:
+            continue
+    return {"entries": out}
 
 
 @app.get("/api/session-procs", dependencies=[Depends(require_token)])

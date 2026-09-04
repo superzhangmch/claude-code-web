@@ -45,8 +45,13 @@ def main():
     rec = cc_web.get_session_memo(claude_session_id=SID)
     check("reads as a blank record, not an error",
           rec["task"]["text"] == "" and rec["notes"]["text"] == "", json.dumps(rec)[:60])
-    check("...with the supervisor slot present but unused (reserved)",
-          "supervisor" in rec and rec["supervisor"] is None, str(rec.get("supervisor")))
+    # The reserved slot now holds the whip's policy for this session. Reserved became
+    # used, and "used" means: present, empty, and NOT registered until a human writes
+    # a policy and turns the switch on.
+    check("...with the supervisor slot present but unarmed",
+          isinstance(rec.get("supervisor"), dict) and rec["supervisor"]["enabled"] is False
+          and rec["supervisor"]["policy"] == "" and rec.get("watched") is False,
+          str(rec.get("supervisor")))
     check("...and no file written just for looking",
           not os.path.exists(os.path.join(home, ".claude", "cc_web_memo.d", SID + ".json")))
     check("...so its polls carry no memo_ver at all", cc_web._memo_ver(SID) is None,
@@ -176,6 +181,17 @@ def main():
     check("saving names the version being edited", "version: memoEditing || undefined" in src1)
     check("the bar says when the boxes are NOT the live version",
           "不是当前版本" in src1)
+    # Both found by reading the diff, not by anything failing.
+    # (a) versions[].task is the full field object now — reading it as a string put
+    #     "[object Object]" in the list for every row.
+    check("the version list reads .text, not the field object",
+          "v.task && v.task.text" in src1 and "v.label || v.task ||" not in src1)
+    # (b) the focus test alone let a refresh overwrite the box you were NOT in and
+    #     then report 已保存. Unsaved edits have to win over a refresh in BOTH boxes.
+    check("unsaved edits survive a refresh in both boxes",
+          "const keepTyping = memoDirty && !force;" in src1 and "!keepTyping" in src1)
+    check("...and a refresh does not claim 已保存 while something is unsaved",
+          "if (!memoDirty) memoMark(false);" in src1)
 
     print("=== a file written by the pre-versions build still opens ===")
     # Those files were written by an earlier build of this same panel; "please re-type

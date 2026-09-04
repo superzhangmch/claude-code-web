@@ -928,7 +928,9 @@ body.light .msg.system.stack-tool { background: var(--panel2); }
 #hb .hb-txt .hb-ln {   /* NO wrap — scroll right for long lines; ONE size smaller than a transcript msg */
   white-space: pre; width: max-content;
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;   /* terminal alignment needs fixed-width */
-  font-size: calc(13px * var(--cs, 1)); line-height: 1.5;
+  /* 12px, not 13: this block is a glance at what is happening, not something you
+     read line by line, and at 13 it competed with the transcript around it. */
+  font-size: calc(12px * var(--cs, 1)); line-height: 1.45;
 }
 /* status row (dot + countdown/idle) — its own line, left-aligned, at the BOTTOM */
 #hb .hb-status {
@@ -2115,6 +2117,25 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 /* The value on a Task-row button (the task preview, the verdict) is context, not
    the label — dimmed so the word you are looking for stays the word. */
 .switch-menu .scr-cfg-row .mm-dim { color: var(--muted); }
+#watch-modal .watch-card { width: 92vw; max-width: 560px; display: flex; flex-direction: column; gap: 10px; }
+#watch-modal .modal-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+#watch-modal .modal-row h3 { margin: 0; font-size: 15px; }
+#watch-modal .memo-lab { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+#watch-modal .memo-hint { color: var(--muted); font-size: 11px; }
+#watch-modal .memo-ta {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 120px;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 8px;
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+}
+#watch-modal .memo-checkdetail {
+  max-height: 26vh; overflow: auto; border: 1px solid var(--border);
+  border-radius: 6px; padding: 7px 8px; font-size: 12px; line-height: 1.5;
+}
+#watch-modal .wl-row { margin-bottom: 5px; }
+#watch-modal .wl-act { color: var(--text); }
+#watch-modal .wl-nudge { color: #e0a04a; }
+#watch-modal .wl-esc { color: #ffb4b4; }
 #memo-modal .memo-verbar { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 #memo-modal .memo-verlabel { flex: 1; color: var(--muted); font-size: 11px; }
 #memo-modal .memo-vers {
@@ -2401,6 +2422,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <button class="sw-item" id="mm-exit-close"
               id="exit-close-btn" title="退出 claude 并关闭它的终端 tab(有后台作业时不关)">⏏ exit &amp; close</button>
     </div>
+    <!-- The whip. A separate row from Task on purpose: Task is what to do, this is how
+         to supervise me, and one box holding both makes both vague. The switch is ON
+         the row so a glance at ⚙ says which sessions have something watching them. -->
+    <div class="scr-cfg-row"><span>Watch</span>
+      <button class="sw-item" id="mm-watch" title="给这个 session 的看门 agent 写策略(它照这段话决定要不要介入)">set</button>
+      <button class="sw-item" id="mm-watch-toggle" title="开启/关闭这个 session 的看门 agent">关</button>
+    </div>
     <div class="scr-cfg-row"><span>Task</span>
       <button class="sw-item" id="mm-memo"
               title="写这个 session 的当前任务和长期注意事项">set<span id="mm-memo-hint" class="mm-dim"></span></button>
@@ -2580,6 +2608,27 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
                   title="发起一次自检(把触发语填进输入框,你确认后再发)">再跑一次</button></div>
         <div id="memo-check-line" class="memo-checkline" title="点开看逐项与证据"></div>
         <div id="memo-check-detail" class="memo-checkdetail"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Registration IS this: a policy plus the switch. Armed with an empty policy is
+       refused by the server — something acting on your behalf with no instruction from
+       you is the worst of both. -->
+  <div id="watch-modal" class="modal">
+    <div class="modal-card watch-card">
+      <div class="modal-row"><h3>Watch</h3><span id="watch-state" class="memo-saved"></span>
+        <button id="watch-toggle" class="btn memo-smallbtn">开启</button>
+        <button id="watch-save" class="btn">保存</button>
+        <button id="watch-close" class="btn" title="close">✕</button></div>
+      <div class="memo-sec">
+        <div class="memo-lab">策略 <span class="memo-hint">原样作为 prompt 交给看门 agent</span></div>
+        <textarea id="watch-policy" class="memo-ta" rows="6"
+                  placeholder="例如:&#10;· 空闲超过 10 分钟才介入&#10;· 被 block 的命令: 本机只读的让它换个方式继续; 涉及远程主机、push、删除的一律等我&#10;· 它问方案怎么选时: 让它自己选最能推进任务的那个&#10;· 要密码/验证码这类只有我能给的: 别动, 通知我"></textarea>
+      </div>
+      <div class="memo-sec memo-check">
+        <div class="memo-lab">最近动作 <span class="memo-hint" id="watch-log-when"></span></div>
+        <div id="watch-log" class="memo-checkdetail show"></div>
       </div>
     </div>
   </div>
@@ -3338,11 +3387,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const r = memoRec || { task: {}, notes: {} };
     const v = memoVer(memoEditing) || { task: r.task || {}, notes: r.notes || {} };
     if (v && v.id) memoEditing = v.id;
+    // Unsaved edits win over a refresh, in BOTH boxes. The focus test alone was not
+    // enough: type in 注意事项, click into 当前任务, and a refresh (another device
+    // edited, or a fork landed) overwrote the box you were not in and then reported
+    // 已保存. Measured — the sentence was gone. An explicit load still forces.
+    const keepTyping = memoDirty && !force;
     for (const f of ["task", "notes"]) {
       const cur = v[f] || {};
-      // Don't stomp what is being typed right now — a poll-driven refresh landing
-      // mid-sentence would eat the sentence.
-      if (memoTA[f] && (force || document.activeElement !== memoTA[f])) memoTA[f].value = cur.text || "";
+      if (memoTA[f] && !keepTyping && (force || document.activeElement !== memoTA[f]))
+        memoTA[f].value = cur.text || "";
       if (memoMeta[f]) {
         const n = cur.sent_count || 0;
         // relAge()'s "now" is a word, not a duration — "now前" was the first thing this
@@ -3363,6 +3416,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     }
     memoAskBtns();
     memoVerRender();
+    if (typeof watchRender === "function") watchRender();
   }
   // The session's self-check, read back. Deliberately in the SAME modal as the two
   // boxes it is about: the report only means anything next to the intent it was
@@ -3452,7 +3506,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       memoRec = await r.json(); memoSid = sid; memoVerSeen = ver;
       if (was !== sid) memoEditing = memoRec.current;   // another session → its current
       memoRender();
-      memoMark(false);   // just read from the server: what is in the boxes IS stored
+      // ...unless something is unsaved, in which case it is NOT stored and must not
+      // be labelled as if it were.
+      if (!memoDirty) memoMark(false);
     } catch {}
   }
   // Called from the poll: the version moved (or we just attached elsewhere).
@@ -3477,11 +3533,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // Newest first: the one you are most likely to be switching back FROM is the one
     // you just made.
     memoVersEl.innerHTML = vs.slice().reverse().map((v) => {
-      const when = (v.updated_at || v.created_at || "").replace("T", " ").slice(5, 16);
-      const txt = _escHtml(v.label || v.task || v.notes || "(空)");
+      // v.task / v.notes are the full field objects (that is what made an old version
+      // editable): reading them as strings printed "[object Object]" in the list for a
+      // while. Found reviewing, not by anything failing.
+      const vt = (v.task && v.task.text || "").trim(), vn = (v.notes && v.notes.text || "").trim();
+      const when = ((v.task && v.task.updated_at) || v.created_at || "").replace("T", " ").slice(5, 16);
+      const txt = _escHtml(v.label || vt || vn || "(空)");
       return `<div class="mv-row${v.id === memoEditing ? " editing" : ""}" data-id="${v.id}">`
         + `<span class="mv-id">v${v.id}</span>`
-        + `<span class="mv-txt mv-open" data-id="${v.id}" title="点开载入这个版本编辑">${txt}</span>`
+        + `<span class="mv-txt mv-open" data-id="${v.id}" title="${_escHtml(vt || vn)}\n(点开载入这个版本编辑)">${txt}</span>`
         + `<span class="mc-stale">${when}</span>`
         + (v.current ? '<span class="mv-cur">当前</span>'
                      : `<button class="btn memo-smallbtn mv-set" data-id="${v.id}">设为当前</button>`
@@ -3672,6 +3732,102 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     inputEl.dispatchEvent(new Event("input"));
     memoModal.classList.remove("show");
     if (!isPhone()) inputEl.focus();
+  });
+
+  // ---------- Watch: the whip's policy for THIS session ----------
+  // Registration is a policy plus a switch, both stored in the memo's reserved
+  // `supervisor` slot — no second registry to fall out of step with the panel. The
+  // policy goes to the watching agent verbatim as its prompt, so it is prose and not
+  // a form: what it should do about a blocked command is a sentence, not a checkbox.
+  const watchModal = document.getElementById("watch-modal");
+  const watchPolicy = document.getElementById("watch-policy");
+  const watchStateEl = document.getElementById("watch-state");
+  const watchToggleBtn = document.getElementById("watch-toggle");
+  const watchLogEl = document.getElementById("watch-log");
+  const watchLogWhen = document.getElementById("watch-log-when");
+  const mmWatchToggle = document.getElementById("mm-watch-toggle");
+  let watchDirty = false;
+  function watchSup() { return (memoRec && memoRec.supervisor) || { enabled: false, policy: "" }; }
+  function watchRender() {
+    const sup = watchSup();
+    if (document.activeElement !== watchPolicy && !watchDirty) watchPolicy.value = sup.policy || "";
+    const armed = !!(memoRec && memoRec.watched);
+    watchStateEl.textContent = watchDirty ? "未保存…" : (armed ? "已开启" : (sup.policy ? "已写策略, 未开启" : "未设置"));
+    watchToggleBtn.textContent = sup.enabled ? "关闭" : "开启";
+    // The ⚙ row carries it too: which sessions have something watching them should be
+    // answerable without opening anything.
+    if (mmWatchToggle) mmWatchToggle.textContent = armed ? "开" : "关";
+  }
+  async function watchPost(body) {
+    if (!attachedSid) return false;
+    const r = await authedFetch("/api/session-memo", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ claude_session_id: attachedSid, ...body }),
+    });
+    if (!r.ok) {
+      // The server refuses to arm with an empty policy, and says why — show that
+      // rather than a generic failure.
+      let d = ""; try { d = (await r.json()).detail || ""; } catch {}
+      alert(d || ("失败: " + r.status));
+      return false;
+    }
+    memoRec = await r.json(); memoVerSeen = -1;
+    watchDirty = false; watchRender(); memoRender(); memoVerRender();
+    return true;
+  }
+  async function watchLoadLog() {
+    if (!attachedSid) return;
+    try {
+      const r = await authedFetch("/api/watch-log?lines=12&claude_session_id="
+                                  + encodeURIComponent(attachedSid));
+      if (!r.ok) return;
+      const es = (await r.json()).entries || [];
+      watchLogWhen.textContent = es.length ? (es.length + " 条") : "";
+      // Newest first — what it did last is the thing you came to check.
+      watchLogEl.innerHTML = es.length ? es.slice().reverse().map((e) => {
+        const cls = e.action === "nudge" ? "wl-nudge" : e.action === "escalate" ? "wl-esc" : "wl-act";
+        return `<div class="wl-row"><span class="${cls}">${_escHtml(e.action || "?")}</span>`
+          + `<span class="mc-stale"> ${_escHtml((e.at || "").replace("T", " ").slice(5, 16))}</span>`
+          + ` ${_escHtml(e.why || "")}`
+          + (e.text ? `<div class="mc-ev">${_escHtml(e.text)}</div>` : "")
+          + (e.progress != null ? `<div class="mc-ev">之后有进展: ${e.progress ? "有" : "没有"}</div>` : "")
+          + "</div>";
+      }).join("") : '<span class="mc-stale">它还没做过什么</span>';
+    } catch {}
+  }
+  watchPolicy.addEventListener("input", () => { watchDirty = true; watchRender(); });
+  document.getElementById("watch-save").addEventListener("click", async () => {
+    await watchPost({ supervisor_policy: watchPolicy.value });
+  });
+  watchToggleBtn.addEventListener("click", async () => {
+    const sup = watchSup();
+    // Turning it ON also saves whatever is in the box: arming a policy you can see but
+    // that was never stored is the kind of gap that looks like it worked.
+    await watchPost(sup.enabled ? { supervisor_enabled: false }
+                                : { supervisor_policy: watchPolicy.value, supervisor_enabled: true });
+  });
+  document.getElementById("watch-close").addEventListener("click", () => {
+    if (watchDirty && !confirm("策略有未保存的改动 —— 放弃?")) return;
+    watchDirty = false; watchModal.classList.remove("show"); watchRender();
+  });
+  watchModal.addEventListener("click", (e) => {
+    if (e.target === watchModal) document.getElementById("watch-close").click();
+  });
+  function watchOpen() {
+    if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
+    modeMenu.style.display = "none";
+    memoLoad(attachedSid, memoVerSeen).then(() => { watchRender(); });
+    watchLoadLog();
+    watchModal.classList.add("show");
+  }
+  document.getElementById("mm-watch").addEventListener("click", (e) => { e.stopPropagation(); watchOpen(); });
+  if (mmWatchToggle) mmWatchToggle.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
+    const sup = watchSup();
+    if (!sup.enabled && !(sup.policy || "").trim()) { watchOpen(); return; }   // nothing to arm yet
+    modeMenu.style.display = "none";
+    await watchPost({ supervisor_enabled: !sup.enabled });
   });
 
   const mmExitClose = document.getElementById("mm-exit-close");
