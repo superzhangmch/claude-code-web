@@ -196,6 +196,36 @@ def main():
           "memoPost" not in body, body[:60])
     check("...then closes the modal", 'memoModal.classList.remove("show")' in body)
 
+    print("=== the prompt builders paste the CONTENT, and still never send ===")
+    ask = re.search(r"const MEMO_ASK = \{(.*?)\};", src, re.S)
+    abody = ask.group(1) if ask else ""
+    check("run check asks about the task", "请据此检查当前任务." in abody, abody.strip()[:50])
+    check("set periodic check asks for a 30-minute watcher",
+          "每 30分钟执行一次的watcher" in abody and "任务完成后" in abody and "替换它" in abody,
+          abody.strip()[-60:])
+    fn = re.search(r"function memoAsk\(kind, scope\) \{.*?\n  \}", src, re.S)
+    fb = fn.group(0) if fn else ""
+    check("it fences the box's own text rather than pointing at a file",
+          '"```\\n" + body + "\\n```\\n"' in fb, fb[fb.find("const line"):][:70])
+    check("...fills the composer and does not send", "/api/input" not in fb and "inputEl.value =" in fb)
+    check("...and an empty box asks nothing", "if (!attachedSid || !body) return;" in fb)
+    # Both boxes at once has to say which is which, or "these two things" is unreadable.
+    check("the both-boxes prompt labels the two", "当前任务:" in src and "注意事项(与当前任务无关" in src)
+    check("a button with nothing to ask about is disabled, not silently inert",
+          "function memoAskBtns()" in src and "b.disabled = !on" in src)
+
+    print("=== the composer can fill the boxes (long-press on send) ===")
+    menu = re.search(r"const setBox = \(field\) => async \(\) => \{.*?\n    \};", src, re.S)
+    mb = menu.group(0) if menu else ""
+    check("both items exist", '"set task desc"' in src and '"set task constrain"' in src)
+    # One field per request: the other box may not even be loaded in this view, and
+    # posting both would write whatever stale value happens to be in the DOM.
+    check("it posts ONE field, so the other box cannot be clobbered",
+          'field === "task" ? { task: text } : { notes: text }' in mb, mb[:60])
+    check("...clears the composer (the box owns the text now)", 'inputEl.value = ""' in mb)
+    check("...then re-reads the stored copy and opens the modal, so 'saved' is visible",
+          "memoLoad(attachedSid" in mb and 'memoModal.classList.add("show")' in mb)
+
     print("=== 'sent' is counted on the real send, wherever the text came from ===")
     send = re.search(r"async function send\(\) \{.*?\n  \}", src, re.S)
     sbody = send.group(0) if send else ""
@@ -203,9 +233,12 @@ def main():
           "body.startsWith(MEMO_TAG[k])" in sbody, "found" if sbody else "send() not found")
     check("...and stamps mark_sent for THAT field — so a reminder typed by hand counts too",
           "memoPost({ mark_sent: mtag })" in sbody)
+    # The intent, not the literal body: typing marks state (and refreshes which
+    # prompt buttons are usable) but must not schedule a write.
+    typed = src[src.index("function memoTyped()"):src.index("async function memoSaveAll")]
     check("nothing saves on a timer — typing only marks the state",
-          "function memoTyped() { memoMark(true); }" in src and "setTimeout" not in
-          src[src.index("function memoTyped"):src.index("async function memoSaveAll")])
+          "memoMark(true)" in typed and "setTimeout" not in typed and "memoPost" not in typed,
+          typed.splitlines()[0][:70])
     check("...and closing with unsaved text asks instead of discarding silently",
           "有未保存的改动" in src)
     check("a refresh landing mid-typing does not overwrite the box",

@@ -2083,7 +2083,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
    pushes the send button off screen. */
 /* .modal-row's flex is id-scoped per modal, so without this the ✕ drops onto its
    own line under the title (it did). */
-#memo-modal .modal-row { display: flex; align-items: center; gap: 8px; }
+#memo-modal .modal-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* The two prompt-builders are secondary to 保存 — smaller, so the row reads
+   title · state · [helpers] · save · close instead of five equal shouts. */
+#memo-modal .memo-smallbtn { font-size: 11px; padding: 3px 8px; }
+#memo-modal .memo-smallbtn:disabled { opacity: .4; cursor: default; }
 #memo-modal .modal-row h3 { margin: 0; font-size: 15px; }
 /* Full screen, not a dialog. What you type here is prose you come back and edit —
    a 3-row box in the middle of a dimmed page is the wrong shape for that, and on a
@@ -2518,13 +2522,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   <div id="memo-modal" class="modal">
     <div class="modal-card memo-card">
       <div class="modal-row"><h3>Task</h3><span id="memo-saved" class="memo-saved"></span>
-        <button id="memo-save" class="btn" title="保存两个框(改动本来也会自动存,这个按钮让你能确认)">保存</button>
+        <button id="memo-runcheck-both" class="btn memo-smallbtn"
+                title="把两个框的内容 + 「请据此检查当前任务」填进输入框(不发送)">run check</button>
+        <button id="memo-periodic" class="btn memo-smallbtn"
+                title="把两个框的内容 + 「起一个每 30 分钟检查一次的 watcher」填进输入框(不发送)">set periodic check</button>
+        <button id="memo-save" class="btn" title="保存两个框(只有这个按钮会写入)">保存</button>
         <button id="memo-close" class="btn" title="close">✕</button></div>
       <div class="memo-sec">
         <div class="memo-lab">当前任务 <span class="memo-hint">随进展改写</span></div>
         <textarea id="memo-task" class="memo-ta" rows="3"
                   placeholder="这个 session 现在该做的事 —— 你写的版本, 不是它自己总结的"></textarea>
         <div class="memo-row"><span id="memo-task-meta" class="memo-meta"></span>
+          <button id="memo-task-runcheck" class="btn memo-smallbtn"
+                  title="把这个框的内容 + 「请据此检查当前任务」填进输入框(不发送)">run check</button>
           <button id="memo-task-send" class="btn" title="把它放进下面的输入框(标注为 [当前任务]),你确认后再发">填入输入框</button></div>
       </div>
       <div class="memo-sec">
@@ -2532,6 +2542,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <textarea id="memo-notes" class="memo-ta" rows="3"
                   placeholder="这个 session 一直要守的规矩, 例如: 不要重构 index.html 的结构; 部署前先跑测试"></textarea>
         <div class="memo-row"><span id="memo-notes-meta" class="memo-meta"></span>
+          <button id="memo-notes-runcheck" class="btn memo-smallbtn"
+                  title="把这个框的内容 + 「请据此检查当前任务」填进输入框(不发送)">run check</button>
           <button id="memo-notes-send" class="btn" title="把它放进下面的输入框(标注为 [注意事项]),你确认后再发">填入输入框</button></div>
       </div>
       <!-- The session's own answer to the two boxes above. ONE line by default and
@@ -3310,6 +3322,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const t = (r.task && r.task.text || "").trim(), n = (r.notes && r.notes.text || "").trim();
       mmMemoHint.textContent = (t || n) ? " ✓" : "";
     }
+    memoAskBtns();
   }
   // The session's self-check, read back. Deliberately in the SAME modal as the two
   // boxes it is about: the report only means anything next to the intent it was
@@ -3424,7 +3437,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     memoSavedEl.textContent = dirty ? "未保存…" : "已保存";
     if (memoSaveBtn) memoSaveBtn.disabled = !dirty;
   }
-  function memoTyped() { memoMark(true); }   // typing only marks; the button writes
+  function memoTyped() { memoMark(true); memoAskBtns(); }   // typing only marks; the button writes
   // ONE request carrying both boxes. It used to be two, fired with Promise.all, and
   // since the endpoint is read-modify-write on one file they raced: the loser wrote
   // over the winner, and on one run it read a half-replaced file, decided both boxes
@@ -3502,6 +3515,53 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // the same gesture as 填入输入框: you may want to add "look hard at the deploy one"
   // before sending, and a button that fires a turn on one tap is a button that fires
   // turns you did not mean.
+  // Two prompt builders. They paste the box's CONTENT into the composer inside a
+  // fence, followed by the instruction — so the check does not depend on the skill
+  // being installed, on the server's copy being current, or on the session going and
+  // reading anything: what you are looking at is what gets asked about. Fill only,
+  // never send, like everything else on this panel.
+  const MEMO_ASK = {
+    check: "请据此检查当前任务.",
+    periodic: "请启动每 30分钟执行一次的watcher 来监督保证任务完成. " +
+              "任务完成后, watcher 就可以撤掉. 如果已经有这样watcher, 则是替换它.",
+  };
+  function memoContent(scope) {
+    const t = (memoTA.task.value || "").trim(), n = (memoTA.notes.value || "").trim();
+    if (scope === "task") return t;
+    if (scope === "notes") return n;
+    // Both: label them, because "these two things" is only readable if it says which
+    // is which. One empty → no label needed, it is unambiguous again.
+    if (t && n) return "当前任务:\n" + t + "\n\n注意事项(与当前任务无关, 长期有效):\n" + n;
+    return t || n;
+  }
+  function memoAsk(kind, scope) {
+    const body = memoContent(scope);
+    if (!attachedSid || !body) return;                 // empty box → nothing to ask about
+    const line = "```\n" + body + "\n```\n" + MEMO_ASK[kind];
+    const cur = inputEl.value;
+    inputEl.value = cur.trim() ? line + "\n" + cur : line;
+    inputEl.dispatchEvent(new Event("input"));
+    memoModal.classList.remove("show");
+    if (!isPhone()) inputEl.focus();
+  }
+  for (const [id, kind, scope] of [["memo-runcheck-both", "check", "both"],
+                                   ["memo-periodic", "periodic", "both"],
+                                   ["memo-task-runcheck", "check", "task"],
+                                   ["memo-notes-runcheck", "check", "notes"]]) {
+    const b = document.getElementById(id);
+    if (b) b.addEventListener("click", (e) => { e.stopPropagation(); memoAsk(kind, scope); });
+  }
+  // Nothing in the box → nothing to ask about, and a button that silently does nothing
+  // is worse than one that shows it cannot.
+  function memoAskBtns() {
+    const t = (memoTA.task.value || "").trim(), n = (memoTA.notes.value || "").trim();
+    const set = (id, on) => { const b = document.getElementById(id); if (b) b.disabled = !on; };
+    set("memo-runcheck-both", !!(t || n));
+    set("memo-periodic", !!(t || n));
+    set("memo-task-runcheck", !!t);
+    set("memo-notes-runcheck", !!n);
+  }
+
   const mmRun = document.getElementById("memo-run");
   if (mmRun) mmRun.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -10071,9 +10131,28 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   function openSendMenu() {
     const old = document.getElementById("send-menu"); if (old) old.remove();
     const m = document.createElement("div"); m.id = "send-menu"; m.className = "send-menu";
+    // The composer is where you have just written (or dictated) the thing — so it is
+    // also the natural place to put it INTO the Task boxes, rather than retyping it in
+    // a modal. Moves the text: the box now owns it, so the composer is cleared and you
+    // cannot send by accident what you meant to store.
+    const setBox = (field) => async () => {
+      const text = (inputEl.value || "").trim();
+      if (!text) return;
+      if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
+      // Post the ONE field: the endpoint leaves the other alone, so this cannot
+      // clobber whatever is in the other box (which may not even be loaded here).
+      const ok = await memoPost(field === "task" ? { task: text } : { notes: text });
+      if (!ok) { alert("保存失败"); return; }
+      inputEl.value = ""; inputEl.style.height = "auto"; inputEl.dispatchEvent(new Event("input"));
+      await memoLoad(attachedSid, memoVerSeen);   // read back the stored copy
+      memoMark(false);
+      memoModal.classList.add("show");            // and show it, so "saved" is something you SEE
+    };
     const items = [
       ["Clear", () => { inputEl.value = ""; inputEl.style.height = "auto"; inputEl.dispatchEvent(new Event("input")); inputEl.focus(); }],
       ["Copy", () => _copyText(inputEl.value)],
+      ["set task desc", setBox("task")],
+      ["set task constrain", setBox("notes")],
       ["View ASR", showAsrRaw],
     ];
     for (const [label, fn] of items) {
