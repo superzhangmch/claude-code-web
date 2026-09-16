@@ -1131,7 +1131,8 @@ footer #float-controls button:active {
   color: var(--text); background: var(--panel2);
   box-shadow: inset 0 0 0 1px var(--accent); outline: none;
 }
-footer #float-controls .tc-sep { color: var(--border); font-size: 9px; user-select: none; }
+/* No .tc-sep rule: the `|` between tail and the icons is gone, so the class went with
+   it rather than being left behind styling nothing. */
 /* Bottom-left peek at the last lines of the live terminal. */
 #tail-box {
   position: fixed; left: 50%; transform: translateX(-50%); bottom: 76px; z-index: 60;
@@ -1219,6 +1220,15 @@ footer .rec-bar .rec-dot {
   animation: rec-blink 1s steps(2, start) infinite;
 }
 @keyframes rec-blink { 50% { opacity: .25; } }
+/* The dot is the one "are we actually recording" signal that both modes share, so it
+   must not be red before audio exists: while the mic is still opening it goes hollow and
+   stops blinking, and turns red at the instant capture starts. The text line says the
+   same thing in words, but only realtime keeps it on screen — batch overwrites that row
+   with its own hint, and this stays true in both. */
+footer .rec-bar.rec-arming .rec-dot {
+  background: transparent; border: 2px solid var(--border); animation: none;
+}
+footer .rec-bar.rec-arming .rec-time { color: var(--muted); }
 footer .rec-bar .rec-time { font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 600; }
 footer .rec-bar .rec-wave { display: flex; align-items: center; gap: 3px; flex: 0 0 auto; height: 20px; }
 footer .rec-bar .rec-wave > span:nth-child(n+7) { display: none; }   /* short wave (6 bars) so the buttons fit one line */
@@ -2099,12 +2109,39 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #memo-modal .memo-card {
   width: 100vw; max-width: 100vw;
   height: 100%; max-height: none;
-  padding: 12px; overflow: hidden;      /* the boxes scroll, the card does not */
-  display: flex; flex-direction: column; gap: 10px;
+  padding: 8px; overflow: hidden;       /* the boxes scroll, the card does not */
+  display: flex; flex-direction: column; gap: 6px;
+  /* Font size for the two boxes, driven by A-/A+ and remembered. On the card so both
+     boxes and the evidence pane move together — reading a task and reading the report
+     about it are the same act. */
+  --memo-fs: 13px;
 }
+/* ONE header format, shared by every full-screen card (Task, Watch, ...). It used to be
+   two near-identical blocks keyed on the modal id, and they drifted exactly as copies
+   do: Task's row was right-aligned while Watch's buttons bunched up against the title,
+   so ✕ sat 411px from the right edge in one window and at the edge in the other.
+   Measured, then unified — the layout of a window header is not a per-window decision.
+   Shape: <title> <state, flex:1> … tools … 保存 ✕ */
+.modal-row.memo-head {
+  display: flex; align-items: center; flex-wrap: wrap;
+  row-gap: 4px; column-gap: 5px; flex-shrink: 0;
+}
+.modal-row.memo-head h3 { margin: 0; font-size: 15px; flex-shrink: 0; }
+/* The one stretchy element. Everything after it is pushed to the right edge, which is
+   where the closing control belongs in both windows. */
+.modal-row.memo-head .hdr-fill {
+  flex: 1; min-width: 0; color: var(--muted); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#memo-modal .memo-fontgrp { display: inline-flex; gap: 3px; margin-left: 2px; }
+#memo-modal .memo-cb {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 11px;
+  color: var(--muted); flex-shrink: 0; cursor: pointer;
+}
+#memo-modal .memo-cb input { margin: 0; }
 /* flex:1 + min-height:0 on both levels — without min-height a textarea refuses to
    shrink below its rows= and pushes the second section off the bottom. */
-#memo-modal .memo-sec { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 5px; }
+#memo-modal .memo-sec { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 3px; }
 #memo-modal .memo-lab { font-size: 12px; color: var(--text); }
 #memo-modal .memo-hint { color: var(--muted); font-size: 11px; }
 #memo-modal .memo-ta {
@@ -2112,56 +2149,80 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   flex: 1; min-height: 64px;
   background: var(--panel2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px; padding: 7px 8px;
-  font: 13px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-size: var(--memo-fs); line-height: 1.5;
 }
 /* The value on a Task-row button (the task preview, the verdict) is context, not
    the label — dimmed so the word you are looking for stays the word. */
 .switch-menu .scr-cfg-row .mm-dim { color: var(--muted); }
-#watch-modal .watch-card { width: 92vw; max-width: 560px; display: flex; flex-direction: column; gap: 10px; }
-#watch-modal .modal-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-#watch-modal .modal-row h3 { margin: 0; font-size: 15px; }
+/* Full screen, like the Task window: the policy is prose you write and re-read, and a
+   six-row box floating in the middle of a dimmed page is the wrong shape for that. */
+#watch-modal.modal { padding: 4px; padding-top: calc(4px + env(safe-area-inset-top)); }
+#watch-modal .watch-card {
+  width: 100vw; max-width: 100vw; height: 100%; max-height: none;
+  padding: 8px; overflow: hidden;
+  display: flex; flex-direction: column; gap: 6px;
+  --memo-fs: 13px;
+}
+#watch-modal .memo-fontgrp { display: inline-flex; gap: 3px; margin-left: 2px; }
+#watch-modal .wt-seg { display: inline-flex; gap: 3px; }
+#watch-modal .wt-seg .btn.wt-on { outline: 2px solid var(--accent); font-weight: 700; }
+#watch-modal .memo-sec { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 3px; }
+#watch-modal .memo-lab { flex-wrap: wrap; row-gap: 3px; flex-shrink: 0; min-height: 22px; }
+#watch-modal .memo-meta {
+  flex: 1; min-width: 0; color: var(--muted); font-size: 11px; text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Two rows of choices: how long it may act for, and how often it asks. Wrapping, so
+   nine buttons on a phone become two tight lines instead of a horizontal scroll. */
+#watch-modal .wt-opts {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px; row-gap: 3px; flex-shrink: 0;
+}
+#watch-modal .wt-optlab { font-size: 11px; color: var(--text); flex: 0 0 auto; margin-right: 2px; }
+/* The chosen one, outlined rather than coloured: body.pure forces black-on-white with
+   !important, so colour cannot carry this. */
+#watch-modal .wt-opts .btn.wt-on { outline: 2px solid var(--accent); font-weight: 700; }
+/* Folded by default, same bargain as the self-check report. */
+#watch-modal .memo-sec.memo-check { flex: 0 0 auto; display: none; }
+#watch-modal .memo-sec.memo-check.show { display: flex; }
 #watch-modal .memo-lab { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 #watch-modal .memo-hint { color: var(--muted); font-size: 11px; }
 #watch-modal .memo-ta {
-  width: 100%; box-sizing: border-box; resize: vertical; min-height: 120px;
+  /* flex:1 + min-height:0 on both levels, same as the Task boxes: without it a
+     textarea refuses to shrink below its rows= and pushes the option rows off. */
+  width: 100%; box-sizing: border-box; resize: none; flex: 1; min-height: 64px;
   background: var(--panel2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px; padding: 7px 8px;
-  font: 13px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-size: var(--memo-fs); line-height: 1.5;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
 }
 #watch-modal .memo-checkdetail {
   max-height: 26vh; overflow: auto; border: 1px solid var(--border);
   border-radius: 6px; padding: 7px 8px; font-size: 12px; line-height: 1.5;
 }
-#watch-modal .wl-row { margin-bottom: 5px; }
-#watch-modal .wl-act { color: var(--text); }
-#watch-modal .wl-nudge { color: #e0a04a; }
-#watch-modal .wl-esc { color: #ffb4b4; }
-#memo-modal .memo-verbar { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-#memo-modal .memo-verlabel { flex: 1; color: var(--muted); font-size: 11px; }
-#memo-modal .memo-vers {
-  display: none; flex-shrink: 0; max-height: 22vh; overflow: auto;
-  border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; font-size: 12px;
+/* Collapsed by default, so the two boxes own the whole card until you ask for the
+   report. flex:0 when open — an expanded report must not start eating the boxes. */
+#memo-modal .memo-sec.memo-check { flex: 0 0 auto; display: none; }
+#memo-modal .memo-sec.memo-check.show { display: flex; }
+#memo-modal .memo-lab {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap; row-gap: 3px;
+  flex-shrink: 0; min-height: 22px;
 }
-#memo-modal .memo-vers.show { display: block; }
-#memo-modal .memo-vers .mv-row { display: flex; align-items: baseline; gap: 6px; padding: 3px 0; }
-#memo-modal .memo-vers .mv-id { color: var(--muted); flex-shrink: 0; min-width: 22px; }
-#memo-modal .memo-vers .mv-txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#memo-modal .memo-vers .mv-cur { color: var(--accent); flex-shrink: 0; }
-#memo-modal .memo-vers .mv-open { cursor: pointer; }
-#memo-modal .memo-vers .mv-open:hover { text-decoration: underline; }
-#memo-modal .memo-vers .mv-row.editing { outline: 1px solid var(--border); border-radius: 4px; }
-#memo-modal .mv-warn { color: #e0a04a; }
-#memo-modal .memo-sec.memo-check { flex: 0 0 auto; }
-#memo-modal .memo-lab { display: flex; align-items: center; gap: 6px; }
+/* The label row carries this box's actions now, so its buttons are the small ones and
+   the meta text is what pushes them right. */
+#memo-modal .memo-lab .btn { flex-shrink: 0; }
 #memo-modal .memo-runbtn { margin-left: auto; font-size: 11px; padding: 2px 8px; }
-#memo-modal .memo-checkline { font-size: 12px; cursor: pointer; padding: 5px 0; }
+#memo-modal .memo-checkline {
+  font-size: 12px; cursor: pointer; flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 #memo-modal .memo-checkline .mc-ok { color: #6ee884; }
 #memo-modal .memo-checkline .mc-bad { color: #ffb4b4; }
 #memo-modal .memo-checkline .mc-stale { color: var(--muted); }
 #memo-modal .memo-checkdetail {
   display: none; max-height: 34vh; overflow: auto;
   border: 1px solid var(--border); border-radius: 6px; padding: 7px 8px;
-  font-size: 12px; line-height: 1.5;
+  font-size: var(--memo-fs); line-height: 1.5;
 }
 #memo-modal .memo-checkdetail.show { display: block; }
 #memo-modal .memo-checkdetail .mc-item { margin-bottom: 7px; }
@@ -2170,9 +2231,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   color: var(--muted); font: 11px/1.45 ui-monospace, Menlo, monospace;
   white-space: pre-wrap; word-break: break-all; margin-left: 10px;
 }
-#memo-modal .memo-row { display: flex; align-items: center; gap: 8px; }
-#memo-modal .memo-meta { flex: 1; color: var(--muted); font-size: 11px; }
-#memo-modal .memo-saved { color: var(--muted); font-size: 11px; flex: 1; }
+#memo-modal .memo-meta {
+  flex: 1; min-width: 0; color: var(--muted); font-size: 11px; text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 #files-modal .files-favs {
   display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0;
   max-height: 18vh; overflow-y: auto;
@@ -2422,18 +2484,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <button class="sw-item" id="mm-exit-close"
               id="exit-close-btn" title="退出 claude 并关闭它的终端 tab(有后台作业时不关)">⏏ exit &amp; close</button>
     </div>
-    <!-- The whip. A separate row from Task on purpose: Task is what to do, this is how
-         to supervise me, and one box holding both makes both vague. The switch is ON
-         the row so a glance at ⚙ says which sessions have something watching them. -->
-    <div class="scr-cfg-row"><span>Watch</span>
-      <button class="sw-item" id="mm-watch" title="给这个 session 的看门 agent 写策略(它照这段话决定要不要介入)">set</button>
-      <button class="sw-item" id="mm-watch-toggle" title="开启/关闭这个 session 的看门 agent">关</button>
-    </div>
+    <!-- One row, two windows: what this session is doing, and who is watching it. They
+         were two rows with a `set` each plus a `view run`, which is three buttons for
+         two places. `view run` is gone — the self-check report lives inside the Task
+         window, on its own 自检 button — but its VERDICT stays here, on `set`: the
+         point of a check is to be noticed, and a result you have to open a window to
+         find is one you find late. -->
     <div class="scr-cfg-row"><span>Task</span>
       <button class="sw-item" id="mm-memo"
-              title="写这个 session 的当前任务和长期注意事项">set<span id="mm-memo-hint" class="mm-dim"></span></button>
-      <button class="sw-item" id="mm-check"
-              title="看上一次自检的结果(逐项 + 证据);里面可以再发起一次">view run <span id="mm-check-hint" class="mm-dim">—</span></button>
+              title="写这个 session 的当前任务和长期注意事项;自检结果也在里面">set<span id="mm-memo-hint" class="mm-dim"></span></button>
+      <button class="sw-item" id="mm-watch"
+              title="看门 agent: 策略、开关、有效期、检查周期都在里面">watch <span id="mm-watch-hint" class="mm-dim">关</span></button>
     </div>
   </div>
 
@@ -2563,50 +2624,64 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
        standing rules that outlive it. Each sends on its own: re-stating the goal and
        re-stating the ground rules are different interventions. -->
   <div id="memo-modal" class="modal">
+    <!-- Everything that is not a text box is squeezed onto as few rows as possible:
+         the two boxes are the reason this window exists, and every row of chrome comes
+         straight out of their height. So the version bar lives in the title row, and
+         each box's meta + actions live in its OWN label row rather than on a second row
+         underneath. That is four rows reclaimed. -->
     <div class="modal-card memo-card">
-      <div class="modal-row"><h3>Task</h3><span id="memo-saved" class="memo-saved"></span>
-        <button id="memo-runcheck-both" class="btn memo-smallbtn"
-                title="把两个框的内容 + 「请据此检查当前任务」填进输入框(不发送)">run check</button>
-        <button id="memo-periodic" class="btn memo-smallbtn"
-                title="把两个框的内容 + 「起一个每 30 分钟检查一次的 watcher」填进输入框(不发送)">set periodic check</button>
+      <div class="modal-row memo-head">
+        <h3>Task</h3>
+        <span id="memo-saved" class="hdr-fill"></span>
+        <!-- Font size for the boxes only. It is the one thing here that is about
+             READING rather than doing, which is why it sits apart from the actions. -->
+        <span class="memo-fontgrp">
+          <button id="memo-fontdn" class="btn memo-smallbtn" title="框里的字小一点">A-</button>
+          <button id="memo-fontup" class="btn memo-smallbtn" title="框里的字大一点">A+</button>
+        </span>
+        <!-- The self-check result is folded away by default: it is the longest thing in
+             this window and the rarest thing you came here to read. The button carries a
+             one-glyph verdict so a bad result is never HIDDEN, only collapsed — a glyph
+             and not a colour, because body.pure forces black-on-white with !important. -->
+        <button id="memo-checktoggle" class="btn memo-smallbtn" title="展开/收起自检结果">自检 —</button>
+        <button id="memo-fill-both" class="btn memo-smallbtn"
+                title="把两个框都填进输入框(不发送),你自己补一句要它做什么">填入输入框</button>
+        <!-- A checkbox, not a button, and worded to kill the misreading it caused: the
+             button looked like cc-web would run a 30-minute watcher. It never did — it
+             typed a request at the session. The real periodic check is ⚙ → Watch →
+             检查周期, which runs server-side with an expiry and a log. -->
+        <label class="memo-cb"
+               title="勾上就在填入的文字后面附一句「起一个每 30 分钟检查一次的 watcher」。这是让 session 自己起一个(靠它自己的 tool call),不是 cc-web 起。要 cc-web 真的周期性来问, 用 ⚙ → Watch → 检查周期">
+          <input type="checkbox" id="memo-watcher"> 附:让它自起 watcher
+        </label>
         <button id="memo-save" class="btn" title="保存两个框(只有这个按钮会写入)">保存</button>
-        <button id="memo-close" class="btn" title="close">✕</button></div>
-      <!-- Versions. Editing rewrites the current one; `fork` is what makes a new one.
-           The list is collapsed until you ask for it: most of the time there is one
-           version and a row saying so would be furniture. -->
-      <div class="memo-verbar">
-        <span id="memo-vercur" class="memo-verlabel"></span>
-        <button id="memo-verlist" class="btn memo-smallbtn" title="列出所有版本,可切换当前版本">versions</button>
-        <button id="memo-fork" class="btn memo-smallbtn" title="以当前内容为起点建立一个新版本(不影响旧版本)">fork</button>
+        <button id="memo-close" class="btn" title="close">✕</button>
       </div>
-      <div id="memo-vers" class="memo-vers"></div>
       <div class="memo-sec">
-        <div class="memo-lab">当前任务 <span class="memo-hint">随进展改写</span></div>
+        <div class="memo-lab">当前任务 <span class="memo-hint">随进展改写</span>
+          <span id="memo-task-meta" class="memo-meta"></span>
+          <button id="memo-task-send" class="btn memo-smallbtn"
+                  title="把它放进下面的输入框(标注为 [当前任务]),你确认后再发">填入输入框</button></div>
         <textarea id="memo-task" class="memo-ta" rows="3"
                   placeholder="这个 session 现在该做的事 —— 你写的版本, 不是它自己总结的"></textarea>
-        <div class="memo-row"><span id="memo-task-meta" class="memo-meta"></span>
-          <button id="memo-task-runcheck" class="btn memo-smallbtn"
-                  title="把这个框的内容 + 「请据此检查当前任务」填进输入框(不发送)">run check</button>
-          <button id="memo-task-send" class="btn" title="把它放进下面的输入框(标注为 [当前任务]),你确认后再发">填入输入框</button></div>
       </div>
       <div class="memo-sec">
-        <div class="memo-lab">注意事项 <span class="memo-hint">与当前任务无关, 长期有效</span></div>
+        <div class="memo-lab">注意事项 <span class="memo-hint">与当前任务无关, 长期有效</span>
+          <span id="memo-notes-meta" class="memo-meta"></span>
+          <button id="memo-notes-send" class="btn memo-smallbtn"
+                  title="把它放进下面的输入框(标注为 [注意事项]),你确认后再发">填入输入框</button></div>
         <textarea id="memo-notes" class="memo-ta" rows="3"
                   placeholder="这个 session 一直要守的规矩, 例如: 不要重构 index.html 的结构; 部署前先跑测试"></textarea>
-        <div class="memo-row"><span id="memo-notes-meta" class="memo-meta"></span>
-          <button id="memo-notes-runcheck" class="btn memo-smallbtn"
-                  title="把这个框的内容 + 「请据此检查当前任务」填进输入框(不发送)">run check</button>
-          <button id="memo-notes-send" class="btn" title="把它放进下面的输入框(标注为 [注意事项]),你确认后再发">填入输入框</button></div>
       </div>
       <!-- The session's own answer to the two boxes above. ONE line by default and
            flex:0 so the two textareas keep their height: a report that unfolds twelve
            green ticks every time you open this is a report you stop reading. Tap it
            for the evidence. -->
-      <div class="memo-sec memo-check">
+      <div class="memo-sec memo-check" id="memo-check-sec">
         <div class="memo-lab">自检 <span class="memo-hint" id="memo-check-when"></span>
+          <span id="memo-check-line" class="memo-checkline" title="点开看逐项与证据"></span>
           <button id="memo-run" class="btn memo-runbtn"
                   title="发起一次自检(把触发语填进输入框,你确认后再发)">再跑一次</button></div>
-        <div id="memo-check-line" class="memo-checkline" title="点开看逐项与证据"></div>
         <div id="memo-check-detail" class="memo-checkdetail"></div>
       </div>
     </div>
@@ -2616,19 +2691,63 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
        refused by the server — something acting on your behalf with no instruction from
        you is the worst of both. -->
   <div id="watch-modal" class="modal">
+    <!-- Same shape as the Task window and for the same reason: the policy box is why you
+         opened this, so everything else is squeezed onto single rows and the box takes
+         what is left. The switch, the expiry and the period all live here — the thing
+         that acts on your behalf, how long it may, and how often. -->
     <div class="modal-card watch-card">
-      <div class="modal-row"><h3>Watch</h3><span id="watch-state" class="memo-saved"></span>
-        <button id="watch-toggle" class="btn memo-smallbtn">开启</button>
+      <div class="modal-row memo-head">
+        <h3>Watch</h3>
+        <span id="watch-state" class="hdr-fill"></span>
+        <span class="memo-fontgrp">
+          <button id="watch-fontdn" class="btn memo-smallbtn" title="框里的字小一点">A-</button>
+          <button id="watch-fontup" class="btn memo-smallbtn" title="框里的字大一点">A+</button>
+        </span>
+        <!-- Explicit pair, not one toggle. A single button labelled 开启 is ambiguous
+             in exactly the way that matters here: it reads both as "this is on" and as
+             "tap to turn on", and this is a thing that types into your session. Two
+             buttons with the live one outlined can only be read one way. -->
+        <span class="wt-seg">
+          <button id="watch-on" class="btn memo-smallbtn" title="开启看门">开</button>
+          <button id="watch-off" class="btn memo-smallbtn" title="关闭看门">关</button>
+        </span>
         <button id="watch-save" class="btn">保存</button>
-        <button id="watch-close" class="btn" title="close">✕</button></div>
-      <div class="memo-sec">
-        <div class="memo-lab">策略 <span class="memo-hint">原样作为 prompt 交给看门 agent</span></div>
-        <textarea id="watch-policy" class="memo-ta" rows="6"
-                  placeholder="例如:&#10;· 空闲超过 10 分钟才介入&#10;· 被 block 的命令: 本机只读的让它换个方式继续; 涉及远程主机、push、删除的一律等我&#10;· 它问方案怎么选时: 让它自己选最能推进任务的那个&#10;· 要密码/验证码这类只有我能给的: 别动, 通知我"></textarea>
+        <button id="watch-close" class="btn" title="close">✕</button>
       </div>
-      <div class="memo-sec memo-check">
-        <div class="memo-lab">最近动作 <span class="memo-hint" id="watch-log-when"></span></div>
-        <div id="watch-log" class="memo-checkdetail show"></div>
+      <div class="memo-sec">
+        <div class="memo-lab">策略
+          <span class="memo-hint">可留空(用默认判据)。写了就高于默认 —— 它管的是「什么情况该催」</span>
+          <span id="watch-left" class="memo-meta"></span></div>
+        <textarea id="watch-policy" class="memo-ta" rows="6"
+                  placeholder="它会周期性把上面的 Task 原文发回给 session, 问「确认完成了吗」;&#10;它明确说确认完成后就不再问这一版任务。这里写你要它怎么判断:&#10;&#10;· 它问方案怎么选时: 让它自己选最能推进任务的那个(那就会催它)&#10;· 涉及 push/部署/删数据的选择: 等我, 别催&#10;· 什么算完成: 测试跑绿 + 改动已 commit, 才算&#10;· 要密码/验证码这类只有我能给的: 别催"></textarea>
+      </div>
+      <!-- Armed-and-forgotten is the failure mode of anything that acts on your behalf,
+           so there is always an expiry unless you pick 不限 outright. -->
+      <div class="wt-opts">
+        <span class="wt-optlab">有效期</span>
+        <button class="btn memo-smallbtn wt-h" data-h="2">2h</button>
+        <button class="btn memo-smallbtn wt-h" data-h="4">4h</button>
+        <button class="btn memo-smallbtn wt-h" data-h="6">6h</button>
+        <button class="btn memo-smallbtn wt-h" data-h="8">8h</button>
+        <button class="btn memo-smallbtn wt-h" data-h="10">10h</button>
+        <button class="btn memo-smallbtn wt-h" data-h="16">16h</button>
+        <button class="btn memo-smallbtn wt-h" data-h="24">24h</button>
+        <button class="btn memo-smallbtn wt-h" data-h="48">48h</button>
+      </div>
+      <!-- How often it asks THIS session. Per-session because only you know how closely
+           a given piece of work wants watching; without it the cadence came from a
+           backoff ladder in the conf that stretches to two hours, which makes any
+           promise of "每 15 分钟" untrue. -->
+      <div class="wt-opts">
+        <span class="wt-optlab">检查周期</span>
+        <button class="btn memo-smallbtn wt-p" data-p="10">10m</button>
+        <button class="btn memo-smallbtn wt-p" data-p="15">15m</button>
+        <button class="btn memo-smallbtn wt-p" data-p="20">20m</button>
+        <button class="btn memo-smallbtn wt-p" data-p="25">25m</button>
+        <button class="btn memo-smallbtn wt-p" data-p="30">30m</button>
+        <button class="btn memo-smallbtn wt-p" data-p="45">45m</button>
+        <button class="btn memo-smallbtn wt-p" data-p="60">60m</button>
+        <button class="btn memo-smallbtn wt-p" data-p="0">默认</button>
       </div>
     </div>
   </div>
@@ -2773,10 +2892,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div id="upload-row" class="upload-row" style="display:none"></div>
     <div id="float-controls">
       <button id="tail-screen-btn" title="Peek at the last lines of the live terminal">tail</button>
-      <span class="tc-sep">|</span>
-      <!-- One button instead of ↑/↓: stepping through requests one at a time to find
-           the one you meant is worse than being shown the list. u / U still step. -->
-      <button id="jump-asks" title="列出你的提问,点一条跳过去(键盘 u / U 仍可上下逐条跳)">☰</button>
+      <!-- ↑ steps back one request; ☰ lists them all. The list came first, on the
+           grounds that hunting for the one you meant beats stepping — true when you
+           are looking for a PARTICULAR request, wrong for "the one just before this",
+           which is the common case. Stepping was there all along as the u / U keys;
+           a phone has no u key, so it needed a button. Only ↑, no ↓: after stepping
+           back you read downwards, and ⤓ already returns you to the latest.
+           Order is tail ☰ ↑ ⤓ and the separator is gone — both asked for directly. -->
+      <button id="jump-asks" title="列出你的提问,点一条跳过去(键盘 u / U 上下逐条跳)">☰</button>
+      <button id="jump-prev-ask" title="跳到上一条你的提问(键盘 u;U 往下一条)">↑</button>
       <button id="jump-bottom" title="Jump to latest">⤓</button>
     </div>
     <div id="asks-menu" class="asks-menu" style="display:none"></div>
@@ -3369,24 +3493,23 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const memoSaveBtn = document.getElementById("memo-save");
   const mmMemoHint = document.getElementById("mm-memo-hint");
   let memoRec = null, memoVerSeen = -1, memoSid = "";
-  // Which version is loaded in the boxes. Usually the current one, but ANY version can
-  // be opened and edited: a list you can only switch to is a list of things you cannot
-  // fix, and fixing a typo in an old version should not mean telling the session — even
-  // for a moment — that it is now working to it.
-  let memoEditing = 0;
-  function memoVer(id) {
-    const vs = (memoRec || {}).versions || [];
-    return vs.find((v) => v.id === id) || vs.find((v) => v.current) || null;
-  }
   const MEMO_TAG = { task: "[当前任务]", notes: "[注意事项]" };
-  // force=true for an EXPLICIT load (opening another version). The don't-stomp guard
-  // below is there for a poll landing mid-sentence; it must not also refuse the one
-  // thing you just asked for — which it did: after loading v1 the box had focus, so
-  // clicking back to v2 left v1's text sitting there under a "editing v2" label.
+  // There were VERSIONS here — a list, `fork`, "set as current", per-version editing,
+  // and a header line saying which one the boxes were showing. Retired on request
+  // ("只要能维护好一个版本不就行了"), and it was the right call: the task is a thing you
+  // rewrite as the work moves, not a thing you keep a history of, and the history came
+  // with its own failure modes (editing an old version thinking it was the live one).
+  // The server still stores the same shape with a single entry, so nothing on disk was
+  // lost and old files with several versions simply show their current one.
+  //
+  // `rev` stayed: it counts TEXT changes, which is what the self-check's
+  // "对不上现在的任务" and the whip's "already confirmed this version" both key off.
+  //
+  // force=true still means an EXPLICIT load — the don't-stomp guard below exists for a
+  // poll landing mid-sentence, and must not refuse the thing you just asked for.
   function memoRender(force) {
     const r = memoRec || { task: {}, notes: {} };
-    const v = memoVer(memoEditing) || { task: r.task || {}, notes: r.notes || {} };
-    if (v && v.id) memoEditing = v.id;
+    const v = { task: r.task || {}, notes: r.notes || {} };
     // Unsaved edits win over a refresh, in BOTH boxes. The focus test alone was not
     // enough: type in 注意事项, click into 当前任务, and a refresh (another device
     // edited, or a fork landed) overwrote the box you were not in and then reported
@@ -3412,10 +3535,24 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // answer is "is there anything in there".
     if (mmMemoHint) {
       const t = (r.task && r.task.text || "").trim(), n = (r.notes && r.notes.text || "").trim();
-      mmMemoHint.textContent = (t || n) ? " ✓" : "";
+      // Two facts on one hint: is anything written, and what did the last self-check
+      // say. The verdict used to have its own `view run` button here; the button went,
+      // the verdict did not.
+      const tag = memoCheckTag();
+      mmMemoHint.textContent = ((t || n) ? " ✓" : "") + (tag === "—" ? "" : " " + tag);
+      // Spelled out where there is room for a sentence. The hint has to fit on a button,
+      // so it can only ever be a label; this is the explanation behind it.
+      const mm = document.getElementById("mm-memo");
+      if (mm) {
+        mm.title = "写这个 session 的当前任务和长期注意事项;自检结果也在里面"
+          + (checkRec && checkRec.exists
+              ? (checkRec.stale
+                  ? "\n⚠ 上次自检之后任务被改过 —— 那份结论认证的不是现在这份任务了,重跑一次"
+                  : "\n上次自检: " + tag)
+              : "\n还没有自检报告");
+      }
     }
     memoAskBtns();
-    memoVerRender();
     if (typeof watchRender === "function") watchRender();
   }
   // The session's self-check, read back. Deliberately in the SAME modal as the two
@@ -3426,12 +3563,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const memoCheckLine = document.getElementById("memo-check-line");
   const memoCheckDetail = document.getElementById("memo-check-detail");
   const memoCheckWhen = document.getElementById("memo-check-when");
-  const mmCheckHint = document.getElementById("mm-check-hint");
   let checkRec = null, checkVerSeen = -1, checkSid = "";
   const _MC_LABEL = { done: "✓", not_done: "✗", partial: "◐", unverifiable: "?" };
   function memoCheckRender() {
     const got = checkRec;
-    memoCheckDetail.classList.remove("show");
+    // Keep whatever is open, open. This used to collapse unconditionally, so the poll
+    // yanked the evidence pane shut every few seconds while you were reading it — and
+    // it now matters more, since `view run` opens straight into that pane.
+    const wasOpen = memoCheckDetail.classList.contains("show") && got && got.exists;
+    memoCheckDetail.classList.toggle("show", !!wasOpen);
+    if (typeof memoCheckToggle !== "undefined" && memoCheckToggle) {
+      memoCheckToggle.textContent = memoCheckBadge();
+    }
     if (!got || !got.exists) {
       memoCheckLine.innerHTML = '<span class="mc-stale">还没有自检报告 —— 在这个 session 里说「自检」</span>';
       memoCheckWhen.textContent = "";
@@ -3472,18 +3615,75 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         + "</div>");
     }
     memoCheckDetail.innerHTML = parts.join("") || '<span class="mc-stale">(无细节)</span>';
-    // The ⚙ row carries the verdict too: the point of a check is to be noticed, and a
-    // result you have to open a modal to discover is one you discover late.
-    if (mmCheckHint) {
-      mmCheckHint.textContent = !got || !got.exists ? "—"
-        : r.verdict === "not_mine" ? "⚠"
-        : bad.length ? "✗" + bad.length
-        : got.stale ? "✓过期" : "✓";
-    }
+    // The ⚙ row carries the verdict too — via memoCheckTag(), which memoRender() reads
+    // for the `set` hint. One computation, two places it shows up.
+    if (mmMemoHint) memoRender();
+  }
+  // The self-check verdict in a few characters. ONE computation, shown in two places:
+  // the ⚙ row's `set` hint (glanceable without opening anything) and the 自检 button
+  // inside the Task window. Two copies of this existed for about ten minutes and that
+  // is exactly how the pair drifts. Glyphs rather than colour, because body.pure forces
+  // black-on-white with !important.
+  function memoCheckTag() {
+    const got = checkRec;
+    if (!got || !got.exists) return "—";
+    const r = got.report || {}, items = r.items || [];
+    const bad = items.filter((i) => i.status === "not_done" || i.status === "partial").length;
+    // "过期" on its own was unreadable here, and actively misleading: the button beside
+    // it says `watch 开·43m`, so a lone 过期 reads as a countdown running out. It has
+    // nothing to do with time — it means the TASK was edited after the check ran, so
+    // the verdict certifies a task text that no longer exists. Name the thing that went
+    // stale, not the fact that something did.
+    if (got.stale) return "⚠自检对不上任务";
+    if (r.verdict === "not_mine") return "⚠任务不对口";
+    if (r.verdict === "no_task") return "—";
+    if ((r.disputes || []).length) return bad ? ("✗" + bad + "·有异议") : "⚠有异议";
+    return bad ? ("✗" + bad + "项不合") : "✓已自检";
   }
   memoCheckLine.addEventListener("click", () => {
     if (checkRec && checkRec.exists) memoCheckDetail.classList.toggle("show");
   });
+
+  // ---- 自检 fold ----
+  const memoCheckSec = document.getElementById("memo-check-sec");
+  const memoCheckToggle = document.getElementById("memo-checktoggle");
+  // One glyph, computed from the same record the panel renders. The point of folding
+  // the report away is to reclaim the height, not to make you open it to find out
+  // whether anything is wrong — so the verdict rides on the button.
+  // The window's own button. It prefixes the word only when the tag does not already
+  // contain it — otherwise the stale one read "自检 ⚠自检对不上任务". One string set,
+  // two contexts.
+  const memoCheckBadge = () => {
+    const t = memoCheckTag();
+    return t.indexOf("\u81ea\u68c0") >= 0 ? t : "\u81ea\u68c0 " + t;
+  };
+  memoCheckToggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    memoCheckSec.classList.toggle("show");
+  });
+
+  // ---- A- / A+ : the size of the text IN the boxes, remembered ----
+  // Only the boxes and the evidence pane move. The chrome stays put: this is about
+  // reading a task you wrote, and a window whose buttons grow with it just loses the
+  // space that was being made for the text.
+  const MEMO_FS_MIN = 11, MEMO_FS_MAX = 26;
+  let memoFs = parseInt(localStorage.getItem("ccweb.memoFs") || "", 10);
+  if (!(memoFs >= MEMO_FS_MIN && memoFs <= MEMO_FS_MAX)) memoFs = 13;
+  function memoApplyFs() {
+    const card = document.querySelector("#memo-modal .memo-card");
+    if (card) card.style.setProperty("--memo-fs", memoFs + "px");
+    const dn = document.getElementById("memo-fontdn"), up = document.getElementById("memo-fontup");
+    if (dn) dn.disabled = memoFs <= MEMO_FS_MIN;
+    if (up) up.disabled = memoFs >= MEMO_FS_MAX;
+  }
+  function memoStepFs(d) {
+    memoFs = Math.max(MEMO_FS_MIN, Math.min(MEMO_FS_MAX, memoFs + d));
+    try { localStorage.setItem("ccweb.memoFs", String(memoFs)); } catch {}
+    memoApplyFs();
+  }
+  document.getElementById("memo-fontdn").addEventListener("click", (e) => { e.stopPropagation(); memoStepFs(-1); });
+  document.getElementById("memo-fontup").addEventListener("click", (e) => { e.stopPropagation(); memoStepFs(1); });
+  memoApplyFs();
   async function checkLoad(sid, ver) {
     if (!sid) { checkRec = null; checkSid = ""; checkVerSeen = -1; memoCheckRender(); return; }
     try {
@@ -3504,7 +3704,6 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (!r.ok || sid !== attachedSid) return;
       const was = memoSid;
       memoRec = await r.json(); memoSid = sid; memoVerSeen = ver;
-      if (was !== sid) memoEditing = memoRec.current;   // another session → its current
       memoRender();
       // ...unless something is unsaved, in which case it is NOT stored and must not
       // be labelled as if it were.
@@ -3516,68 +3715,6 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const v = (ver == null ? 0 : ver);
     if (attachedSid !== memoSid || v !== memoVerSeen) memoLoad(attachedSid, v);
   }
-  const memoVerCur = document.getElementById("memo-vercur");
-  const memoVersEl = document.getElementById("memo-vers");
-  function memoVerRender() {
-    const r = memoRec || {}, vs = r.versions || [];
-    if (memoVerCur) {
-      const editingCur = memoEditing === r.current;
-      // Say WHICH version the boxes are showing, and shout when it is not the live
-      // one — otherwise you edit history thinking you are editing the task.
-      memoVerCur.innerHTML = !vs.length ? ""
-        : editingCur
-          ? `正在编辑 v${memoEditing}(当前)` + (vs.length > 1 ? ` · 共 ${vs.length} 版` : "")
-          : `<span class="mv-warn">正在编辑 v${memoEditing} —— 不是当前版本(当前 v${r.current})</span>`;
-    }
-    if (!memoVersEl) return;
-    // Newest first: the one you are most likely to be switching back FROM is the one
-    // you just made.
-    memoVersEl.innerHTML = vs.slice().reverse().map((v) => {
-      // v.task / v.notes are the full field objects (that is what made an old version
-      // editable): reading them as strings printed "[object Object]" in the list for a
-      // while. Found reviewing, not by anything failing.
-      const vt = (v.task && v.task.text || "").trim(), vn = (v.notes && v.notes.text || "").trim();
-      const when = ((v.task && v.task.updated_at) || v.created_at || "").replace("T", " ").slice(5, 16);
-      const txt = _escHtml(v.label || vt || vn || "(空)");
-      return `<div class="mv-row${v.id === memoEditing ? " editing" : ""}" data-id="${v.id}">`
-        + `<span class="mv-id">v${v.id}</span>`
-        + `<span class="mv-txt mv-open" data-id="${v.id}" title="${_escHtml(vt || vn)}\n(点开载入这个版本编辑)">${txt}</span>`
-        + `<span class="mc-stale">${when}</span>`
-        + (v.current ? '<span class="mv-cur">当前</span>'
-                     : `<button class="btn memo-smallbtn mv-set" data-id="${v.id}">设为当前</button>`
-                       + `<button class="btn memo-smallbtn mv-del" data-id="${v.id}" title="删除这个版本">✕</button>`)
-        + "</div>";
-    }).join("");
-  }
-  if (memoVersEl) memoVersEl.addEventListener("click", async (e) => {
-    const open = e.target.closest(".mv-open");
-    const set = e.target.closest(".mv-set"), del = e.target.closest(".mv-del");
-    if (!open && !set && !del) return;
-    e.stopPropagation();
-    // Unsaved edits belong to the version you are LEAVING, so moving away would
-    // quietly drop them. Say so instead.
-    if (memoDirty && !confirm("当前编辑的版本有未保存的改动 —— 离开会丢弃它, 继续?")) return;
-    const id = parseInt((open || set || del).dataset.id, 10);
-    if (open) {                       // load it into the boxes; current stays current
-      memoEditing = id;
-      memoRender(true); memoVerRender(); memoMark(false);
-      memoTA.task.focus();
-      return;
-    }
-    const r = await memoPost(set ? { set_current: id } : { delete: id });
-    if (r) { if (set) { memoEditing = id; memoRender(true); memoVerRender(); } memoMark(false); }
-  });
-  document.getElementById("memo-verlist").addEventListener("click", (e) => {
-    e.stopPropagation(); memoVersEl.classList.toggle("show");
-  });
-  document.getElementById("memo-fork").addEventListener("click", async (e) => {
-    e.stopPropagation();
-    // Fork carries whatever is in the boxes right now, saved or not: you pressed fork
-    // BECAUSE of what you were typing, and making you save into the old version first
-    // would put it in the wrong place.
-    const ok = await memoPost({ fork: true, task: memoTA.task.value, notes: memoTA.notes.value });
-    if (ok) { memoMark(false); memoVersEl.classList.add("show"); }
-  });
   async function memoPost(body) {
     const r = await authedFetch("/api/session-memo", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -3594,8 +3731,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   let memoDirty = false;
   function memoMark(dirty) {
     memoDirty = dirty;
-    memoSavedEl.textContent = dirty ? "未保存…" : "已保存";
-    if (memoSaveBtn) memoSaveBtn.disabled = !dirty;
+    memoSavedEl.textContent = dirty ? "未保存…" : "";
+    if (memoSaveBtn) {
+      // The state goes ON the button, and as a WORD. It used to just go grey, which
+      // reads as "broken / no network" rather than "saved" — reported. Not a colour
+      // either: the e-ink theme forces every button to black-on-white with
+      // !important, so a green tick there would simply not exist.
+      memoSaveBtn.disabled = !dirty;
+      memoSaveBtn.textContent = dirty ? "保存" : "✓ 已保存";
+    }
   }
   function memoTyped() { memoMark(true); memoAskBtns(); }   // typing only marks; the button writes
   // ONE request carrying both boxes. It used to be two, fired with Promise.all, and
@@ -3605,10 +3749,20 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // concurrency here is the better half of the fix.
   async function memoSaveAll() {
     if (!attachedSid) return;
-    const ok = await memoPost({ version: memoEditing || undefined,
+    if (memoSaveBtn) memoSaveBtn.textContent = "保存中…";
+    const ok = await memoPost({
                                 task: memoTA.task.value, notes: memoTA.notes.value });
-    if (ok) memoMark(false);
-    else memoSavedEl.textContent = "保存失败";
+    if (!ok) {
+      // Say it failed on the button too, where you are already looking.
+      memoSavedEl.textContent = "保存失败 —— 再点一次";
+      if (memoSaveBtn) { memoSaveBtn.textContent = "保存失败"; memoSaveBtn.disabled = false; }
+      return;
+    }
+    memoMark(false);
+    // A moment of "just now", so a save you watched happen looks different from a
+    // panel that merely opened clean.
+    memoSavedEl.textContent = "✓ 刚刚保存";
+    setTimeout(() => { if (!memoDirty) memoSavedEl.textContent = ""; }, 2500);
   }
   // NOT a send. The text goes into the composer and stops there: you get to look at
   // it, add the sentence that made you reach for it, and decide. A button that fires
@@ -3619,10 +3773,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // Deliberately does NOT save: saving is the button. So the box can read
     // "未保存…" while its text sits in the composer — which is honest, and lets you
     // send a one-off variation without committing it to the memo.
-    const line = MEMO_TAG[f] + " " + text;
+    memoPutInInput(MEMO_TAG[f] + " " + text);
+  }
+  // One implementation of "put this in the composer", shared by the per-box button and
+  // the fill-both one — the "never eat a half-written draft" rule should not exist in
+  // two copies that can drift.
+  function memoPutInInput(line) {
     const cur = inputEl.value;
-    // Never eat a half-written draft. The memo goes in FRONT, because send() reads the
-    // leading tag to know a memo was actually sent; the draft follows it.
+    // The memo goes in FRONT, because send() reads the leading tag to know a memo was
+    // actually sent; whatever you had half-written follows it.
     inputEl.value = cur.trim() ? line + "\n" + cur : line;
     inputEl.dispatchEvent(new Event("input"));        // autogrow + per-tab draft save
     memoModal.classList.remove("show");
@@ -3643,7 +3802,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (memoDirty) { memoRender(); memoMark(false); }   // discarded → back to the stored copy
   }
   document.getElementById("memo-close").addEventListener("click", memoDismiss);
-  memoModal.addEventListener("click", (e) => { if (e.target === memoModal) memoDismiss(); });
+  // Clicking "outside" may only do things that cost nothing. Since this card went
+  // full-screen the backdrop is a FOUR PIXEL frame (measured: 4px on every side of a
+  // 1272x706 card) — and it was wired to "discard your unsaved changes?". Reaching for
+  // the window edge, or a slightly off click on the way to ✕, put that dialog in front
+  // of someone who was in the middle of typing. Reported, and it is a trap regardless
+  // of whether that is exactly what happened. So: while there is something unsaved, a
+  // backdrop click does NOTHING; ✕ still asks, because ✕ is a deliberate act.
+  memoModal.addEventListener("click", (e) => {
+    if (e.target !== memoModal) return;
+    if (memoDirty) { memoSavedEl.textContent = "未保存… (点「保存」或 ✕)"; return; }
+    memoModal.classList.remove("show");
+  });
   const mmMemo = document.getElementById("mm-memo");
   if (mmMemo) mmMemo.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -3651,26 +3821,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     modeMenu.style.display = "none";
     memoLoad(attachedSid, memoVerSeen);   // open on the server's copy, not a stale one
     checkLoad(attachedSid, checkVerSeen);
+    // Folded, explicitly. The class lives on the element, so without this a modal
+    // previously opened via `view run` would still be unfolded — and the two buttons
+    // would go back to being indistinguishable, which is how they looked.
+    memoCheckSec.classList.remove("show");
     memoModal.classList.add("show");
     if (!isPhone()) setTimeout(() => memoTA.task.focus(), 50);
   });
 
-  // Second button on the Task row: the same modal, opened with the report already
-  // unfolded. Not a second modal — the report is only meaningful beside the intent it
-  // was checked against, so there is one place, reached two ways.
-  const mmCheck = document.getElementById("mm-check");
-  if (mmCheck) mmCheck.addEventListener("click", async (e) => {
-    e.stopPropagation();
-    if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
-    modeMenu.style.display = "none";
-    memoLoad(attachedSid, memoVerSeen);
-    await checkLoad(attachedSid, checkVerSeen);
-    memoModal.classList.add("show");
-    if (checkRec && checkRec.exists) {
-      memoCheckDetail.classList.add("show");
-      memoCheckDetail.scrollIntoView({ block: "nearest" });
-    }
-  });
+  // `view run` used to be a second button on this row: the same window, opened with
+  // the report already unfolded. It is gone — three buttons for two windows — and the
+  // report is reached by the 自检 button inside the Task window instead.
 
   // run — start a self-check. Fills the composer with the trigger and stops there,
   // the same gesture as 填入输入框: you may want to add "look hard at the deploy one"
@@ -3681,46 +3842,34 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // being installed, on the server's copy being current, or on the session going and
   // reading anything: what you are looking at is what gets asked about. Fill only,
   // never send, like everything else on this panel.
-  const MEMO_ASK = {
-    check: "请据此检查当前任务.",
-    periodic: "请启动每 30分钟执行一次的watcher 来监督保证任务完成. " +
-              "任务完成后, watcher 就可以撤掉. 如果已经有这样watcher, 则是替换它.",
-  };
-  function memoContent(scope) {
+  // Appended to the filled-in text when the checkbox is ticked. It asks the SESSION to
+  // run its own watcher — which is what this always did, though a button labelled
+  // "set periodic check" read as though cc-web would.
+  const MEMO_WATCHER_ASK =
+    "请启动每 30分钟执行一次的watcher 来监督保证任务完成. " +
+    "任务完成后, watcher 就可以撤掉. 如果已经有这样watcher, 则是替换它.";
+  // Both boxes into the composer, tagged the same way the per-box button tags its own.
+  // No "请据此检查当前任务" appended any more: three buttons all saying `run check`,
+  // differing only by which row they stood in, was the design. Filling the box and
+  // letting you write the sentence you actually meant is one button and no guessing.
+  function memoToInputBoth() {
     const t = (memoTA.task.value || "").trim(), n = (memoTA.notes.value || "").trim();
-    if (scope === "task") return t;
-    if (scope === "notes") return n;
-    // Both: label them, because "these two things" is only readable if it says which
-    // is which. One empty → no label needed, it is unambiguous again.
-    if (t && n) return "当前任务:\n" + t + "\n\n注意事项(与当前任务无关, 长期有效):\n" + n;
-    return t || n;
+    if (!attachedSid || (!t && !n)) return;
+    const parts = [];
+    if (t) parts.push(MEMO_TAG.task + " " + t);
+    if (n) parts.push(MEMO_TAG.notes + " " + n);
+    const cb = document.getElementById("memo-watcher");
+    if (cb && cb.checked) parts.push(MEMO_WATCHER_ASK);
+    memoPutInInput(parts.join("\n\n"));
   }
-  function memoAsk(kind, scope) {
-    const body = memoContent(scope);
-    if (!attachedSid || !body) return;                 // empty box → nothing to ask about
-    const line = "```\n" + body + "\n```\n" + MEMO_ASK[kind];
-    const cur = inputEl.value;
-    inputEl.value = cur.trim() ? line + "\n" + cur : line;
-    inputEl.dispatchEvent(new Event("input"));
-    memoModal.classList.remove("show");
-    if (!isPhone()) inputEl.focus();
-  }
-  for (const [id, kind, scope] of [["memo-runcheck-both", "check", "both"],
-                                   ["memo-periodic", "periodic", "both"],
-                                   ["memo-task-runcheck", "check", "task"],
-                                   ["memo-notes-runcheck", "check", "notes"]]) {
-    const b = document.getElementById(id);
-    if (b) b.addEventListener("click", (e) => { e.stopPropagation(); memoAsk(kind, scope); });
-  }
-  // Nothing in the box → nothing to ask about, and a button that silently does nothing
-  // is worse than one that shows it cannot.
+  document.getElementById("memo-fill-both")
+    .addEventListener("click", (e) => { e.stopPropagation(); memoToInputBoth(); });
+  // Nothing in either box → nothing to fill in, and a button that silently does
+  // nothing is worse than one that shows it cannot.
   function memoAskBtns() {
     const t = (memoTA.task.value || "").trim(), n = (memoTA.notes.value || "").trim();
-    const set = (id, on) => { const b = document.getElementById(id); if (b) b.disabled = !on; };
-    set("memo-runcheck-both", !!(t || n));
-    set("memo-periodic", !!(t || n));
-    set("memo-task-runcheck", !!t);
-    set("memo-notes-runcheck", !!n);
+    const b = document.getElementById("memo-fill-both");
+    if (b) b.disabled = !(t || n);
   }
 
   const mmRun = document.getElementById("memo-run");
@@ -3742,21 +3891,68 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const watchModal = document.getElementById("watch-modal");
   const watchPolicy = document.getElementById("watch-policy");
   const watchStateEl = document.getElementById("watch-state");
-  const watchToggleBtn = document.getElementById("watch-toggle");
-  const watchLogEl = document.getElementById("watch-log");
-  const watchLogWhen = document.getElementById("watch-log-when");
-  const mmWatchToggle = document.getElementById("mm-watch-toggle");
+  const watchOnBtn = document.getElementById("watch-on");
+  const watchOffBtn = document.getElementById("watch-off");
+  const mmWatchHint = document.getElementById("mm-watch-hint");
+  const watchLeftEl = document.getElementById("watch-left");
   let watchDirty = false;
   function watchSup() { return (memoRec && memoRec.supervisor) || { enabled: false, policy: "" }; }
+  // Which button in each of the three rows is the live one. A pure function because the
+  // page script is one big IIFE — nothing inside is reachable from a browser test — so
+  // this is the only way the logic gets driven rather than eyeballed.
+  //
+  // `hours` comes from the STORED choice, not from the deadline: the deadline is an
+  // absolute timestamp and cannot say which button produced it. The first version
+  // compared against the timestamp, so only 不限 could ever light up and every real
+  // expiry showed as nothing selected — which is exactly how it looked on screen.
+  //
+  // `on` comes from ARMED, not from `enabled`: an expired watcher is not a running one,
+  // and that distinction is the entire reason the expiry exists.
+  function watchMarks(sup, armed) {
+    const s = sup || {};
+    const h = parseFloat(s.hours || 0) || 0;
+    const p = parseFloat(s.period_min || 0) || 0;
+    return { hours: h > 0 ? h : NaN, period: p, on: !!armed };
+  }
   function watchRender() {
     const sup = watchSup();
     if (document.activeElement !== watchPolicy && !watchDirty) watchPolicy.value = sup.policy || "";
     const armed = !!(memoRec && memoRec.watched);
-    watchStateEl.textContent = watchDirty ? "未保存…" : (armed ? "已开启" : (sup.policy ? "已写策略, 未开启" : "未设置"));
-    watchToggleBtn.textContent = sup.enabled ? "关闭" : "开启";
-    // The ⚙ row carries it too: which sessions have something watching them should be
-    // answerable without opening anything.
-    if (mmWatchToggle) mmWatchToggle.textContent = armed ? "开" : "关";
+    // All three rows' marks come from one call, declared here because it is used above
+    // the cadence rows as well — a `const` used before its declaration is a
+    // ReferenceError at RUN time, and `node --check` cannot see it.
+    const mk = watchMarks(sup, armed);
+    watchStateEl.textContent = watchDirty ? "未保存…"
+      : (armed ? "已开启" : (sup.policy ? "已写策略, 未开启" : "未开启"));
+    // The on/off state lives on the buttons, marked like the two cadence rows.
+    watchOnBtn.classList.toggle("wt-on", mk.on);
+    watchOffBtn.classList.toggle("wt-on", !mk.on);
+    // Remaining time, in the window and on the ⚙ row. An expired watcher is not the
+    // same thing as one that was switched off, and reading "已过期" is how you find
+    // out it stopped without anything having pinged you about it.
+    const left = (memoRec || {}).watch_remaining;
+    const expired = !!(memoRec || {}).watch_expired;
+    if (watchLeftEl) {
+      watchLeftEl.textContent = !sup.enabled ? ""
+        : expired ? "已过期 —— 点一个时长续命"
+        : left == null ? "不限(旧设置)"       // nothing can choose this any more
+        : "还有 " + (left >= 3600 ? Math.floor(left / 3600) + "h" + String(Math.floor(left % 3600 / 60)).padStart(2, "0")
+                                  : Math.max(1, Math.ceil(left / 60)) + " 分钟");
+    }
+    // Which expiry/period is in force, marked on the buttons themselves. Nine buttons
+    // with no indication of the current one is a row of guesses — and the period in
+    // particular has no other place it shows up.
+    for (const b of document.querySelectorAll("#watch-modal .wt-h")) {
+      b.classList.toggle("wt-on", parseFloat(b.dataset.h) === mk.hours);
+    }
+    for (const b of document.querySelectorAll("#watch-modal .wt-p")) {
+      b.classList.toggle("wt-on", parseFloat(b.dataset.p) === mk.period);
+    }
+    if (mmWatchHint) {
+      mmWatchHint.textContent = armed
+        ? (left == null ? "开·不限" : "开·" + (left >= 3600 ? Math.floor(left / 3600) + "h" : Math.ceil(left / 60) + "m"))
+        : (expired ? "已过期" : (sup.policy ? "有策略未开" : "关"));
+    }
   }
   async function watchPost(body) {
     if (!attachedSid) return false;
@@ -3772,63 +3968,97 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       return false;
     }
     memoRec = await r.json(); memoVerSeen = -1;
-    watchDirty = false; watchRender(); memoRender(); memoVerRender();
+    watchDirty = false; watchRender(); memoRender();
     return true;
   }
-  async function watchLoadLog() {
-    if (!attachedSid) return;
-    try {
-      const r = await authedFetch("/api/watch-log?lines=12&claude_session_id="
-                                  + encodeURIComponent(attachedSid));
-      if (!r.ok) return;
-      const es = (await r.json()).entries || [];
-      watchLogWhen.textContent = es.length ? (es.length + " 条") : "";
-      // Newest first — what it did last is the thing you came to check.
-      watchLogEl.innerHTML = es.length ? es.slice().reverse().map((e) => {
-        const cls = e.action === "nudge" ? "wl-nudge" : e.action === "escalate" ? "wl-esc" : "wl-act";
-        return `<div class="wl-row"><span class="${cls}">${_escHtml(e.action || "?")}</span>`
-          + `<span class="mc-stale"> ${_escHtml((e.at || "").replace("T", " ").slice(5, 16))}</span>`
-          + ` ${_escHtml(e.why || "")}`
-          + (e.text ? `<div class="mc-ev">${_escHtml(e.text)}</div>` : "")
-          + (e.progress != null ? `<div class="mc-ev">之后有进展: ${e.progress ? "有" : "没有"}</div>` : "")
-          + "</div>";
-      }).join("") : '<span class="mc-stale">它还没做过什么</span>';
-    } catch {}
-  }
+  // The "最近动作" pane is gone from this window — asked for directly, and it was the
+  // one thing here that was about auditing rather than setting. /api/watch-log still
+  // records everything the watcher does; nothing renders it in the Watch window.
   watchPolicy.addEventListener("input", () => { watchDirty = true; watchRender(); });
-  document.getElementById("watch-save").addEventListener("click", async () => {
-    await watchPost({ supervisor_policy: watchPolicy.value });
+  const watchSaveBtn = document.getElementById("watch-save");
+  watchSaveBtn.addEventListener("click", async () => {
+    watchSaveBtn.textContent = "保存中…";
+    const ok = await watchPost({ supervisor_policy: watchPolicy.value });
+    watchSaveBtn.textContent = ok ? "✓ 已保存" : "保存失败";
+    if (ok) {
+      watchStateEl.textContent = "✓ 刚刚保存";
+      setTimeout(() => { if (!watchDirty) { watchSaveBtn.textContent = "保存"; watchRender(); } }, 2500);
+    }
   });
-  watchToggleBtn.addEventListener("click", async () => {
-    const sup = watchSup();
-    // Turning it ON also saves whatever is in the box: arming a policy you can see but
-    // that was never stored is the kind of gap that looks like it worked.
-    await watchPost(sup.enabled ? { supervisor_enabled: false }
-                                : { supervisor_policy: watchPolicy.value, supervisor_enabled: true });
+  // 开: also saves whatever is in the box. Arming a policy you can see but that was
+  // never stored is the kind of gap that looks like it worked. An empty policy is fine
+  // — the defaults are complete and what the watcher actually needs is the Task.
+  watchOnBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    await watchPost({ supervisor_policy: watchPolicy.value, supervisor_enabled: true });
+  });
+  // 关 is idempotent on purpose: pressing it while already off is a no-op rather than a
+  // toggle back on, which is the failure mode a single button had.
+  watchOffBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    await watchPost({ supervisor_enabled: false });
   });
   document.getElementById("watch-close").addEventListener("click", () => {
     if (watchDirty && !confirm("策略有未保存的改动 —— 放弃?")) return;
     watchDirty = false; watchModal.classList.remove("show"); watchRender();
   });
   watchModal.addEventListener("click", (e) => {
-    if (e.target === watchModal) document.getElementById("watch-close").click();
+    if (e.target !== watchModal) return;
+    if (watchDirty) { watchStateEl.textContent = "未保存… (点「保存」或 ✕)"; return; }
+    watchModal.classList.remove("show");
   });
   function watchOpen() {
     if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
     modeMenu.style.display = "none";
     memoLoad(attachedSid, memoVerSeen).then(() => { watchRender(); });
-    watchLoadLog();
     watchModal.classList.add("show");
   }
   document.getElementById("mm-watch").addEventListener("click", (e) => { e.stopPropagation(); watchOpen(); });
-  if (mmWatchToggle) mmWatchToggle.addEventListener("click", async (e) => {
-    e.stopPropagation();
-    if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
-    const sup = watchSup();
-    if (!sup.enabled && !(sup.policy || "").trim()) { watchOpen(); return; }   // nothing to arm yet
-    modeMenu.style.display = "none";
-    await watchPost({ supervisor_enabled: !sup.enabled });
-  });
+  // Renew / change the window. Also arms it if it was expired — that is what you came
+  // to the button for, and making you press two things to resume would be silly.
+  for (const b of document.querySelectorAll("#watch-modal .wt-h")) {
+    b.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const h = parseFloat(b.dataset.h);
+      const sup = watchSup();
+      await watchPost(sup.enabled ? { supervisor_hours: h }
+                                  : { supervisor_policy: watchPolicy.value,
+                                      supervisor_hours: h, supervisor_enabled: true });
+    });
+  }
+  // How often it asks THIS session. Same arming behaviour as the expiry buttons: if the
+  // watcher is off, setting a period turns it on with whatever is in the box — you came
+  // to the button to make it watch, and needing a second tap for that would be silly.
+  for (const b of document.querySelectorAll("#watch-modal .wt-p")) {
+    b.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const pm = parseFloat(b.dataset.p);
+      const sup = watchSup();
+      await watchPost(sup.enabled ? { supervisor_period_min: pm }
+                                  : { supervisor_policy: watchPolicy.value,
+                                      supervisor_period_min: pm, supervisor_enabled: true });
+    });
+  }
+
+  // ---- A- / A+ for the policy box (same deal as the Task window) ----
+  const WATCH_FS_MIN = 11, WATCH_FS_MAX = 26;
+  let watchFs = parseInt(localStorage.getItem("ccweb.watchFs") || "", 10);
+  if (!(watchFs >= WATCH_FS_MIN && watchFs <= WATCH_FS_MAX)) watchFs = 13;
+  function watchApplyFs() {
+    const card = document.querySelector("#watch-modal .watch-card");
+    if (card) card.style.setProperty("--memo-fs", watchFs + "px");
+    const dn = document.getElementById("watch-fontdn"), up = document.getElementById("watch-fontup");
+    if (dn) dn.disabled = watchFs <= WATCH_FS_MIN;
+    if (up) up.disabled = watchFs >= WATCH_FS_MAX;
+  }
+  function watchStepFs(d) {
+    watchFs = Math.max(WATCH_FS_MIN, Math.min(WATCH_FS_MAX, watchFs + d));
+    try { localStorage.setItem("ccweb.watchFs", String(watchFs)); } catch {}
+    watchApplyFs();
+  }
+  document.getElementById("watch-fontdn").addEventListener("click", (e) => { e.stopPropagation(); watchStepFs(-1); });
+  document.getElementById("watch-fontup").addEventListener("click", (e) => { e.stopPropagation(); watchStepFs(1); });
+  watchApplyFs();
 
   const mmExitClose = document.getElementById("mm-exit-close");
   if (mmExitClose) mmExitClose.addEventListener("click", async (e) => {
@@ -10286,7 +10516,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // A memo counts as sent when it is SENT, not when it was dropped into the box —
         // and this way a reminder typed by hand counts too, since the tag is all it reads.
         const mtag = Object.keys(MEMO_TAG).find((k) => body.startsWith(MEMO_TAG[k]));
-        if (mtag) memoPost({ mark_sent: mtag, version: memoEditing || undefined });
+        if (mtag) memoPost({ mark_sent: mtag });
         inputEl.value = ""; inputEl.style.height = "auto";
         pendingUploads = []; renderUploadRow();
         keepAlive(); schedulePoll(400);
@@ -10321,8 +10551,35 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
     document.body.appendChild(ta); ta.select(); try { document.execCommand("copy"); } catch {} ta.remove();
   }
-  function _useInInput(text) {   // replace the whole input with the chosen text (ASR popup)
-    inputEl.value = text; inputEl.style.height = "auto";
+  // Joining what was already in the box to what you just dictated. `before` arrives
+  // with one trailing space (added when recording started, before anything was known
+  // about the new text) — right between two English words, wrong between two Chinese
+  // ones, where it reads as "分量, 并把". So the separator is decided here, at the
+  // moment both sides are known. Used by EVERY join, including the equality check that
+  // decides whether the polished version may replace the raw one: two different join
+  // rules would make that comparison fail and silently drop the polish.
+  const _CJK = /[\u3400-\u9fff\u3040-\u30ff]/;
+  // Which language sits at the seam is decided by the last/first LETTER, not the last
+  // character: Chinese text very often ends on ASCII punctuation ("加了四个分量,"), and
+  // testing the comma made this think it was looking at English and keep the space.
+  const _seamCJK = (s, fromEnd) => {
+    const t = (s || "").replace(/[\s\p{P}\p{S}]+/gu, fromEnd ? "" : "");
+    return _CJK.test(fromEnd ? t.slice(-1) : t.slice(0, 1));
+  };
+  function _joinDict(before, add) {
+    const b = before || "", a = add || "";
+    if (!b) return a;
+    if (!a) return b;
+    if (/\s$/.test(b) && _seamCJK(b, true) && _seamCJK(a, false)) {
+      return b.trimEnd() + a;          // Chinese on both sides: no space at the seam
+    }
+    return b + a;
+  }
+  function _useInInput(text) {   // swap in the chosen variant (ASR popup) — keeping the prefix
+    // NOT `inputEl.value = text`: if you dictated with something already in the box, the
+    // dictation was appended to it, and replacing the whole box here would throw that
+    // away. The variant being chosen is only ever the NEW part.
+    inputEl.value = _joinDict(lastAsrBefore, text); inputEl.style.height = "auto";
     inputFromVoice = true;   // ASR-originated → no grammar correction on send
     inputEl.dispatchEvent(new Event("input"));
     inputEl.focus();
@@ -10361,7 +10618,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         const t0 = Date.now();
         const pr = await authedFetch("/api/polish", {
           method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ text: lastAsrRaw, claude_session_id: attachedSid || "", mode: "asr", conservative: true }),
+          body: JSON.stringify({ text: lastAsrRaw, claude_session_id: attachedSid || "", mode: "asr",
+                                 conservative: true, before: lastAsrBefore || "" }),
           timeoutMs: 60000,
         });
         const sec = ((Date.now() - t0) / 1000).toFixed(1);
@@ -10398,10 +10656,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
       // Post the ONE field: the endpoint leaves the other alone, so this cannot
       // clobber whatever is in the other box (which may not even be loaded here).
-      // Through the composer means a NEW version, per the panel's rule: the boxes are
-      // edited in place, and anything arriving from outside is a turn the work took.
-      const ok = await memoPost(field === "task" ? { fork: true, task: text }
-                                                 : { fork: true, notes: text });
+      // (This used to fork a new version when the text arrived from the composer. There
+      // are no versions any more — it overwrites, like every other edit.)
+      const ok = await memoPost(field === "task" ? { task: text } : { notes: text });
       if (!ok) { alert("保存失败"); return; }
       inputEl.value = ""; inputEl.style.height = "auto"; inputEl.dispatchEvent(new Event("input"));
       await memoLoad(attachedSid, memoVerSeen);   // read back the stored copy
@@ -10521,12 +10778,25 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // ---------- voice input: record → ASR → polish → fill ----------
   const micBtn = document.getElementById("mic-btn");
   let _recording = false;
+  // getUserMedia is in flight. The bar goes up BEFORE the mic is asked for, so this is
+  // what the bar's buttons act on during the gap, and what a second tap on 🎤 cancels.
+  let _micArming = null;
+  let lastMicOpenMs = null;   // how long the mic actually took, for the ⚙ debug view
+  // Long enough to tap "Allow" on a first-time permission prompt (the OS dialog is
+  // what you are looking at then, not this bar), short enough that a device which is
+  // never going to open says so instead of spinning.
+  const MIC_OPEN_MAX_MS = 12000;
   // Absolute recording ceiling, shared by BOTH voice paths so they can't drift apart.
   // It used to live inside the realtime capture loop only, so a batch recording had no
   // limit at all — a pocket-tap on 🎤 kept recording until the blob was too big to
   // upload (and the whole thing then failed at the end, with everything lost).
   const VOICE_MAX_MS = 300000;   // 5 min
   let lastAsrRaw = "", lastPolished = "", lastAsrSec = null, lastPolishSec = null;   // long-press debug view
+  // What was in the box when this dictation started. Kept beside the raw text because
+  // both the re-polish call and the popup's "use this" need it: the dictation was
+  // APPENDED to it, so anything that rebuilds the box from a chosen variant has to put
+  // it back or it silently eats what you had already written.
+  let lastAsrBefore = "";
   let asrConfigs = [], asrWhich = localStorage.getItem("cc_asr_which") || "";
   let asrRtAvail = false, sonioxAvail = false, realtimeEngines = [], asrRtEngine = localStorage.getItem("cc_asr_rt_engine") || "", asrRt = localStorage.getItem("cc_asr_rt") === "1";   // realtime (streaming) ASR
   // (realtime-voice session state lives in Voice.s — see the Voice module below)
@@ -10721,6 +10991,30 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     clearInterval(_recTimer);
     _recTimer = setInterval(() => { recTimeEl.textContent = _fmtDur(Date.now() - _recStartMs); }, 250);
   }
+  // The bar during the opening gap: EVERY button already in place, the ones that need
+  // audio disabled until there is any. Laid out in full on purpose — buttons appearing
+  // one after another a second later is its own kind of "did that work?", and a row that
+  // changes width under your thumb is worse than one that starts complete.
+  function _recArmBar() {
+    recBar.classList.add("rec-arming");
+    [recCancelEl, recStopEl, recEditEl, recSendEl, recPauseEl].forEach(b => b && (b.style.display = ""));
+    // Cancel is the only thing that can mean anything yet — nothing has been captured,
+    // so there is nothing to stop, pause, edit or send.
+    [recStopEl, recEditEl, recSendEl, recPauseEl].forEach(b => {
+      if (!b) return;
+      b.disabled = true;
+      b.title = "麦克风还在打开…";
+    });
+    if (recStopEl) recStopEl.textContent = "Polish";
+    // No wave: those bars animate as though sound were arriving, and nothing is being
+    // captured until the device opens. Voice.start() turns it on when that is true.
+    if (recWaveEl) recWaveEl.style.display = "none";
+    // Said plainly instead of faking a live recording. Audio does not exist until the
+    // device opens, so words spoken in this gap are genuinely lost — being told not to
+    // start yet beats finding them missing afterwards.
+    _recLiveStatus("正在打开麦克风…(先别说话)");
+  }
+
   // ----- "stopped, and here's why" state -----
   // Every abnormal end funnels through here instead of hiding the popup. Rules:
   //   1. the popup STAYS until the user acts — a bar that disappears by itself
@@ -10732,6 +11026,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   let _voiceParkReason = "";
   function _showVoiceNotice(reason, raw) {
     recBar.style.display = "flex"; recBar.classList.add("rec-live-on");
+    recBar.classList.remove("rec-arming");
     if (recWaveEl) recWaveEl.style.display = "none";
     [recCancelEl, recStopEl, recEditEl, recSendEl].forEach(b => b && (b.style.display = ""));
     if (recPauseEl) recPauseEl.style.display = "none";   // recording is over — nothing to pause
@@ -10759,6 +11054,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     _showVoiceNotice(reason, raw);
   }
   function _hideRecBar() {
+    recBar.classList.remove("rec-arming");
     clearInterval(_recTimer); _recTimer = null;
     _recPolishStop();          // the "finishing"/"Polish" counter must not outlive the bar
     _recClearStatus();
@@ -10793,6 +11089,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 
   async function _voiceStop(mode) {   // mode = "polish" | "edit" | "send"
     mode = mode || "polish";
+    // Nothing has been captured yet — there is nothing to polish or send, so every
+    // button on the bar means "never mind" during the opening gap.
+    if (_micArming) { _voiceCancel(); return; }
     // A polish request is out. The buttons stay live: the raw transcript is already
     // in the input box, so Send submits it as-is and Edit just hands it over — both
     // abort the request first so a late reply can't overwrite the user's choice.
@@ -10807,6 +11106,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (_batchResult) { const r = _batchResult; _batchResult = null; await Voice.apply(r.raw, r.before, mode); return; }   // a parked result → act on it
   }
   async function _voiceCancel() {   // discard
+    // Cancelled while the mic is still opening. The getUserMedia promise cannot be
+    // aborted, so it is flagged and the stream released the moment it arrives —
+    // otherwise the device stays open with nothing using it.
+    if (_micArming) { _micArming.cancelled = true; _micArming = null; _setMic("idle"); return; }
     // Cancel during polish = discard, same as everywhere else: drop the request and
     // restore the box to what was in it before dictation. Read _polCtx BEFORE the
     // abort — polish()'s finally clears it.
@@ -10861,7 +11164,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           recLiveEl.textContent = "";
         }
       }
-      inputEl.value = s.before + full; inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
+      inputEl.value = _joinDict(s.before, full); inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
     },
     teardown() {   // tear down everything incl. the mic stream + recorder
       const s = Voice.s; if (!s) return;
@@ -11211,6 +11514,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       _setMic("busy");
       _recPolishStart();   // spinner + counting seconds in the time slot until this returns
       lastAsrRaw = raw; lastAsrSec = null; lastPolishSec = null; lastPolished = "";
+      lastAsrBefore = before || "";
       // Own the abort so the bar's buttons can cut the wait short. authedFetch only
       // applies its own timeoutMs when the caller passes no signal, so keep the 60s
       // ceiling here.
@@ -11226,9 +11530,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       try {
         const polT0 = Date.now();
         const pr = await authedFetch("/api/polish", { method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ text: raw, claude_session_id: attachedSid || "", mode: "asr" }), signal: ctrl.signal });
+          body: JSON.stringify({ text: raw, claude_session_id: attachedSid || "", mode: "asr",
+                                 before: before || "" }), signal: ctrl.signal });
         lastPolishSec = ((Date.now() - polT0) / 1000).toFixed(1);
-        if (pr.ok) { const d = await pr.json(); if (d && d.text) { lastPolished = d.text; if (inputEl.value === before + raw) { inputEl.value = before + d.text; inputEl.dispatchEvent(new Event("input")); } } }
+        if (pr.ok) { const d = await pr.json(); if (d && d.text) { lastPolished = d.text; if (inputEl.value === _joinDict(before, raw)) { inputEl.value = _joinDict(before, d.text); inputEl.dispatchEvent(new Event("input")); } } }
         else if (pr.status === 503) failReason = "not polished — no LLM configured";
         else failReason = "not polished — HTTP " + pr.status;
       } catch (e) {
@@ -11250,17 +11555,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     },
     apply(raw, before, mode) {   // put text in the box, then act by mode (both ⚙ modes)
       lastAsrRaw = raw || ""; lastAsrSec = null;   // long-press debug view: what the ASR returned
+      lastAsrBefore = before || "";
       // "park": an auto-stop (5-min cap) — don't decide for the user. Text goes in
       // the box AND the popup stays open with the reason + Polish/Edit/Send/Cancel.
       if (mode === "park") {
         const reason = _voiceParkReason || "录音已自动停止";
         _voiceParkReason = "";
-        if (raw) { inputEl.value = before + raw; inputFromVoice = true; inputEl.dispatchEvent(new Event("input")); }
+        if (raw) { inputEl.value = _joinDict(before, raw); inputFromVoice = true; inputEl.dispatchEvent(new Event("input")); }
         _voiceParkResult(raw, before, reason);
         return;
       }
       if (!raw) { _setMic("idle"); return; }
-      inputEl.value = before + raw; inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
+      inputEl.value = _joinDict(before, raw); inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
       if (mode === "send") { _setMic("idle"); send(); return; }
       if (mode === "edit") { _setMic("idle"); if (!isPhone()) inputEl.focus(); return; }
       return Voice.polish(raw, before);
@@ -11439,6 +11745,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         }));
       } catch {}
       _recording = true; _setMic("rec"); inputFromVoice = true;
+      // Whatever _recArmBar() disabled while the device was opening. Re-enabled here
+      // rather than in _showRecBar, so it is tied to audio actually existing: this line
+      // runs at the instant capture starts.
+      [recStopEl, recEditEl, recPauseEl].forEach(b => { if (b) { b.disabled = false; b.title = ""; } });
       recBar.classList.add("rec-live-on");               // full-width transcript row, grow upward
       // Capture FIRST, connect after. We are genuinely listening from this instant,
       // so the wave shows straight away — it used to stay hidden until the socket was
@@ -11448,8 +11758,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       Voice.startCapture();
       if (recWaveEl) recWaveEl.style.display = "";
       if (recLiveEl) recLiveEl.style.display = "";
+      // "你可以有个地方提醒我什么时候 ready" — the moment audio starts existing, say so.
+      // It is a distinct line rather than a colour change because the thing it replaces
+      // ("先别说话") was also words, and the pair has to read as a state changing.
+      recBar.classList.remove("rec-arming");     // dot goes red: audio exists from here
       if (batchOnly) Voice.paintBatchOnly("");   // says which mode this is + when text arrives
-      else _recLiveStatus("recording — connecting ASR…");
+      else _recLiveStatus("🎙 可以说了 — 正在连接识别服务…");
       if (recPauseEl) { recPauseEl.style.display = ""; }   // ⏸ pause / ▶ resume
       _syncPauseBtn();
       if (recSendEl) {
@@ -11468,17 +11782,75 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     },
   };
   micBtn.addEventListener("click", async () => {
+    // Tapped again while the mic is still opening: IGNORE it. Impatient double-taps are
+    // the whole reason this changed — "I thought it didn't register so I tapped a few
+    // times" — and making the second tap cancel would punish exactly that. Cancel stays
+    // where it is visible, on the bar's own Cancel button.
+    if (_micArming) return;
     if (_recording) { _voiceStop(); return; }
+    // ---- the bar goes up NOW, before the mic is asked for ----
+    // This used to `await getUserMedia()` first and reveal the bar afterwards, which
+    // made tapping 🎤 feel like it took anywhere from 200ms to two seconds. None of that
+    // was our code: opening a mic means enumerating devices, choosing one and starting
+    // the OS capture graph, and the browser charges for it even when permission was
+    // granted long ago. The work cannot be made faster — but the UI had no reason to be
+    // sequenced behind it.
+    const arm = _micArming = { cancelled: false };
+    _setMic("rec");
+    _recArmBar();
+    const t0 = Date.now();
+    // getUserMedia can hang indefinitely — it does exactly that when the OS permission
+    // prompt is pending and nothing ever answers it (found by a headless browser sitting
+    // in this state forever). Left alone, the bar stays on "正在打开麦克风…" with no way
+    // out but Cancel, which is the original complaint in a different costume. So: a hint
+    // at 3s naming the likely cause, and a cap that parks with something actionable.
+    // The promise cannot be aborted, hence the flag — a stream that turns up afterwards
+    // is released rather than quietly starting a recording nobody is expecting.
+    const hintT = setTimeout(() => {
+      if (_micArming === arm) _recLiveStatus("还在打开麦克风… 如果系统弹了麦克风权限,点「允许」");
+    }, 3000);
     let stream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await Promise.race([
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(st => {
+          if (arm.cancelled || _micArming !== arm) {      // timed out or cancelled: let go
+            st.getTracks().forEach(t => { try { t.stop(); } catch {} });
+            throw new DOMException("superseded", "AbortError");
+          }
+          return st;
+        }),
+        new Promise((_, rej) => setTimeout(() => {
+          if (_micArming === arm) { _micArming = null; rej(new DOMException("mic-open-timeout", "TimeoutError")); }
+        }, MIC_OPEN_MAX_MS)),
+      ]);
     } catch (e) {
-      alert("麦克风不可用: " + e.name + "。需通过 HTTPS 打开(getUserMedia 要 secure context)。");
+      clearTimeout(hintT);
+      if (e && e.name === "TimeoutError") {
+        _micArming = null;
+        _showVoiceNotice("麦克风 " + (MIC_OPEN_MAX_MS / 1000) + " 秒还没打开 —— 如果刚才"
+                         + "系统在问权限,允许之后再点一次 🎤;也可能有别的程序占着麦克风", "");
+        return;
+      }
+      if (e && e.name === "AbortError") { _micArming = null; return; }   // already handled
+      _micArming = null;
+      if (arm.cancelled) { _setMic("idle"); return; }
+      // Parked with the reason, not an alert(): every other dead end in this popup
+      // behaves that way, and an alert on a phone hides the thing it is talking about.
+      _showVoiceNotice("麦克风打不开: " + e.name
+                       + " —— 本页要用 HTTPS 打开(getUserMedia 需要 secure context)", "");
+      return;
+    }
+    clearTimeout(hintT);
+    lastMicOpenMs = Date.now() - t0;
+    _micArming = null;
+    if (arm.cancelled) {                 // cancelled during the gap: release the device
+      stream.getTracks().forEach(t => { try { t.stop(); } catch {} });
+      _setMic("idle");
       return;
     }
     // One path, two modes: batchOnly when the ⚙ switch says 🎤 batch (or no realtime
-    // engine is configured at all). The ~40 lines of a separate _mediaRec pipeline that
-    // used to live here are gone — see Voice.start().
+    // engine is configured at all). start() re-shows the bar, which also restarts the
+    // clock — so the seconds count real captured audio, not the time spent opening.
     Voice.start(stream, !(asrRt && asrRtAvail));
   });
 
@@ -11674,6 +12046,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       e.preventDefault();
       await uploadFiles(files);
     }
+  });
+  document.getElementById("jump-prev-ask").addEventListener("click", (e) => {
+    e.stopPropagation();   // in the tail-controls pill → don't toggle auto-refresh
+    hideAsksMenu();        // tapping ↑ with the list open means "just step", not both
+    jumpUserRequest(-1);   // the same call the `u` key makes — one behaviour, one place
   });
   document.getElementById("jump-asks").addEventListener("click", (e) => {
     e.stopPropagation();

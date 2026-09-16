@@ -52,6 +52,13 @@ def main():
     cap = re.search(r"const VOICE_MAX_MS = (\d+);", src)
     if not cap:
         print("  FAIL  VOICE_MAX_MS is gone — the two modes can drift apart again"); return 1
+    # The join between "what was already in the box" and "what you just dictated" is
+    # pulled out of the page too, rather than copied here: every insertion AND the
+    # equality check that lets a polished version replace the raw one go through it, so a
+    # copy that drifted would leave the real seam untested while this file stayed green.
+    jm = re.search(r"\n  (const _CJK = .*?\n  function _joinDict\(before, add\) \{.*?\n  \})\n", src, re.S)
+    if not jm:
+        print("  FAIL  _joinDict is gone from static/index.html"); return 1
 
     js = r"""
 const VOICE_MAX_MS = __CAP__;
@@ -73,7 +80,8 @@ const recBar = { style: {}, classList: { add() {}, remove() {}, toggle() {} } };
 const inputEl = { value: "", focus() {}, dispatchEvent() {} };
 let _recStatusHtml = "", _recording = false, inputFromVoice = false, _voiceParkReason = "";
 let _batchResult = null, _polAbort = null, _polCtx = null, _polSuperseded = false;
-let lastAsrRaw = "", lastPolished = "", lastAsrSec = null, lastPolishSec = null;
+let lastAsrRaw = "", lastPolished = "", lastAsrSec = null, lastPolishSec = null, lastAsrBefore = "";
+__JOIN__
 let asrRtEngine = "soniox", sonioxAvail = true, asrWhich = "whisper-big", attachedSid = "sid1", authToken = "t";
 const isPhone = () => false;
 const micStates = [], parked = [], sent = [], fetches = [], spins = [];
@@ -279,7 +287,11 @@ check("a stream IS opened", sockets.length === 1 && /asr-stream/.test(sockets[0]
 check("...with the chosen engine", sockets[0].url.includes("provider=soniox"));
 check("the session is not batch-only", Voice.s.batchOnly === false && Voice.s.dropped === false);
 check("Send waits for the first realtime token", recSendEl.disabled === true);
-check("the bar says it is connecting", /connecting ASR/.test(bar()), bar().slice(0, 60));
+// Two things in one line now, and both matter at this instant: capture has started
+// (so it says you may speak — the counterpart to the "先别说话" shown while the mic was
+// still opening) and the socket has not connected yet.
+check("the bar says you may speak now", /可以说了/.test(bar()), bar().slice(0, 60));
+check("...and that the recognizer is still connecting", /连接识别服务/.test(bar()), bar().slice(0, 60));
 check("realtime DOES buffer PCM while connecting", (feedAudio(2), Voice.s.pendBytes > 0));
 check("⏸ in realtime does NOT cut a segment (the stream is the transcriber)",
       (Voice.togglePause(), asrCalls() === 0 && recorders[0].pauses === 1));
@@ -294,10 +306,48 @@ await tick(100);
 check("it falls back to the batch engine", asrCalls() === 1);
 check("...and the words are not lost", inputEl.value === "POLISHED(recovered from the local clip)", inputEl.value);
 
+console.log("=== dictating into a box that already has text ===");
+// You can keep talking with a half-written message in the box: the new speech is
+// APPENDED, and the text already there is handed to /api/polish as context. Without
+// that context the new part was polished in isolation — no way to know the sentence was
+// left half-finished, which terms were already established, or what "那个" pointed at.
+check("_joinDict came out of the page, not a copy here", typeof _joinDict === "function");
+check("no space at a Chinese seam", _joinDict("加了四个分量, ", "并把 total 也输出") === "加了四个分量,并把 total 也输出",
+      _joinDict("加了四个分量, ", "并把 total 也输出"));
+check("...but the space stays between two English words",
+      _joinDict("fix the scorer ", "and rerun it") === "fix the scorer and rerun it",
+      _joinDict("fix the scorer ", "and rerun it"));
+check("...and between English and Chinese, where it belongs",
+      _joinDict("run the scorer ", "然后看结果") === "run the scorer 然后看结果");
+check("an empty box joins to nothing", _joinDict("", "说的话") === "说的话");
+
+inputEl.value = "我改了 scorer, 加了四个 reward 分量,";
+fetches.length = 0; asrQueue = ["然后把 total reward 也输出出来"];
+const s9 = Voice.start(null, true);
+await tick(); Voice.cutSegment(); await tick(60);
+await Voice.stop("polish"); await tick(200);
+const pol = fetches.filter(f => f.url.startsWith("/api/polish")).map(f => JSON.parse(f.opts.body));
+check("the polish call carries what was already in the box", pol.length === 1
+      && /我改了 scorer/.test(pol[0].before || ""), JSON.stringify(pol[0] || {}).slice(0, 90));
+check("...and only the NEW speech as the text to rewrite",
+      pol.length === 1 && !/我改了 scorer/.test(pol[0].text || ""), (pol[0] || {}).text);
+// The failure this guards: replacing the box instead of appending, which eats the
+// half-written message you were adding to.
+check("the existing text is still there", /^我改了 scorer, 加了四个 reward 分量/.test(inputEl.value), inputEl.value);
+check("...with the dictation after it", /POLISHED/.test(inputEl.value), inputEl.value);
+// The seam rule itself is covered by the unit cases above; what matters here is that
+// the insertion path goes THROUGH the helper rather than concatenating on its own. (The
+// stub polish returns "POLISHED(...)", which starts with a Latin letter, so a space at
+// this particular seam is the correct answer — asserting "no space" here was wrong.)
+check("...joined by the same helper, not by a second rule",
+      inputEl.value === _joinDict("我改了 scorer, 加了四个 reward 分量, ",
+                                  "POLISHED(然后把 total reward 也输出出来)"), inputEl.value);
+
 console.log(_fails.length ? "\nFAILED: " + _fails.join(", ") : "\nall pass");
 process.exit(_fails.length ? 1 : 0);
 """
-    js = js.replace("__VOICE__", voice).replace("__CAP__", cap.group(1))
+    js = (js.replace("__VOICE__", voice).replace("__CAP__", cap.group(1))
+            .replace("__JOIN__", jm.group(1)))
     # top-level await → .mjs
     with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False, encoding="utf-8") as fh:
         fh.write(js)

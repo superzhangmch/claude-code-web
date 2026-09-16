@@ -333,6 +333,409 @@ def main():
         drv.js("document.getElementById('picker-brief').click()")
         check("back to brief", drv.wait("document.querySelectorAll('#picker-list .brief-row').length") == 3)
 
+        print("=== ↑ in the float pill steps back one request ===")
+        # ↑/↓ were taken OUT of this pill once, in favour of ☰ (the list), on the
+        # grounds that stepping is worse than being shown your requests. True for "find
+        # the one I mean"; wrong for "the one just before this" — and stepping only ever
+        # existed as the `u` key, which a phone does not have.
+        #
+        # Driven in a real browser rather than asserted against the source, because what
+        # could break is not the function (`u` already used it) but the wiring and the
+        # layout: real heights, real scrollTop, real click dispatch. The transcript view
+        # needs an attached session, so the messages are injected — the button, the
+        # handler and the scrolling arithmetic are all still the real ones.
+        step = drv.js("""
+          const m = document.getElementById('main');
+          m.innerHTML = '';
+          for (let i = 0; i < 4; i++) {
+            const u = document.createElement('div');
+            u.className = 'msg user'; u.dataset.n = i; u.textContent = 'human ' + i;
+            u.style.height = '80px';
+            m.appendChild(u);
+            const a = document.createElement('div');
+            a.className = 'msg assistant'; a.style.height = '400px';
+            m.appendChild(a);
+          }
+          m.scrollTop = m.scrollHeight;                 // as if reading the latest
+          const before = m.scrollTop;
+          const base = () => m.getBoundingClientRect().top;
+          const atTop = () => {
+            let n = null;
+            m.querySelectorAll('.msg.user').forEach(x => {
+              if (Math.abs(x.getBoundingClientRect().top - base()) < 6) n = x.dataset.n;
+            });
+            return n;
+          };
+          document.getElementById('jump-prev-ask').click();
+          const after = m.scrollTop, at = atTop();
+          document.getElementById('jump-prev-ask').click();
+          return {before, after, at, at2: atTop(),
+                  scrollable: m.scrollHeight > m.clientHeight};
+        """)
+        check("the pill has an ↑ and clicking it scrolls up",
+              step["scrollable"] and step["after"] < step["before"],
+              f'{step["before"]} → {step["after"]}')
+        check("...landing ON a request, not somewhere near one", step["at"] is not None, str(step))
+        # The bug worth catching: a second tap that does nothing — an off-by-one that
+        # keeps re-selecting whatever is already at the top. That is exactly what makes
+        # a stepper feel broken on a phone, where tapping again is the natural response.
+        check("...and tapping again steps to the one before that",
+              step["at2"] is not None and int(step["at2"]) == int(step["at"]) - 1,
+              f'{step["at"]} then {step["at2"]}')
+        drv.js("document.getElementById('main').innerHTML = ''")   # leave the page as found
+
+        print("=== 🎤 puts the bar up before it opens the mic ===")
+        # "我总以为我点了它没用,我得点好几次" — tapping 🎤 used to do nothing visible for
+        # 200ms to two seconds, because the handler awaited getUserMedia and only then
+        # revealed the bar. That wait is not ours to remove: opening a mic enumerates
+        # devices and starts the OS capture graph, and the browser charges for it even
+        # when permission was granted long ago. What WAS ours is the sequencing.
+        #
+        # A click runs the handler synchronously up to its first `await`, so reading the
+        # DOM straight after .click() in the same script sees exactly what the user sees
+        # in that first frame — which makes this testable without a working microphone,
+        # and true regardless of how fast getUserMedia happens to be here.
+        first = drv.js("""
+          const bar = document.getElementById('rec-bar');
+          const live = document.getElementById('rec-live');
+          const wave = bar.querySelector('.rec-wave');
+          const btn = id => document.getElementById(id);
+          document.getElementById('mic-btn').click();
+          const shown = ['rec-cancel', 'rec-stop', 'rec-edit', 'rec-send', 'rec-pause']
+            .filter(id => btn(id) && getComputedStyle(btn(id)).display !== 'none');
+          const enabled = shown.filter(id => !btn(id).disabled);
+          return { bar: getComputedStyle(bar).display,
+                   live: (live.innerHTML || '').slice(0, 120),
+                   spinner: !!live.querySelector('.rec-spin'),
+                   wave: wave ? getComputedStyle(wave).display : 'gone',
+                   arming: bar.classList.contains('rec-arming'),
+                   dotBg: getComputedStyle(bar.querySelector('.rec-dot')).backgroundColor,
+                   shown, enabled,
+                   micRec: document.getElementById('mic-btn').classList.contains('recording') };
+        """)
+        check("the bar is up in the same frame as the tap", first["bar"] == "flex", str(first["bar"]))
+        check("...with a spinner, so a tap that did register looks like one", first["spinner"] is True,
+              first["live"][:60])
+        check("...saying what it is waiting for", "打开麦克风" in first["live"], first["live"][:60])
+        # Honesty: the wave bars animate as though sound were arriving. Nothing is being
+        # captured until the device opens, and anything said in that gap is genuinely
+        # lost — hence "先别说话" rather than a convincing fake.
+        check("...and no wave pretending audio is already coming in", first["wave"] == "none",
+              str(first["wave"]))
+        # "你至少是可以一点它,那个录音框以及所有的按钮就可以出来" — all five, at once.
+        # Buttons trickling in a second later is its own "did that work?", and a row that
+        # changes width under your thumb is worse than one that starts complete.
+        check("every button on the bar is there from the first frame",
+              set(first["shown"]) == {"rec-cancel", "rec-stop", "rec-edit", "rec-send", "rec-pause"},
+              str(first["shown"]))
+        # ...but only Cancel can mean anything yet: nothing has been captured, so there
+        # is nothing to stop, pause, edit or send.
+        check("...and only Cancel is live, since there is no audio yet",
+              first["enabled"] == ["rec-cancel"], str(first["enabled"]))
+        # The dot is the ready signal, and it is the one both modes share: batch
+        # overwrites the text row with its own hint, so words alone would not carry it.
+        check("the red dot is NOT red while the mic is still opening",
+              first["arming"] is True and "0, 0, 0, 0" in first["dotBg"].replace("rgba(", "").replace(")", ""),
+              first["dotBg"])
+        check("...先别说话 is spelled out, because that audio really is lost",
+              "先别说话" in first["live"], first["live"][:60])
+        check("the mic button itself shows as active", first["micRec"] is True)
+        # Headless has no microphone, so getUserMedia rejects — which exercises the other
+        # half: the failure parks IN the popup with a reason instead of alert()ing, and an
+        # alert on a phone covers the thing it is talking about.
+        # Whichever way it goes, the arming state must END — and say which way. Headless
+        # may have a fake device (resolves) or none (rejects), so both outcomes are
+        # accepted; what is NOT accepted is staying in "正在打开麦克风…" forever, which is
+        # the shape of the original complaint.
+        # 3s in, the hint names the likely cause — the permission prompt. Worth its own
+        # check because "still opening" with no explanation is what made tapping again
+        # feel like the only option.
+        hint = drv.wait("""(function () {
+          const h = (document.getElementById('rec-live').innerHTML || '');
+          return /权限/.test(h) ? h.slice(0, 90) : 0;
+        })()""", tries=30)
+        check("after a few seconds it names the likely cause", bool(hint), str(hint)[:70])
+
+        outcome = drv.wait("""(function () {
+          const bar = document.getElementById('rec-bar');
+          if (document.querySelector('#rec-live .rec-live-err')) return 'failed';
+          if (!bar.classList.contains('rec-arming')) return 'ready';
+          return 0;
+        })()""", tries=130)
+        # The failure this replaced: headless sat in "正在打开麦克风…" forever, because
+        # getUserMedia never resolves while a permission prompt goes unanswered. A
+        # watchdog that waits for ever is the original complaint wearing a costume.
+        check("the opening state always resolves, even with no mic at all",
+              bool(outcome), str(outcome))
+        if outcome == "failed":
+            err = drv.js("return document.querySelector('#rec-live .rec-live-err').textContent")
+            check("a mic that cannot open says so in the bar, not in an alert()",
+                  "麦克风" in err, err[:70])
+            check("...and the message tells you what to do about it",
+                  ("允许" in err) or ("HTTPS" in err), err[:70])
+        elif outcome == "ready":
+            # The moment audio exists: dot red, wave running, and the buttons that need
+            # audio become usable. This is the "tell me when it's ready" half.
+            st = drv.js("""
+              const bar = document.getElementById('rec-bar');
+              return { dot: getComputedStyle(bar.querySelector('.rec-dot')).backgroundColor,
+                       wave: getComputedStyle(bar.querySelector('.rec-wave')).display,
+                       stopOn: !document.getElementById('rec-stop').disabled,
+                       live: (document.getElementById('rec-live').innerHTML || '').slice(0, 80) };
+            """)
+            check("...the dot turns red exactly when capture starts", "229, 57, 53" in st["dot"], st["dot"])
+            check("...the wave starts only now", st["wave"] != "none", str(st["wave"]))
+            check("...and the buttons that need audio come alive", st["stopOn"] is True)
+            check("...and it says so in words too", "可以说了" in st["live"] or "⏸" in st["live"],
+                  st["live"][:60])
+        drv.js("document.getElementById('rec-cancel').click()")
+
+        src_index = open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8").read()
+
+        print("=== the Task window gives its height to the two boxes ===")
+        # "input box 之外的地方要紧凑显示,让 input box 占据更大空间." Measured, because
+        # "looks tighter" is not a property: what matters is the share of the card the
+        # two textareas actually get, and that only exists at real font sizes and real
+        # widths.
+        box = drv.js("""
+          const modal = document.getElementById('memo-modal');
+          modal.classList.add('show');
+          const card = modal.querySelector('.memo-card');
+          const t = document.getElementById('memo-task'), n = document.getElementById('memo-notes');
+          const r = e => e.getBoundingClientRect().height;
+          const rows = [...card.children].filter(e => getComputedStyle(e).display !== 'none');
+          return { card: r(card), task: r(t), notes: r(n),
+                   rows: rows.length,
+                   checkShown: getComputedStyle(document.getElementById('memo-check-sec')).display !== 'none',
+                   fs: getComputedStyle(t).fontSize };
+        """)
+        drv.js("""
+          document.getElementById('memo-task').value =
+            '监督 peer claude session 的执行。让 peer 判断进度与完成情况。你只需要像领导一样, 监督就行。';
+          document.getElementById('memo-task-meta').textContent = '还没发过';
+        """)
+        drv.shot(os.path.join(smoke, "task-modal.png"))
+        share = (box["task"] + box["notes"]) / box["card"] if box["card"] else 0
+        check("the two boxes get most of the card", share > 0.72,
+              f'{round(share * 100)}% of {round(box["card"])}px')
+        check("...and they are equal halves", abs(box["task"] - box["notes"]) < 6,
+              f'{round(box["task"])} vs {round(box["notes"])}')
+        # The self-check report is the longest thing in the window and the rarest thing
+        # you open it for, so it starts folded — but its verdict rides on the button, or
+        # folding it would mean hiding a bad result.
+        check("the self-check report starts folded", box["checkShown"] is False)
+        # Versions are gone — a list, fork, set-current, per-version editing, and a
+        # header line naming the one you were looking at. Retired on request; the task
+        # is a thing you rewrite as the work moves, not a history you keep.
+        gone = drv.js("""
+          return { verlist: !document.getElementById('memo-verlist'),
+                   fork: !document.getElementById('memo-fork'),
+                   list: !document.getElementById('memo-vers'),
+                   label: !document.getElementById('memo-vercur') };
+        """)
+        check("no versions / fork / list / 'editing vN' label",
+              all(gone.values()), str(gone))
+        # Three buttons said "run check" and differed only by which row they stood in —
+        # "这四个啥意思?". Now each says its scope, and the fourth (periodic) is gone:
+        # it typed "起一个每 30 分钟的 watcher" at the session, which ⚙ → Watch → 检查周期
+        # now does properly.
+        labels = drv.js("""
+          const m = document.getElementById('memo-modal');
+          const fills = [...m.querySelectorAll('button')].map(b => b.textContent.trim())
+                          .filter(t => t === '填入输入框');
+          return { fills: fills.length,
+                   checks: [...m.querySelectorAll('button')].map(b => b.textContent.trim())
+                             .filter(t => t.indexOf('check') === 0).length,
+                   cb: !!document.querySelector('#memo-modal input[type=checkbox]'),
+                   periodicGone: !document.getElementById('memo-periodic') };
+        """)
+        # Three buttons all said `run check` and differed only by which row they stood
+        # in — asked about directly ("这四个啥意思?"). They are gone: one 填入输入框 per
+        # box plus one for both, and you write the sentence you meant.
+        check("no check buttons left", labels["checks"] == 0, str(labels["checks"]))
+        check("...three 填入输入框 instead: each box, and both", labels["fills"] == 3,
+              str(labels["fills"]))
+        # `set periodic check` became a checkbox, because the button read as though
+        # cc-web would run the watcher. It never did.
+        check("the watcher request is an opt-in checkbox", labels["cb"] is True)
+        check("...and the button is gone", labels["periodicGone"] is True)
+        check("...with the verdict still on the button",
+              "自检" in drv.js("return document.getElementById('memo-checktoggle').textContent"),
+              drv.js("return document.getElementById('memo-checktoggle').textContent"))
+        opened = drv.js("""
+          document.getElementById('memo-checktoggle').click();
+          const sec = document.getElementById('memo-check-sec');
+          const t = document.getElementById('memo-task');
+          return { shown: getComputedStyle(sec).display !== 'none',
+                   task: t.getBoundingClientRect().height };
+        """)
+        check("...and the button expands it", opened["shown"] is True)
+        # Two rows with a `set` each plus a `view run` was three buttons for two windows.
+        # One row now: Task → [set] [watch]. `view run` is gone (the report is inside the
+        # Task window, on its own 自检 button) but its VERDICT stays on `set` — the point
+        # of a check is to be noticed, and one you must open a window to find is one you
+        # find late.
+        row = drv.js("""
+          const rows = [...document.querySelectorAll('#switch-menu .scr-cfg-row, .switch-menu .scr-cfg-row')];
+          const r = rows.find(x => (x.firstElementChild || {}).textContent === 'Task');
+          if (!r) return { missing: true, labels: rows.map(x => (x.firstElementChild||{}).textContent) };
+          return { btns: [...r.querySelectorAll('button')].map(b => b.id),
+                   texts: [...r.querySelectorAll('button')].map(b => b.textContent.trim()),
+                   watchRowGone: !rows.some(x => (x.firstElementChild || {}).textContent === 'Watch'),
+                   viewRunGone: !document.getElementById('mm-check') };
+        """)
+        if row.get("missing"):
+            check("SKIP: Task row not in the ⚙ menu here", True, str(row.get("labels"))[:60])
+        else:
+            check("one row, two windows", row["btns"] == ["mm-memo", "mm-watch"], str(row["btns"]))
+            check("...labelled set and watch",
+                  row["texts"][0].startswith("set") and row["texts"][1].startswith("watch"),
+                  str(row["texts"]))
+            check("...the separate Watch row is gone", row["watchRowGone"] is True)
+            check("...and so is `view run`", row["viewRunGone"] is True)
+        # One computation behind both the ⚙ hint and the in-window 自检 button: two
+        # copies of this existed briefly, which is how such a pair drifts.
+        # The longest label the row can ever carry, measured: a hint that wraps or gets
+        # clipped is how "过期" became unreadable in the first place.
+        widest = drv.js("""
+          const h = document.getElementById('mm-memo-hint');
+          if (!h) return { missing: true };
+          h.textContent = ' \u2713 \u26a0\u81ea\u68c0\u5bf9\u4e0d\u4e0a\u4efb\u52a1';
+          const row = h.closest('.scr-cfg-row');
+          const btns = [...row.querySelectorAll('button')];
+          const tops = new Set(btns.map(b => Math.round(b.getBoundingClientRect().top)));
+          return { rows: tops.size,
+                   clipped: btns.filter(b => b.scrollWidth > b.clientWidth + 1).map(b => b.id) };
+        """)
+        if not widest.get("missing"):
+            check("the longest verdict still fits on one line", widest["rows"] == 1, str(widest["rows"]))
+            check("...and nothing is clipped", widest["clipped"] == [], str(widest["clipped"]))
+        check("the verdict glyph is computed in one place",
+              src_index.count("function memoCheckTag") == 1
+              and src_index.count("memoCheckTag()") >= 3
+              and "const memoCheckBadge = () => {" in src_index)
+        # `view run` is gone (one row, two windows), so what used to be the difference
+        # between the two buttons is now a property of `set` alone: it opens with the
+        # report FOLDED, every time. The fold is a class on the element, so without an
+        # explicit reset a window left unfolded would open unfolded — and the 自检 button
+        # would look like it did nothing.
+        _i = src_index.index('if (mmMemo) mmMemo.addEventListener')
+        check("set opens with the report folded, explicitly",
+              'memoCheckSec.classList.remove("show")' in src_index[_i:_i + 900])
+        drv.js("document.getElementById('memo-checktoggle').click()")
+
+        print("=== A- / A+ resize the boxes, and only the boxes ===")
+        sizes = drv.js("""
+          const t = document.getElementById('memo-task');
+          const lab = document.querySelector('#memo-modal .memo-lab');
+          const before = { fs: getComputedStyle(t).fontSize, lab: getComputedStyle(lab).fontSize };
+          for (let i = 0; i < 4; i++) document.getElementById('memo-fontup').click();
+          const up = { fs: getComputedStyle(t).fontSize, lab: getComputedStyle(lab).fontSize };
+          for (let i = 0; i < 9; i++) document.getElementById('memo-fontdn').click();
+          const dn = { fs: getComputedStyle(t).fontSize, dis: document.getElementById('memo-fontdn').disabled };
+          for (let i = 0; i < 40; i++) document.getElementById('memo-fontup').click();
+          const max = { fs: getComputedStyle(t).fontSize, dis: document.getElementById('memo-fontup').disabled };
+          return { before, up, dn, max, stored: localStorage.getItem('ccweb.memoFs') };
+        """)
+        check("A+ grows the box text", float(sizes["up"]["fs"][:-2]) > float(sizes["before"]["fs"][:-2]),
+              f'{sizes["before"]["fs"]} → {sizes["up"]["fs"]}')
+        # The chrome must NOT grow with it: the point of the buttons is to make the text
+        # readable, and a window whose labels grow too just gives the space back.
+        check("...and leaves the labels alone", sizes["up"]["lab"] == sizes["before"]["lab"],
+              f'{sizes["before"]["lab"]} → {sizes["up"]["lab"]}')
+        check("A- shrinks it, and stops at a floor", sizes["dn"]["dis"] is True, sizes["dn"]["fs"])
+        check("...and A+ stops at a ceiling", sizes["max"]["dis"] is True, sizes["max"]["fs"])
+        check("the choice is remembered", sizes["stored"] is not None, str(sizes["stored"]))
+        drv.js("document.getElementById('memo-modal').classList.remove('show')")
+
+        print("=== every full-screen window has the SAME header format ===")
+        # There were two near-identical header rules, one per modal id, and they drifted
+        # exactly as copies do: Task's row was right-aligned while Watch's buttons
+        # bunched against the title, leaving ✕ 411px from the right edge in one window
+        # and at the edge in the other. Measured here rather than eyeballed, because
+        # "same format" is a geometry claim.
+        hdr = drv.js("""
+          const out = {};
+          for (const [k, id] of [['task', 'memo-modal'], ['watch', 'watch-modal']]) {
+            const m = document.getElementById(id);
+            m.classList.add('show');
+            const row = m.querySelector('.modal-row.memo-head');
+            const kids = [...row.children].filter(e => getComputedStyle(e).display !== 'none');
+            const rr = row.getBoundingClientRect();
+            const last = kids[kids.length - 1], prev = kids[kids.length - 2];
+            out[k] = { closeGap: Math.round(rr.right - last.getBoundingClientRect().right),
+                       closeTxt: last.textContent.trim(),
+                       prevTxt: prev.textContent.trim(),
+                       titleFirst: kids[0].tagName === 'H3',
+                       fills: kids.filter(e => e.classList.contains('hdr-fill')).length };
+            m.classList.remove('show');
+          }
+          return out;
+        """)
+        for k in ("task", "watch"):
+            check(f"{k}: the title leads", hdr[k]["titleFirst"] is True)
+            # The user's rule, verbatim: 「close 都应该在右边」.
+            check(f"{k}: ✕ is last and at the right edge",
+                  hdr[k]["closeTxt"] == "✕" and hdr[k]["closeGap"] == 0,
+                  f'{hdr[k]["closeTxt"]} gap={hdr[k]["closeGap"]}')
+            check(f"{k}: 保存 sits just before it", hdr[k]["prevTxt"] == "保存", hdr[k]["prevTxt"])
+            # One stretchy cell is what pushes the controls right; two would fight, none
+            # is how Watch ended up bunched left.
+            check(f"{k}: exactly one stretchy cell", hdr[k]["fills"] == 1, str(hdr[k]["fills"]))
+        check("the format is one shared rule, not one per window",
+              ".modal-row.memo-head {" in src_index
+              and "#watch-modal .modal-row {" not in src_index
+              and "#memo-modal .memo-head {" not in src_index)
+
+        print("=== the Watch window: same shape, and the two cadence rows ===")
+        w = drv.js("""
+          const m = document.getElementById('watch-modal');
+          m.classList.add('show');
+          const card = m.querySelector('.watch-card');
+          const ta = document.getElementById('watch-policy');
+          const r = e => e.getBoundingClientRect().height;
+          return { card: r(card), ta: r(ta),
+                   hours: [...m.querySelectorAll('.wt-h')].map(b => b.dataset.h),
+                   periods: [...m.querySelectorAll('.wt-p')].map(b => b.dataset.p),
+                   log: !!document.getElementById('watch-log'),
+                   fs: getComputedStyle(ta).fontSize };
+        """)
+        check("the policy box gets most of the card", w["ta"] / w["card"] > 0.55,
+              f'{round(w["ta"] / w["card"] * 100)}% of {round(w["card"])}px')
+        check("expiry offers the full set, with no 不限",
+              w["hours"] == ["2", "4", "6", "8", "10", "16", "24", "48"], str(w["hours"]))
+        check("...and the check period its own", w["periods"] == ["10", "15", "20", "25", "30", "45", "60", "0"],
+              str(w["periods"]))
+        # Asked for directly: it was the one thing in this window about auditing rather
+        # than setting, and /api/watch-log still records everything regardless.
+        check("最近动作 is gone from the window", w["log"] is False)
+        # The marks themselves are driven under node (tests/test_gear_menu_ui.py →
+        # watchMarks): the page script is one big IIFE, so a browser test can click and
+        # read the DOM but cannot reach a function inside that closure. What IS checked
+        # here is that the rows and the explicit pair exist and are wired to something.
+        seg = drv.js("""
+          const m = document.getElementById('watch-modal');
+          return { seg: [...m.querySelectorAll('.wt-seg .btn')].map(b => b.textContent.trim()),
+                   toggleGone: !document.getElementById('watch-toggle') };
+        """)
+        # A single 开启 button reads both as "it is on" and as "tap to turn it on" —
+        # ambiguous for a thing that types into your session.
+        check("open/close is an explicit pair", seg["seg"] == ["开", "关"], str(seg["seg"]))
+        check("...and the one ambiguous toggle is gone", seg["toggleGone"] is True)
+
+        up = drv.js("""
+          const ta = document.getElementById('watch-policy');
+          const before = getComputedStyle(ta).fontSize;
+          for (let i = 0; i < 3; i++) document.getElementById('watch-fontup').click();
+          return { before, after: getComputedStyle(ta).fontSize,
+                   stored: localStorage.getItem('ccweb.watchFs') };
+        """)
+        check("A+ grows the policy box too",
+              float(up["after"][:-2]) > float(up["before"][:-2]), f'{up["before"]} → {up["after"]}')
+        check("...and is remembered separately from the Task window",
+              up["stored"] is not None, str(up["stored"]))
+        drv.js("document.getElementById('watch-modal').classList.remove('show')")
+
         print("=== nothing in the ⚙ menu's button rows is clipped ===")
         # brief/medium/all sit three-across in a 200px menu. With the old ▁▄█ icons and
         # 10px side padding there wasn't room for the words: the menu read "▁ br… ▄ m…

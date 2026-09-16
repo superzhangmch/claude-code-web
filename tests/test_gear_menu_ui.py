@@ -133,6 +133,32 @@ check("...and so does the tail — that's where the request is",
 check("a tiny budget still produces something usable, not a crash",
       clampHT(long, 5).length === 5 && clampHT(long, 5).includes("…"), clampHT(long, 5));
 
+__WMARKS__
+
+console.log("=== Watch: which button is lit in each row ===");
+// The bug this replaced: the expiry mark was computed from `expires_at`, an absolute
+// timestamp that cannot say which button produced it — so only 不限 could ever light up
+// and every real expiry rendered as nothing selected. Which is what it looked like.
+const M = (sup, armed) => watchMarks(sup, armed);
+check("the stored expiry choice is the one marked", M({ hours: 8 }, true).hours === 8,
+      String(M({ hours: 8 }, true).hours));
+check("...and 48h too", M({ hours: 48 }, true).hours === 48, String(M({ hours: 48 }, true).hours));
+// NaN, not 0: nothing compares equal to it, so with no choice stored NO button lights up
+// rather than the one whose data-h happens to be 0.
+check("with nothing stored, no expiry button is marked",
+      Number.isNaN(M({}, true).hours), String(M({}, true).hours));
+check("...and a 0 stored counts as nothing", Number.isNaN(M({ hours: 0 }, true).hours));
+check("the period is marked, including the 默认 zero",
+      M({ period_min: 20 }, true).period === 20 && M({}, true).period === 0,
+      M({ period_min: 20 }, true).period + "/" + M({}, true).period);
+// on/off comes from ARMED, not from `enabled`. An expired watcher is not a running one,
+// and that distinction is the whole reason the expiry exists.
+check("开 is marked when it is actually armed", M({ enabled: true }, true).on === true);
+check("...关 when it is off", M({ enabled: false }, false).on === false);
+check("...and 关 when it is enabled but EXPIRED", M({ enabled: true }, false).on === false);
+check("a missing supervisor record does not throw",
+      Number.isNaN(M(null, false).hours) && M(null, false).on === false);
+
 console.log(_fails.length ? "\nFAILED: " + _fails.join(", ") : "\nall pass");
 process.exit(_fails.length ? 1 : 0);
 """
@@ -149,8 +175,16 @@ def main():
     c = re.search(r"\n  (function clampHT\(str, n\) \{.*?\n  \})\n", src, re.S)
     if not c:
         print("  FAIL  could not extract clampHT() from static/index.html"); return 1
+    # Which button is lit in each of the Watch window's three rows. Extracted and driven
+    # rather than eyeballed because the page script is one big IIFE: a browser test can
+    # click and read the DOM, but it cannot reach a function inside that closure, and
+    # this logic was wrong in a way that looked like "the buttons don't work".
+    w = re.search(r"\n  (function watchMarks\(sup, armed\) \{.*?\n  \})\n", src, re.S)
+    if not w:
+        print("  FAIL  could not extract watchMarks() from static/index.html"); return 1
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as fh:
-        fh.write(JS.replace("__RENDER__", m.group(1)).replace("__CLAMP__", c.group(1)))
+        fh.write(JS.replace("__RENDER__", m.group(1)).replace("__CLAMP__", c.group(1))
+                   .replace("__WMARKS__", w.group(1)))
         path = fh.name
     try:
         r = subprocess.run([node, path], capture_output=True, text=True)
