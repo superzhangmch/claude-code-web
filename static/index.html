@@ -853,6 +853,26 @@ body.pure #closetab-btn.active {
 .msg .copy-btn svg { display: block; }
 .msg .copy-btn.done { color: #6ee884; }
 .msg .markdown { word-break: break-word; }
+/* Sits in the gap the folded lines left. Dim and full-width so it reads as a seam in
+   the message rather than as an action on it. */
+/* A request whose answer was not fetched. The pointer says the whole block does
+   something; the strip below says what. */
+.msg.answer-missing { cursor: pointer; }
+.msg .load-answer {
+  display: inline; margin-left: 8px; white-space: nowrap;
+  background: transparent; border: none; padding: 0;
+  color: var(--muted); font-size: 11px; cursor: pointer; font-family: inherit;
+  text-decoration: underline dotted;
+}
+.msg .load-answer:active { color: var(--accent); }
+.msg .fold-btn {
+  display: block; width: 100%; text-align: left;
+  background: transparent; border: none; border-top: 1px dashed var(--border);
+  border-bottom: 1px dashed var(--border);
+  color: var(--muted); font-size: 12px; padding: 3px 0; margin: 4px 0;
+  cursor: pointer; font-family: inherit;
+}
+.msg .fold-btn:active { color: var(--accent); }
 /* Quotes had NO styling at all, so markdown ate the `>` and left the text looking like
    the rest of the message — which is what 引用 produces, and the one thing it must not
    look like. A bar down the left and dimmer text, the shape a quote has everywhere. */
@@ -1355,6 +1375,42 @@ footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
    it belongs to (.switch-menu is top-anchored, so it can't be reused as-is). */
 /* Floats over the selection. Same translucent pill as the tail/↑/⤓ controls, so it
    reads as part of the app rather than as the browser's own menu. */
+/* One line, pinned under the header. Thin on purpose: what you are looking for is
+   behind it. */
+/* In the footer, directly above the composer — asked for, and it is also where it
+   belongs: it moves with the keyboard instead of being a fixed strip the keyboard
+   slides underneath, and your thumb is already down there. */
+.find-bar {
+  display: flex; align-items: center; gap: 4px; margin-bottom: 4px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.35); padding: 4px 6px;
+}
+.find-bar .find-q {
+  flex: 1; min-width: 0; background: transparent; border: none; color: var(--text);
+  /* 16px: under that, iOS zooms the page the moment this takes focus. */
+  font-size: 16px; padding: 4px 2px; outline: none;
+}
+.find-bar .find-cb {
+  display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0;
+  color: var(--muted); font-size: 11px; white-space: nowrap; cursor: pointer;
+}
+.find-bar .find-cb input { margin: 0; }
+.find-bar .find-count { color: var(--muted); font-size: 11px; flex-shrink: 0; min-width: 34px; text-align: right; }
+.find-bar button {
+  background: transparent; border: none; color: var(--text);
+  font-size: 14px; line-height: 1; padding: 6px 7px; border-radius: 6px; cursor: pointer;
+}
+.find-bar button:disabled { color: var(--border); }
+/* Every match, and the one you are on. An outline rather than a background: the
+   message keeps its own colour, which is how you still know who said it. */
+.msg.find-hit { outline: 1px dashed var(--border); outline-offset: 2px; }
+.msg.find-at { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The words themselves. Every match is tinted; the ones in the message you are ON are
+   stronger, so "3/17" has something on screen that corresponds to it. */
+mark.find-mark {
+  background: rgba(224, 160, 74, 0.30); color: inherit; border-radius: 2px; padding: 0 1px;
+}
+mark.find-mark.at { background: var(--accent); color: var(--bg); }
 .sel-bar {
   position: fixed; z-index: 90;
   display: inline-flex; align-items: center; gap: 2px;
@@ -2532,6 +2588,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div class="scr-cfg-row"><span>主题</span>
       <button class="sw-item" id="mm-theme">◐</button>
     </div>
+    <!-- Paging back through a long session drags in every response with it. When what
+         you are after is something YOU said, they are the part you scroll past — so
+         this can bring back the requests alone. On by default: a half transcript is a
+         surprise unless you asked for it. -->
+    <div class="scr-cfg-row"><span>搜索</span>
+      <button class="sw-item" id="mm-search"
+              title="在整个 session 里搜(不只是已载入的部分)。装成 App 的时候浏览器没有页内查找,而页内查找本来也只看得到屏幕上的">🔍 搜索</button>
+    </div>
+    <div class="scr-cfg-row"><span>往前翻</span>
+      <button class="sw-item" id="mm-earlier-resp"
+              title="「Load earlier rounds」要不要连回复一起取。默认只取你的提问(翻得快、省流量);想看某条的回复,点那条提问就能单独载入">只要提问</button>
+    </div>
     <div class="scr-cfg-row"><span>LaTeX 公式</span>
       <button class="sw-item" id="mm-latex">关</button>
     </div>
@@ -2968,6 +3036,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <div id="prompt-choices" class="pchoices"></div>
     </div>
     <div id="upload-row" class="upload-row" style="display:none"></div>
+      <!-- Find-in-page, because a phone installed as a web app has none. Deliberately a
+           THIN bar and not a panel of results: the matches are in the transcript behind it,
+           and a list that covers them would be answering a different question. It filters
+           what is already loaded — pair it with ⚙ → 往前翻 → 只要提问 to pull a lot of
+           requests down cheaply first, then find the one you meant. -->
+      <div id="find-bar" class="find-bar" style="display:none">
+            <input id="find-q" class="find-q" type="search" placeholder="在已载入的内容里找">
+            <label class="find-cb" title="只找你自己发的请求"><input type="checkbox" id="find-users">仅提问</label>
+            <span id="find-count" class="find-count">0/0</span>
+            <button id="find-prev" title="上一个">◀</button>
+            <button id="find-next" title="下一个">▶</button>
+            <button id="find-close" title="关闭">✕</button>
+      </div>
     <div id="float-controls">
       <button id="tail-screen-btn" title="Peek at the last lines of the live terminal">tail</button>
       <!-- ↑ steps back one request; ☰ lists them all. The list came first, on the
@@ -3425,6 +3506,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // fetched until a message actually contains math, and loadKatex() memoises, so
   // the ~300KB lib+CSS is pulled exactly once per page — never on a math-free
   // session, never twice.
+  // Default OFF — requests only. Asked for directly, and it is the right default for
+  // what the button is FOR: you press "load earlier" because you are looking for
+  // something you said, and the answers are both the bulk of the bytes and the part
+  // you scroll past. Any one of them is a tap away.
+  let earlierResp = localStorage.getItem("cc_web_earlier_resp") === "1";
   let latexAuto = localStorage.getItem("cc_web_latex_auto") === "1";
   function autoRenderMath(mdEl, roleEl) {
     if (mdEl.dataset.mathDone) return;
@@ -3448,6 +3534,22 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (_mathRe.test(md.textContent || "")) autoRenderMath(md, null);
     });
   }
+  function applyEarlierResp() {
+    localStorage.setItem("cc_web_earlier_resp", earlierResp ? "1" : "0");
+    const mm = document.getElementById("mm-earlier-resp");
+    if (mm) {
+      mm.textContent = earlierResp ? "带回复" : "只要提问";
+      mm.classList.toggle("current", earlierResp);
+    }
+  }
+  const mmEarlierResp = document.getElementById("mm-earlier-resp");
+  if (mmEarlierResp) mmEarlierResp.addEventListener("click", (e) => {
+    e.stopPropagation();
+    earlierResp = !earlierResp;
+    applyEarlierResp();
+  });
+  applyEarlierResp();
+
   function applyLatexAuto() {
     localStorage.setItem("cc_web_latex_auto", latexAuto ? "1" : "0");
     const mm = document.getElementById("mm-latex");
@@ -3490,6 +3592,45 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     d.addEventListener("click", () => d.remove());
     (document.body || document.documentElement).appendChild(d);
   }
+  // ---- your own messages, folded in the middle ----
+  const MSG_MAX_LINES = 5, MSG_KEEP = 2;
+  function foldParts(text) {
+    const lines = String(text || "").replace(/\s+$/, "").split("\n");
+    if (lines.length <= MSG_MAX_LINES) return null;
+    return { head: lines.slice(0, MSG_KEEP).join("\n"),
+             tail: lines.slice(-MSG_KEEP).join("\n"),
+             hidden: lines.length - MSG_KEEP * 2 };
+  }
+  // Head and tail are rendered as SEPARATE markdown blocks rather than by slicing one
+  // rendered tree: a fragment of markdown is still valid markdown, whereas half a
+  // rendered <ul> is not, and hiding DOM nodes by index breaks the moment the middle
+  // happens to be a table or a fence.
+  function userFold(md, text) {
+    const parts = foldParts(text);
+    if (!parts) { md.innerHTML = renderMarkdown(text); return; }
+    let open = false;
+    const draw = () => {
+      md.textContent = "";
+      const btn = document.createElement("button");
+      btn.className = "fold-btn";
+      btn.textContent = open ? "⋯ 收起" : `⋯ 展开中间 ${parts.hidden} 行`;
+      btn.title = open ? "折叠回 2 行 + … + 2 行" : "展开这条消息的全文";
+      btn.addEventListener("click", (e) => { e.stopPropagation(); open = !open; draw(); });
+      if (open) {
+        const full = document.createElement("div");
+        full.innerHTML = renderMarkdown(text);
+        md.appendChild(full); md.appendChild(btn);
+      } else {
+        const h = document.createElement("div"); h.innerHTML = renderMarkdown(parts.head);
+        const t = document.createElement("div"); t.innerHTML = renderMarkdown(parts.tail);
+        // The button sits where the missing lines are, which is the clearest place for
+        // it: you read down, the text stops, and the thing that continues it is there.
+        md.appendChild(h); md.appendChild(btn); md.appendChild(t);
+      }
+    };
+    draw();
+  }
+
   function renderMarkdown(text) {
     // Collapse newlines INSIDE display math $$…$$ before markdown: with
     // breaks:true, marked turns those newlines into <br>, splitting the $$…$$
@@ -3757,6 +3898,137 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   memoCheckToggle.addEventListener("click", (e) => {
     e.stopPropagation();
     memoCheckSec.classList.toggle("show");
+  });
+
+  // ---- find in what is loaded ----
+  // Filters the LOADED transcript — not a server search. That is the deliberate half of
+  // it: paired with ⚙ → 往前翻 → 只要提问, you pull hundreds of requests down for a few
+  // hundred bytes and then look through them here, instantly and without spending
+  // anything. (It briefly was a server endpoint that streamed the whole jsonl. Deleted:
+  // two ways to find something is one more than the number of questions being asked.)
+  const findBar = document.getElementById("find-bar");
+  const findQ = document.getElementById("find-q");
+  const findUsers = document.getElementById("find-users");
+  const findCount = document.getElementById("find-count");
+  let findHits = [], findAt = -1;
+  // Reads the ENTRY, not the rendered node: a long message is folded in the middle, so
+  // its DOM is missing the very part you are most likely searching for.
+  function entryTextOf(e) {
+    const c = (e && e.message && e.message.content);
+    if (typeof c === "string") return c;
+    if (Array.isArray(c)) {
+      return c.filter((b) => b && b.type === "text").map((b) => b.text || "").join("\n");
+    }
+    return "";
+  }
+  // Wrapping the matched WORDS, not just outlining the message. Walks text nodes, so
+  // it cannot break the rendered markup — and it is the only way to answer "which one
+  // did it match" in a message that is several paragraphs long.
+  function findMarkIn(el, q) {
+    const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.parentElement && n.parentElement.closest(".load-answer, .fold-btn"))
+        ? NodeFilter.FILTER_REJECT
+        : (n.nodeValue.toLowerCase().includes(q) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT),
+    });
+    const hits = [];
+    while (w.nextNode()) hits.push(w.currentNode);
+    for (const n of hits) {
+      const frag = document.createDocumentFragment();
+      let rest = n.nodeValue, i;
+      while ((i = rest.toLowerCase().indexOf(q)) >= 0) {
+        if (i) frag.appendChild(document.createTextNode(rest.slice(0, i)));
+        const mk = document.createElement("mark");
+        mk.className = "find-mark";
+        mk.textContent = rest.slice(i, i + q.length);
+        frag.appendChild(mk);
+        rest = rest.slice(i + q.length);
+      }
+      if (rest) frag.appendChild(document.createTextNode(rest));
+      n.parentNode.replaceChild(frag, n);
+    }
+  }
+  function findClear() {
+    transcriptEl.querySelectorAll(".find-hit, .find-at")
+                .forEach((el) => el.classList.remove("find-hit", "find-at"));
+    // Unwrap, then normalize: leaving split text nodes behind would make the NEXT
+    // search miss a match that straddles the seam.
+    transcriptEl.querySelectorAll("mark.find-mark").forEach((m) => {
+      const p = m.parentNode;
+      p.replaceChild(document.createTextNode(m.textContent || ""), m);
+      p.normalize();
+    });
+  }
+  function findRun(keepPos) {
+    const q = (findQ.value || "").trim().toLowerCase();
+    findClear();
+    findHits = [];
+    if (!q) { findCount.textContent = "0/0"; findAt = -1; findSync(); return; }
+    for (const e of entryCache) {
+      if (findUsers.checked && e.type !== "user") continue;
+      if (e.type !== "user" && e.type !== "assistant") continue;
+      if (!entryTextOf(e).toLowerCase().includes(q)) continue;
+      const el = [...transcriptEl.children].find((x) => String(x.dataset.idx) === String(e._idx));
+      if (!el) continue;
+      // A long message is folded in the middle. If the match is in the hidden part,
+      // scrolling to the message would show you nothing — so open it.
+      if (!(el.textContent || "").toLowerCase().includes(q)) {
+        const fb = el.querySelector(".fold-btn");
+        if (fb) fb.click();
+      }
+      el.classList.add("find-hit");
+      findMarkIn(el, q);
+      findHits.push(el);
+    }
+    if (!keepPos || findAt >= findHits.length) findAt = findHits.length ? 0 : -1;
+    findShow();
+  }
+  function findShow() {
+    findCount.textContent = (findAt >= 0 ? findAt + 1 : 0) + "/" + findHits.length;
+    findHits.forEach((el, i) => el.classList.toggle("find-at", i === findAt));
+    transcriptEl.querySelectorAll("mark.find-mark.at").forEach((m) => m.classList.remove("at"));
+    if (findAt >= 0) {
+      shouldAutoscroll = false;
+      const el = findHits[findAt];
+      const mk = el.querySelector("mark.find-mark");
+      el.querySelectorAll("mark.find-mark").forEach((m) => m.classList.add("at"));
+      // Scroll to the MARK, not the message: in a long one the words can be a screen
+      // below its top edge.
+      (mk || el).scrollIntoView({ block: "center" });
+    }
+    findSync();
+  }
+  function findSync() {
+    document.getElementById("find-prev").disabled = findHits.length < 2;
+    document.getElementById("find-next").disabled = findHits.length < 2;
+  }
+  function findStep(d) {
+    if (!findHits.length) return;
+    findAt = (findAt + d + findHits.length) % findHits.length;
+    findShow();
+  }
+  function findOpen() {
+    if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
+    modeMenu.style.display = "none";
+    findBar.style.display = "flex";
+    findQ.focus(); findQ.select();
+    if ((findQ.value || "").trim()) findRun(true);
+  }
+  function findCloseBar() {
+    findBar.style.display = "none";
+    findClear();
+    findHits = []; findAt = -1;
+  }
+  document.getElementById("mm-search").addEventListener("click", (e) => { e.stopPropagation(); findOpen(); });
+  document.getElementById("find-close").addEventListener("click", findCloseBar);
+  document.getElementById("find-prev").addEventListener("click", () => findStep(-1));
+  document.getElementById("find-next").addEventListener("click", () => findStep(1));
+  // Live, because it is local: no round trip to pay for, so there is no reason to make
+  // you press anything.
+  findQ.addEventListener("input", () => findRun(false));
+  findUsers.addEventListener("change", () => findRun(false));
+  findQ.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); findStep(e.shiftKey ? -1 : 1); }
+    if (e.key === "Escape") { e.preventDefault(); findCloseBar(); }
   });
 
   // ---- quote what it said ----
@@ -4917,7 +5189,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   let inputFromVoice = false;          // last input came from voice/ASR → skip grammar correction
   let autoTranslate = localStorage.getItem("cc_web_auto_translate") === "1";   // opt-in: auto correct/translate sent input (default OFF)
   const grammarMap = new Map();        // normalized sent text → auto learning correction (see fireGrammar)
-  const manualGrammarMap = new Map();  // ✎-button on-demand correction (aggressive idiomatic, separate cache)
+  const manualGrammarMap = new Map();  // 🔧-button on-demand correction (aggressive idiomatic, separate cache)
   let claudeIdle = false;
   // ---------- quick-switch tabs (client-side, MRU, memory-capped) ----------
   const MAX_TABS = 5;                    // at most N kept sessions (bounds memory)
@@ -9485,6 +9757,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 
   function renderBlock(b) {
     const div = document.createElement("div");
+    // The entry this block came from. Two features look a message up by it — find, and
+    // "load this one's answer" — and BOTH silently did nothing without it: the only
+    // thing carrying a dataset.idx was the stacked tool row, so every lookup missed and
+    // the search sat at 0/0 with the words visible on screen.
+    if (b.idx != null) div.dataset.idx = b.idx;
     const role = document.createElement("div");
     role.className = "role";
     const label = document.createElement("span");
@@ -9539,8 +9816,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       label.textContent = indieQueued ? "Queued" : (b.system ? "System" : (b.role === "user" ? "You" : AGENT_LABEL));
       if (indieQueued) label.classList.add("queued-label");
       const md = document.createElement("div"); md.className = "markdown";
-      md.innerHTML = renderMarkdown(b.text);
-      if (_mathRe.test(md.textContent || "")) {
+      // Your own messages fold in the MIDDLE past five lines. They are the ones you
+      // already know the contents of — and since 引用 pastes whole paragraphs of what
+      // it said, one of them can now push the answer you are reading off the screen.
+      // Both ends stay visible because that is what you navigate by: the first line
+      // says which request this was, the last is what you actually asked.
+      if (b.role === "user") userFold(md, b.text);
+      else md.innerHTML = renderMarkdown(b.text);
+      // Tested against the SOURCE, not the rendered node: with the middle folded away,
+      // md.textContent is missing whatever is hidden, so math in there would get no ∑
+      // until you expanded — and then the button would not be in the row any more.
+      if (_mathRe.test(b.text || "")) {
         if (latexAuto) autoRenderMath(md, role);            // auto mode: render now (∑ returns if KaTeX won't load)
         else role.appendChild(makeMathBtn(md));             // manual: ∑ button in the action row
       }
@@ -9550,7 +9836,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
       div.appendChild(role); div.appendChild(md);
       // Your own typed message → attach the English-learning correction if we have
-      // one. INCLUDES the inline "Queued" box: if the msg got queued, the ✎ shows
+      // one. INCLUDES the inline "Queued" box: if the msg got queued, the 🔧 shows
       // there; when the placeholder is later replaced by the processed user turn
       // (same content → same grammar key), the correction re-attaches to it — so
       // it "transfers" to the sent turn automatically.
@@ -9726,7 +10012,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
   function _grammarLine(correction) {
     const d = document.createElement("div"); d.className = "grammar-hint";
-    const m = document.createElement("span"); m.className = "gh-mark"; m.textContent = "✎";
+    const m = document.createElement("span"); m.className = "gh-mark"; m.textContent = "🔧";
     d.appendChild(m); d.appendChild(document.createTextNode(correction));
     return d;
   }
@@ -9756,7 +10042,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       _applyGrammar(key, corr);
     } catch {}
   }
-  // On-demand ✎ button on a user-request block: correct/translate THIS message
+  // On-demand 🔧 button on a user-request block: correct/translate THIS message
   // regardless of language (no gate), up to 500 chars. Shows the result inline
   // (or a "looks natural" note when there's nothing to fix).
   function _showManualCorrection(div, res) {
@@ -9770,7 +10056,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       r.appendChild(m); r.appendChild(l); r.appendChild(document.createTextNode(text));
       box.appendChild(r);
     };
-    if (res.correction) row("✎", "fix ", res.correction);     // teacher's correction (lenient; English only)
+    if (res.correction) row("🔧", "fix ", res.correction);    // teacher's correction (lenient; English only)
     if (res.native) row("🗣", "native ", res.native);          // native version (or the translation for Chinese)
     if (!res.correction && !res.native) {
       // NEVER imply a pass mark unless the LLM actually looked. An empty result
@@ -9792,8 +10078,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
   function makeCorrectBtn(div, text) {
     const btn = document.createElement("button");
-    btn.className = "copy-btn"; btn.title = "Correct / translate this message (English learning)";
-    btn.textContent = "✎";
+    // A wrench, not a pencil. A pencil on your own message reads as "edit it and send
+    // it again" — which is not what this does: it asks for a corrected version of the
+    // English you just wrote, and changes nothing that was sent.
+    btn.className = "copy-btn"; btn.title = "看看这句英文该怎么写(不会改动已发出的内容)";
+    btn.textContent = "🔧";
     btn.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       const key = (text || "").trim(); if (!key) return;
@@ -9818,7 +10107,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         }
         // Cache only results the model actually produced. Caching a failure made one
         // flaky call (502 / timeout / litellm restarting) permanent: the cache-hit
-        // branch above short-circuits every later ✎ tap, so the message stayed on
+        // branch above short-circuits every later 🔧 tap, so the message stayed on
         // "⚠ LLM call failed" until a full page reload. status:"ok" with no correction
         // IS a real result ("looked, found nothing") and is worth caching so a re-tap
         // doesn't pay for the same call again.
@@ -9897,12 +10186,67 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     } catch (e) { list.textContent = "error: " + e; }
   }
 
+  // In requests-only mode a loaded request has no answer under it. Rather than
+  // bookkeeping which fetch each block came from, this reads the result: a user block
+  // whose next block is also a user block has no answer on screen, so it gets a button
+  // that asks the server for that one round. Derived from the DOM, so it corrects
+  // itself — once the answer lands, the condition is false and the button is gone.
+  function markMissingAnswers() {
+    const kids = [...transcriptEl.children];
+    kids.forEach((el, i) => {
+      const old = el.querySelector(":scope > .load-answer");
+      if (old) old.remove();
+      if (!el.classList.contains("user") || el.classList.contains("queued")) return;
+      if (!el.dataset.idx) return;
+      const next = kids[i + 1];
+      // The LAST block is the live turn — its answer is on its way, not missing.
+      if (!next || !next.classList.contains("user")) return;
+      const btn = document.createElement("button");
+      btn.className = "load-answer";
+      btn.textContent = "↓回复";
+      btn.title = "单独取这一轮的回复";
+      // The whole message is the target, not just the strip: on a phone a 20px row is
+      // a miss waiting to happen, and there is nothing else a tap on a request whose
+      // answer is missing could reasonably mean.
+      el.classList.add("answer-missing");
+      const load = async (e) => {
+        if (e) e.stopPropagation();
+        if (btn.disabled) return;
+        btn.disabled = true; btn.textContent = "载入中…";
+        try {
+          const params = new URLSearchParams();
+          params.set("claude_session_id", attachedSid);
+          params.set("mode", renderMode);
+          params.set("round_at", el.dataset.idx);
+          const r = await authedFetch("/api/state?" + params.toString());
+          if (!r.ok) throw new Error(String(r.status));
+          const m = await r.json();
+          if (!(m.transcript || []).length) { btn.textContent = "(这一轮没有回复)"; return; }
+          ingest(m.transcript, "insert");     // rebuild() re-runs this pass → button gone
+        } catch (err) {
+          btn.disabled = false; btn.textContent = "载入失败,再点一次";
+        }
+      };
+      btn.addEventListener("click", load);
+      el.addEventListener("click", load);
+      // Inline, at the END of the last line of the text — not a row of its own. A full
+      // width strip cost every request an extra line, which is precisely the height
+      // this whole mode was buying back: you turn responses off to fit more REQUESTS on
+      // screen, and then each one grew. Appended inside the last block of the rendered
+      // markdown so it flows after the final words instead of below them.
+      const md = el.querySelector(".markdown");
+      const host = (md && md.lastElementChild) || md || el;
+      host.appendChild(btn);
+    });
+  }
+
   function rebuild(noScroll) {
     pairedQueued = computePairedQueued(entryCache);   // recompute over the full loaded window
     transcriptEl.innerHTML = "";
     _lastBottomToolUse = null;
     _lastStack = null;
     renderEntriesInto(transcriptEl, entryCache);
+    markMissingAnswers();
     updateLoadEarlier();
     if (!noScroll) scrollToBottom();
   }
@@ -9950,8 +10294,23 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         renderEntriesInto(frag, fresh, /*atTop=*/true);
         const prevH = mainEl.scrollHeight, prevS = mainEl.scrollTop;
         transcriptEl.insertBefore(frag, transcriptEl.firstChild);
+        markMissingAnswers();
         mainEl.scrollTop = prevS + (mainEl.scrollHeight - prevH);
       }
+    } else if (position === "insert") {
+      // A single round's answer, arriving into the middle of the loaded window. Deduped,
+      // then sorted by _idx so the render order is the transcript's order rather than
+      // the order things were fetched in — and a full rebuild, because a middle
+      // insertion is exactly the case the prepend/append fast paths cannot express.
+      const have = new Set(entryCache.map(e => e._idx));
+      const fresh = entries.filter(e => !have.has(e._idx));
+      if (!fresh.length) return;
+      entryCache = entryCache.concat(fresh).sort((x, y) => (x._idx ?? 0) - (y._idx ?? 0));
+      const prevH = mainEl.scrollHeight, prevS = mainEl.scrollTop;
+      rebuild(true);
+      // Keep the thing you were reading where it was: everything inserted is ABOVE the
+      // bottom, so the content below grows by the difference.
+      mainEl.scrollTop = prevS + (mainEl.scrollHeight - prevH);
     } else {
       const lastSeen = entryCache.length ? entryCache[entryCache.length - 1]._idx : -Infinity;
       const fresh = entries.filter(e => (e._idx ?? -1) > lastSeen);
@@ -9986,6 +10345,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     params.set("mode", renderMode);
     params.set("rounds", String(rounds));
     params.set("before_idx", String(earliestIdxLoaded));
+    if (!earlierResp) params.set("users_only", "1");   // requests only
     const resp = await authedFetch("/api/state?" + params.toString());
     if (!resp.ok) return false;
     const m = await resp.json();
@@ -11858,7 +12218,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // /api/polish 503s when api_base/model are unset, and this used to swallow
       // that (plus every other error) with `if (pr.ok)` + `catch {}`: the bar just
       // closed leaving the raw dictation, indistinguishable from a successful
-      // no-op. Same lie the ✎ correction used to tell.
+      // no-op. Same lie the 🔧 correction used to tell.
       let failReason = "";
       try {
         const polT0 = Date.now();

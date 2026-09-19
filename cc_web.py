@@ -6249,6 +6249,15 @@ async def get_state(
     since_idx: Optional[int] = None,
     rounds: Optional[int] = None,
     before_idx: Optional[int] = None,
+    # load-earlier only: bring back the requests without what was answered. Paging back
+    # through a long session otherwise drags every response with it, and when you are
+    # looking for something YOU said those are exactly the part you scroll past. Done
+    # HERE and not in the browser on purpose — the point is the bytes that never leave
+    # the machine, over a phone's data plan.
+    users_only: bool = False,
+    # ...and the other half: once you have found the request, the answer to THAT one.
+    # `_idx` of the user entry; serves what follows it up to the next request.
+    round_at: Optional[int] = None,
     mode: str = "brief",
     epoch: Optional[str] = None,
 ):
@@ -6332,6 +6341,32 @@ async def get_state(
             older = [e for e in all_entries if e.get("_idx", 0) < before_idx]
             guard += 1
         sliced = _last_n_rounds(older, want)
+        if users_only:
+            # After the round windowing, not instead of it: the window is still "the
+            # last N requests", so the button walks back at the same pace either way —
+            # it just stops carrying the answers.
+            sliced = [e for e in sliced if _is_user_msg(e)]
+    elif round_at is not None:
+        # One round's answer, on demand. The window may not reach back that far — the
+        # request you are asking about can be older than anything loaded — so extend
+        # from disk until it does, the way load-earlier does.
+        guard = 0
+        while (all_entries and all_entries[0].get("_idx", 0) > round_at
+               and jsonl_cache.has_earlier(b.jsonl_path) and guard < 200):
+            jsonl_cache.earlier(b.jsonl_path)
+            all_entries = _prune_rewound(jsonl_cache.entries(b.jsonl_path))
+            guard += 1
+        out, started = [], False
+        for e in all_entries:
+            if e.get("_idx", 0) == round_at:
+                started = True
+                continue                     # the request itself is already on screen
+            if not started:
+                continue
+            if _is_user_msg(e):
+                break                        # the next request begins → this round ends
+            out.append(e)
+        sliced = out
     elif rounds is not None:
         sliced = _last_n_rounds(all_entries, rounds)
     else:

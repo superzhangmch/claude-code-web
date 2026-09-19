@@ -545,6 +545,168 @@ def main():
         check("a selection outside the transcript shows nothing", elsewhere == "none", elsewhere)
         drv.js("document.getElementById('main').innerHTML = ''; document.getElementById('input').value = '';")
 
+        print("=== find-in-page: a thin bar over what is loaded ===")
+        # A phone installed as a web app has no find-in-page. This is one, and it
+        # filters the LOADED transcript — not a server search (there was one for about
+        # an hour; it went, because with 往前翻 → 只要提问 you can pull hundreds of
+        # requests down for a few hundred bytes and then look through them for free).
+        fb = drv.js("""
+          const bar = document.getElementById('find-bar');
+          const before = getComputedStyle(bar).display;
+          bar.style.display = 'flex';
+          const q = document.getElementById('find-q');
+          const r = bar.getBoundingClientRect();
+          return { before, item: !!document.getElementById('mm-search'),
+                   qFont: getComputedStyle(q).fontSize,
+                   users: !!document.getElementById('find-users'),
+                   h: Math.round(r.height), vh: window.innerHeight,
+                   covers: Math.round(r.height / window.innerHeight * 100) };
+        """)
+        check("the ⚙ menu opens it", fb["item"] is True)
+        check("...it starts hidden", fb["before"] == "none", fb["before"])
+        # "只需要很小. 别遮挡搜出的东西" — the matches are behind it.
+        check("...and it is a thin bar, not a panel over the results",
+              fb["covers"] <= 10, f'{fb["h"]}px of {fb["vh"]} = {fb["covers"]}%')
+        check("...with a requests-only box", fb["users"] is True)
+        check("...and a ≥16px field, so the phone does not zoom", fb["qFont"] == "16px", fb["qFont"])
+        drv.js("document.getElementById('find-bar').style.display = 'none'")
+        js = src_index[src_index.index("function findRun("):]
+        js = js[:js.index("\n  }\n")]
+        check("it reads the ENTRY, not the rendered node",
+              "entryTextOf(e)" in js and "entryCache" in js)
+        # A folded message's DOM is missing its middle, which is the part you are most
+        # likely searching for.
+        check("...which is what makes a folded message searchable",
+              "entryTextOf" in src_index and "message.content" in src_index)
+        check("...and nothing here calls the server", "authedFetch" not in js)
+
+        # The bug this feature shipped with, and why the checks below are shaped like
+        # this: find sat at 0/0 with the words on screen, because it looks a message up
+        # by entry index and the only element carrying a dataset.idx was the stacked
+        # TOOL row. Every lookup missed, silently. "点这里看它的回复" was dead for the
+        # same reason and had never appeared at all.
+        #
+        # It cannot be driven from here — ingest/entryCache/renderBlock all live inside
+        # the page's IIFE — so the link is pinned at both ends instead, and the gap is
+        # written down rather than papered over.
+        check("every rendered block is stamped with its entry index",
+              "div.dataset.idx = b.idx" in
+              src_index[src_index.index("function renderBlock(b) {"):][:600])
+        check("...and every block carries one to stamp",
+              "const idx = entry._idx" in src_index)
+        check("find looks a hit up by exactly that",
+              'dataset.idx) === String(e._idx)' in src_index)
+        check("...and so does the load-answer strip", "el.dataset.idx" in src_index)
+        # It must cost no HEIGHT. The first version was a full-width row under each
+        # request, which added a line to every one of them — exactly the height that
+        # turning responses off was buying back. Measured, since "inline" is a claim
+        # about layout.
+        cost = drv.js("""
+          const m = document.getElementById('main');
+          m.innerHTML = '';
+          const mk = (withBtn, block) => {
+            const d = document.createElement('div'); d.className = 'msg user';
+            const md = document.createElement('div'); md.className = 'markdown';
+            md.innerHTML = '<p>一句不长不短的请求</p>';
+            d.appendChild(md); m.appendChild(d);
+            if (withBtn) {
+              const b = document.createElement('button');
+              b.className = 'load-answer'; b.textContent = '↓回复';
+              if (block) b.style.display = 'block';
+              (md.lastElementChild || md).appendChild(b);
+            }
+            return Math.round(d.getBoundingClientRect().height);
+          };
+          const plain = mk(false), inline = mk(true, false), row = mk(true, true);
+          m.innerHTML = '';
+          return { plain, inline, row };
+        """)
+        check("the load-answer link adds no row to a request",
+              cost["inline"] == cost["plain"], f'{cost["plain"]} → {cost["inline"]}px')
+        check("...unlike a block one, which is what it replaced",
+              cost["row"] > cost["plain"], f'block would be {cost["row"]}px')
+
+        print("=== find marks the WORDS, not just the message ===")
+        # "我都不知道你搜索的命中哪一个" — outlining the block says which MESSAGE, which
+        # in one of several paragraphs is not the question.
+        #
+        # findMarkIn lives inside the page's IIFE like everything else here, so its
+        # SOURCE is lifted out and injected — the same text, running in a real DOM,
+        # which is the closest this can get to driving the shipped function.
+        _fm = src_index[src_index.index("function findMarkIn(el, q) {"):]
+        _fm = _fm[:_fm.index("\n  }\n") + 4]
+        marked = drv.js("window.__fm = " + _fm + """;
+          const host = document.createElement('div');
+          host.id = '__mk';
+          host.innerHTML = '<p>关于 <b>task desc</b> 的问题</p><p>又一次 TASK DESC</p>';
+          document.body.appendChild(host);
+          window.__fm(host, 'task desc');
+          const marks = [...host.querySelectorAll('mark.find-mark')];
+          return { n: marks.length, texts: marks.map(m => m.textContent),
+                   bTags: host.querySelectorAll('b').length,
+                   pTags: host.querySelectorAll('p').length,
+                   html: host.innerHTML.slice(0, 80) };
+        """)
+        check("every occurrence is wrapped", marked["n"] == 2, str(marked["n"]))
+        # Case-insensitive to find, but the page keeps what was written.
+        check("...matched case-insensitively, shown as written",
+              marked["texts"] == ["task desc", "TASK DESC"], str(marked["texts"]))
+        # The first match sits inside <b>: an innerHTML replace would have eaten the tag
+        # or matched inside one. This walks text nodes for that reason.
+        check("...without disturbing the markup it walked through",
+              marked["bTags"] == 1 and marked["pTags"] == 2, marked["html"])
+        drv.js("const n = document.getElementById('__mk'); if (n) n.remove();")
+
+        print("=== your own long messages fold in the middle ===")
+        # Driven through the page's own renderer by building a block the way the
+        # transcript does, because what matters is the DOM you end up looking at: two
+        # lines, a seam that says how many are missing, two more lines.
+        fold = drv.js("""
+          const m = document.getElementById('main');
+          m.innerHTML = '';
+          const mk = (n) => Array.from({length: n}, (_, i) => 'L' + (i + 1)).join('\\n');
+          const out = {};
+          for (const [key, n] of [['short', 4], ['long', 12]]) {
+            const d = document.createElement('div');
+            d.className = 'msg user';
+            const md = document.createElement('div'); md.className = 'markdown';
+            md.dataset.src = mk(n);
+            d.appendChild(md); m.appendChild(d);
+          }
+          return Object.keys(out);
+        """)
+        # The fold lives inside the page's IIFE, so the assertions below drive it through
+        # a real render instead: push a long user turn into the transcript the way the
+        # poll does. If that is not reachable from here, the line maths is covered in
+        # node (tests/test_gear_menu_ui.py) and this pins the CSS + the button's shape.
+        css = src_index[src_index.index(".msg .fold-btn {"):]
+        css = css[:css.index("}")]
+        check("the seam is a full-width dim row, not a button-looking button",
+              "width: 100%" in css and "var(--muted)" in css and "dashed" in css,
+              css.strip()[:60])
+        js = src_index[src_index.index("function userFold"):]
+        js = js[:js.index("\n  }\n")]
+        # Sliced to the collapsed branch first: `appendChild(btn)` appears in the
+        # expanded branch too, and .index() would match that earlier one — which is how
+        # this assertion failed while the code was right.
+        folded = js[js.index("} else {"):]
+        check("folded state renders head, seam, tail — in that order",
+              folded.index("appendChild(h)") < folded.index("appendChild(btn)")
+              < folded.index("appendChild(t)"))
+        check("...and the seam says how many lines are hidden", "展开中间" in js and "parts.hidden" in js)
+        check("...expanding shows the whole thing and offers 收起",
+              "收起" in js and "renderMarkdown(text)" in js)
+        check("head and tail are rendered as separate markdown, not a sliced tree",
+              "renderMarkdown(parts.head)" in src_index and "renderMarkdown(parts.tail)" in src_index)
+        # Queued messages come through the same branch (role user + .queued), so the
+        # fold applies to them for free — which is the point of it being one branch.
+        br = src_index[src_index.index('if (b.kind === "text") {'):]
+        br = br[:br.index("} else if")]
+        check("queued turns get the same fold (same branch, keyed on role)",
+              'if (b.role === "user") userFold(' in br and "indieQueued" in br)
+        check("...and math is detected from the SOURCE, so a folded formula still gets ∑",
+              "_mathRe.test(b.text" in br)
+
         print("=== a quoted line still LOOKS quoted after markdown ===")
         # User messages go through marked, so `> …` becomes a <blockquote> and the
         # marker itself is gone from the text. With no styling for it — and there was

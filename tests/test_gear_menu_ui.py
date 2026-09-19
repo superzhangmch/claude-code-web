@@ -137,6 +137,44 @@ __WMARKS__
 
 __FSFLOOR__
 
+__FOLD__
+
+__ENTRYTEXT__
+
+console.log("=== what find() reads out of an entry ===");
+// It reads the ENTRY and not the rendered node, because a long message is folded in
+// the middle — and the middle is the part you are most likely looking for.
+check("a plain string body", entryTextOf({ message: { content: "找我" } }) === "找我");
+check("a list of text blocks",
+      entryTextOf({ message: { content: [{ type: "text", text: "一" }, { type: "text", text: "二" }] } })
+        === "一\n二");
+check("...skipping the non-text parts",
+      entryTextOf({ message: { content: [{ type: "tool_use", name: "Bash" }, { type: "text", text: "只要这句" }] } })
+        === "只要这句");
+check("an entry with no message at all", entryTextOf({}) === "");
+check("...or a null one", entryTextOf(null) === "");
+check("...or a shape nobody expected", entryTextOf({ message: { content: 42 } }) === "");
+
+console.log("=== your own long messages fold to 2 + … + 2 ===");
+// Five lines is the most that shows; past that the MIDDLE goes, because both ends are
+// what you navigate by — the first line says which request this was, the last is what
+// you actually asked.
+const F = (n) => foldParts(Array.from({length: n}, (_, i) => "L" + (i + 1)).join("\n"));
+check("four lines are left alone", F(4) === null, String(F(4)));
+check("...and so are exactly five", F(5) === null, String(F(5)));
+const six = F(6);
+check("six fold to 2 + … + 2", six && six.head === "L1\nL2" && six.tail === "L5\nL6",
+      JSON.stringify(six));
+check("...reporting the right number hidden", six && six.hidden === 2, String(six && six.hidden));
+const twelve = F(12);
+check("twelve keep the same two ends", twelve.head === "L1\nL2" && twelve.tail === "L11\nL12",
+      JSON.stringify(twelve));
+check("...and hide the other eight", twelve.hidden === 8, String(twelve.hidden));
+// Trailing blank lines are not content, and counting them would fold a four-line
+// message that merely ends in newlines.
+check("trailing blank lines do not count", foldParts("1\n2\n3\n4\n\n\n") === null);
+check("an empty message does not fold", foldParts("") === null);
+
 console.log("=== the A-/A+ floor keeps iOS from zooming the page ===");
 // Focusing a field under 16px makes iOS Safari zoom the whole page. Four other inputs
 // in this file carry a "≥16px → no iOS focus auto-zoom" comment; the two memo boxes
@@ -198,6 +236,18 @@ def main():
     w = re.search(r"\n  (function watchMarks\(sup, armed\) \{.*?\n  \})\n", src, re.S)
     if not w:
         print("  FAIL  could not extract watchMarks() from static/index.html"); return 1
+    # What find() matches against. Pulled out because the DOM half of that feature
+    # cannot be driven from a browser test (it is all inside the page's IIFE), so the
+    # text half is at least driven here.
+    et = re.search(r"\n  (function entryTextOf\(e\) \{.*?\n  \})\n", src, re.S)
+    if not et:
+        print("  FAIL  could not extract entryTextOf() from static/index.html"); return 1
+    # Folding your own long messages. Extracted because it is arithmetic — which line
+    # is kept, how many are reported hidden — and arithmetic is worth driving rather
+    # than reading.
+    fp = re.search(r"\n  (const MSG_MAX_LINES = .*?\n  function foldParts\(text\) \{.*?\n  \})\n", src, re.S)
+    if not fp:
+        print("  FAIL  could not extract foldParts() from static/index.html"); return 1
     # The A-/A+ floor. iOS zooms the whole page when you focus a field under 16px, so
     # the floor has to move on touch devices — and it is a function, not a constant,
     # which is the sort of thing that silently stops being called.
@@ -206,7 +256,8 @@ def main():
         print("  FAIL  could not extract fsFloor() from static/index.html"); return 1
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as fh:
         fh.write(JS.replace("__RENDER__", m.group(1)).replace("__CLAMP__", c.group(1))
-                   .replace("__WMARKS__", w.group(1)).replace("__FSFLOOR__", f.group(1)))
+                   .replace("__WMARKS__", w.group(1)).replace("__FSFLOOR__", f.group(1))
+                   .replace("__FOLD__", fp.group(1)).replace("__ENTRYTEXT__", et.group(1)))
         path = fh.name
     try:
         r = subprocess.run([node, path], capture_output=True, text=True)
