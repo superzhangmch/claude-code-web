@@ -155,25 +155,45 @@ check("an entry with no message at all", entryTextOf({}) === "");
 check("...or a null one", entryTextOf(null) === "");
 check("...or a shape nobody expected", entryTextOf({ message: { content: 42 } }) === "");
 
-console.log("=== your own long messages fold to 2 + … + 2 ===");
-// Five lines is the most that shows; past that the MIDDLE goes, because both ends are
-// what you navigate by — the first line says which request this was, the last is what
-// you actually asked.
-const F = (n) => foldParts(Array.from({length: n}, (_, i) => "L" + (i + 1)).join("\n"));
-check("four lines are left alone", F(4) === null, String(F(4)));
-check("...and so are exactly five", F(5) === null, String(F(5)));
-const six = F(6);
-check("six fold to 2 + … + 2", six && six.head === "L1\nL2" && six.tail === "L5\nL6",
-      JSON.stringify(six));
-check("...reporting the right number hidden", six && six.hidden === 2, String(six && six.hidden));
-const twelve = F(12);
-check("twelve keep the same two ends", twelve.head === "L1\nL2" && twelve.tail === "L11\nL12",
-      JSON.stringify(twelve));
-check("...and hide the other eight", twelve.hidden === 8, String(twelve.hidden));
-// Trailing blank lines are not content, and counting them would fold a four-line
-// message that merely ends in newlines.
-check("trailing blank lines do not count", foldParts("1\n2\n3\n4\n\n\n") === null);
-check("an empty message does not fold", foldParts("") === null);
+console.log("=== your own long messages fold by CHARACTERS ===");
+// Lines were the first rule and they are a bad proxy: one can be two words or two
+// hundred. A queued message showed 「对于 connector 的推荐:」 and one more short line,
+// with five lines hidden between them — almost nothing kept, and the part that mattered
+// gone ("省略掉的太多").
+const F = (t) => foldParts(t);
+check("a short message is left whole", F("一句话") === null);
+// The threshold is not a number of its own: it is head + tail + "worth a seam"
+// (200 + 100 + 40). A separate one went dead as soon as the budgets shrank, so it was
+// folded into this.
+check("...and so is one that has nothing worth hiding", F("x".repeat(340)) === null);
+check("...while just past that, it folds", F("x".repeat(360)) !== null,
+      JSON.stringify(F("x".repeat(360)) && F("x".repeat(360)).hidden));
+const big = F("x".repeat(1200));
+check("a long one keeps a readable head", big && big.head.length === 200, String(big && big.head.length));
+check("...and a readable tail", big && big.tail.length === 100, String(big && big.tail.length));
+check("...and hides the rest", big && big.hidden === 900, String(big && big.hidden));
+check("...with nothing lost between the pieces",
+      big && big.head.length + big.hidden + big.tail.length === 1200);
+// The seam prefers a line end: cutting mid-word reads as a bug, cutting at a break
+// reads as an omission.
+// Snapping only happens when a break is WITHIN 80 characters of the cut — otherwise a
+// long unbroken paragraph would lose most of its budget to the nearest newline. So the
+// fixture puts the breaks inside that window: a 180-char first line (head target 200)
+// and a 60-char last one (tail target 100).
+const lined = F("头".repeat(180) + "\n" + "中段".repeat(400) + "\n" + "尾".repeat(60));
+check("it cuts at a line break when one is near",
+      lined.head === "头".repeat(180), JSON.stringify(lined.head.slice(-6)) + " len=" + lined.head.length);
+check("...and the tail starts at one",
+      lined.tail === "尾".repeat(60), JSON.stringify(lined.tail.slice(0, 6)) + " len=" + lined.tail.length);
+// ...and when no break is near, it cuts at the budget rather than throwing the budget
+// away to reach one.
+const solid = F("字".repeat(1000));
+check("...but a solid block is cut at the budget", solid.head.length === 200, String(solid.head.length));
+// The case from the screenshot: short, and it must not be folded at all now.
+const shot = F("对于 connector 的推荐:\nconnector :\n" + "a".repeat(60) + "\n按这个实现.");
+check("the message that prompted this is not folded any more", shot === null, JSON.stringify(shot));
+check("trailing blank lines still do not count", F("1\n2\n3\n4\n\n\n") === null);
+check("an empty message does not fold", F("") === null);
 
 console.log("=== the A-/A+ floor keeps iOS from zooming the page ===");
 // Focusing a field under 16px makes iOS Safari zoom the whole page. Four other inputs
@@ -245,7 +265,7 @@ def main():
     # Folding your own long messages. Extracted because it is arithmetic — which line
     # is kept, how many are reported hidden — and arithmetic is worth driving rather
     # than reading.
-    fp = re.search(r"\n  (const MSG_MAX_LINES = .*?\n  function foldParts\(text\) \{.*?\n  \})\n", src, re.S)
+    fp = re.search(r"\n  (const MSG_HEAD_CHARS = .*?\n  function foldParts\(text\) \{.*?\n  \})\n", src, re.S)
     if not fp:
         print("  FAIL  could not extract foldParts() from static/index.html"); return 1
     # The A-/A+ floor. iOS zooms the whole page when you focus a field under 16px, so

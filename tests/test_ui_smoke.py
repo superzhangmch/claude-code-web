@@ -693,7 +693,8 @@ def main():
         check("folded state renders head, seam, tail — in that order",
               folded.index("appendChild(h)") < folded.index("appendChild(btn)")
               < folded.index("appendChild(t)"))
-        check("...and the seam says how many lines are hidden", "展开中间" in js and "parts.hidden" in js)
+        check("...and the seam says how much is hidden, in characters",
+              "展开中间" in js and "parts.hidden" in js and "字" in js)
         check("...expanding shows the whole thing and offers 收起",
               "收起" in js and "renderMarkdown(text)" in js)
         check("head and tail are rendered as separate markdown, not a sliced tree",

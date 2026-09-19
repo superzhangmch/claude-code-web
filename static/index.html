@@ -3593,13 +3593,44 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     (document.body || document.documentElement).appendChild(d);
   }
   // ---- your own messages, folded in the middle ----
-  const MSG_MAX_LINES = 5, MSG_KEEP = 2;
+  // Measured in CHARACTERS, not lines. Lines were the first rule and they are a bad
+  // proxy: one can be two words or two hundred, so "keep 2 + 2" showed almost nothing
+  // of a message written in short lines while hiding the part that mattered — seen on
+  // a queued message whose visible half was 「对于 connector 的推荐:」 and nothing else.
+  //
+  // A line-count trigger was in here too, for "twenty short items is twenty lines tall
+  // whatever its character count". It was dead: exceeding twelve lines while staying
+  // under the character budget means lines averaging under 35 characters, and then the
+  // 400-character head+tail covers nearly all of it and the "ends nearly meet" guard
+  // below drops the fold anyway. Checked, then removed rather than left to read like a
+  // rule that does something.
+  // One decision, not two numbers that can contradict each other: fold when doing so
+  // would actually hide something worth a seam. A separate threshold was in here and
+  // went dead the moment the head/tail budgets shrank — every message past it hid far
+  // more than the minimum, so the "ends nearly meet" case could never happen.
+  const MSG_HEAD_CHARS = 200, MSG_TAIL_CHARS = 100, MSG_MIN_HIDDEN = 40;
+  // Prefer to cut where the text already breaks: a seam at a line end reads as an
+  // omission, one mid-word reads as a bug.
+  function _cutAt(s, n, fromEnd) {
+    if (s.length <= n) return s;
+    if (!fromEnd) {
+      const nl = s.lastIndexOf("\n", n);
+      return s.slice(0, nl > n - 80 ? nl : n);
+    }
+    const from = s.length - n;
+    const nl = s.indexOf("\n", from);
+    return s.slice(nl >= 0 && nl < from + 80 ? nl + 1 : from);
+  }
   function foldParts(text) {
-    const lines = String(text || "").replace(/\s+$/, "").split("\n");
-    if (lines.length <= MSG_MAX_LINES) return null;
-    return { head: lines.slice(0, MSG_KEEP).join("\n"),
-             tail: lines.slice(-MSG_KEEP).join("\n"),
-             hidden: lines.length - MSG_KEEP * 2 };
+    const t = String(text || "").replace(/\s+$/, "");
+    if (t.length <= MSG_HEAD_CHARS + MSG_TAIL_CHARS + MSG_MIN_HIDDEN) return null;
+    const head = _cutAt(t, MSG_HEAD_CHARS, false);
+    const tail = _cutAt(t, MSG_TAIL_CHARS, true);
+    const hidden = t.length - head.length - tail.length;
+    // Snapping to a line break can give back more than the budget, which can leave the
+    // ends meeting after all.
+    if (hidden <= MSG_MIN_HIDDEN) return null;
+    return { head, tail, hidden };
   }
   // Head and tail are rendered as SEPARATE markdown blocks rather than by slicing one
   // rendered tree: a fragment of markdown is still valid markdown, whereas half a
@@ -3613,8 +3644,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       md.textContent = "";
       const btn = document.createElement("button");
       btn.className = "fold-btn";
-      btn.textContent = open ? "⋯ 收起" : `⋯ 展开中间 ${parts.hidden} 行`;
-      btn.title = open ? "折叠回 2 行 + … + 2 行" : "展开这条消息的全文";
+      btn.textContent = open ? "⋯ 收起" : `⋯ 展开中间 ${parts.hidden} 字`;
+      btn.title = open ? "折回开头和结尾" : "展开这条消息的全文";
       btn.addEventListener("click", (e) => { e.stopPropagation(); open = !open; draw(); });
       if (open) {
         const full = document.createElement("div");
