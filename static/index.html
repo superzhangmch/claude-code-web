@@ -853,6 +853,17 @@ body.pure #closetab-btn.active {
 .msg .copy-btn svg { display: block; }
 .msg .copy-btn.done { color: #6ee884; }
 .msg .markdown { word-break: break-word; }
+/* Quotes had NO styling at all, so markdown ate the `>` and left the text looking like
+   the rest of the message — which is what 引用 produces, and the one thing it must not
+   look like. A bar down the left and dimmer text, the shape a quote has everywhere. */
+.msg .markdown blockquote {
+  margin: 6px 0; padding: 2px 0 2px 10px;
+  border-left: 3px solid var(--border); color: var(--muted);
+}
+.msg .markdown blockquote p { margin: 3px 0; }
+/* The user's own bubble is already dimmed, so a quote inside it needs the contrast to
+   come from the bar rather than from the text colour. */
+.msg.user .markdown blockquote { border-left-color: var(--accent); }
 /* English-learning correction hint, shown inside your own sent message box when
    what you typed had real mistakes (empty/absent when it was already correct). */
 .msg .grammar-hint {
@@ -1342,6 +1353,26 @@ footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
 #mm-asr-sec .asr-unset code { font-size: 11px; word-break: break-all; }
 /* The jump-to-request list. Anchored to the bottom right, above the float controls
    it belongs to (.switch-menu is top-anchored, so it can't be reused as-is). */
+/* Floats over the selection. Same translucent pill as the tail/↑/⤓ controls, so it
+   reads as part of the app rather than as the browser's own menu. */
+.sel-bar {
+  position: fixed; z-index: 90;
+  display: inline-flex; align-items: center; gap: 2px;
+  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--border); border-radius: 999px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+  backdrop-filter: blur(4px);
+  padding: 2px;
+}
+.sel-bar button {
+  background: transparent; border: none; color: var(--text);
+  /* 15px: this is a tap target on a phone, sitting under a thumb and next to the OS's
+     own selection menu — 11px chrome would be a coin toss. */
+  font-size: 15px; line-height: 1; padding: 7px 12px; border-radius: 999px;
+  cursor: pointer; white-space: nowrap;
+}
+.sel-bar button:active { background: var(--panel2); }
 .asks-menu {
   position: fixed; right: 8px; bottom: 92px; z-index: 85;
   background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
@@ -2134,6 +2165,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 #memo-modal .memo-fontgrp { display: inline-flex; gap: 3px; margin-left: 2px; }
+#memo-modal .memo-saved { color: var(--muted); font-size: 11px; flex-shrink: 0; }
 #memo-modal .memo-cb {
   display: inline-flex; align-items: center; gap: 4px; font-size: 11px;
   color: var(--muted); flex-shrink: 0; cursor: pointer;
@@ -2141,9 +2173,30 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #memo-modal .memo-cb input { margin: 0; }
 /* flex:1 + min-height:0 on both levels — without min-height a textarea refuses to
    shrink below its rows= and pushes the second section off the bottom. */
-#memo-modal .memo-sec { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 3px; }
+/* Shared by every full-screen card. Was two identical rules keyed on the modal id,
+   which besides being a copy made them unbeatable by any class-only rule — the ⤢
+   zoom below is exactly such a rule, and lost silently until this moved. */
+.modal-card .memo-sec { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 3px; }
 #memo-modal .memo-lab { font-size: 12px; color: var(--text); }
 #memo-modal .memo-hint { color: var(--muted); font-size: 11px; }
+/* One box, the whole card. Everything else in the card is hidden rather than shrunk:
+   half the point is on a phone, where "bigger" only means anything if the other box
+   and the option rows stop taking room. The header stays — 保存 and ✕ have to remain
+   reachable — and the same rule serves both windows, because the last thing this file
+   did with two near-identical copies was let them drift by 411px. */
+.modal-card.has-zoom .memo-sec:not(.zoomed),
+.modal-card.has-zoom .memo-vers,
+.modal-card.has-zoom .wt-opts { display: none; }
+.modal-card.has-zoom .memo-sec.zoomed { flex: 1; min-height: 0; }
+.modal-card .memo-zoom { flex-shrink: 0; }
+
+/* The belt to the JS braces: whatever --memo-fs ends up as, a touch device never
+   renders these under 16px, because that is the number iOS uses to decide whether to
+   zoom the page when you focus a field. Scoped to coarse pointers so a desktop keeps
+   the small text that A- exists for. */
+@media (pointer: coarse) {
+  #memo-modal .memo-ta, #watch-modal .memo-ta { font-size: max(16px, var(--memo-fs)); }
+}
 #memo-modal .memo-ta {
   width: 100%; box-sizing: border-box; resize: none;   /* it already fills its half */
   flex: 1; min-height: 64px;
@@ -2167,7 +2220,6 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #watch-modal .memo-fontgrp { display: inline-flex; gap: 3px; margin-left: 2px; }
 #watch-modal .wt-seg { display: inline-flex; gap: 3px; }
 #watch-modal .wt-seg .btn.wt-on { outline: 2px solid var(--accent); font-weight: 700; }
-#watch-modal .memo-sec { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 3px; }
 #watch-modal .memo-lab { flex-wrap: wrap; row-gap: 3px; flex-shrink: 0; min-height: 22px; }
 #watch-modal .memo-meta {
   flex: 1; min-width: 0; color: var(--muted); font-size: 11px; text-align: right;
@@ -2175,7 +2227,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 }
 /* Two rows of choices: how long it may act for, and how often it asks. Wrapping, so
    nine buttons on a phone become two tight lines instead of a horizontal scroll. */
-#watch-modal .wt-opts {
+.modal-card .wt-opts {
   display: flex; align-items: center; flex-wrap: wrap; gap: 4px; row-gap: 3px; flex-shrink: 0;
 }
 #watch-modal .wt-optlab { font-size: 11px; color: var(--text); flex: 0 0 auto; margin-right: 2px; }
@@ -2200,6 +2252,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   max-height: 26vh; overflow: auto; border: 1px solid var(--border);
   border-radius: 6px; padding: 7px 8px; font-size: 12px; line-height: 1.5;
 }
+#memo-modal .memo-vers {
+  display: none; flex-shrink: 0; max-height: 22vh; overflow: auto;
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; font-size: 12px;
+}
+#memo-modal .memo-vers.show { display: block; }
+#memo-modal .memo-vers .mv-row { display: flex; align-items: baseline; gap: 6px; padding: 3px 0; }
+#memo-modal .memo-vers .mv-id { color: var(--muted); flex-shrink: 0; min-width: 22px; }
+#memo-modal .memo-vers .mv-txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#memo-modal .memo-vers .mv-cur { color: var(--accent); flex-shrink: 0; }
+#memo-modal .memo-vers .mv-open { cursor: pointer; }
+#memo-modal .memo-vers .mv-open:hover { text-decoration: underline; }
+#memo-modal .memo-vers .mv-row.editing { outline: 1px solid var(--border); border-radius: 4px; }
+#memo-modal .mv-warn { color: #e0a04a; }
 /* Collapsed by default, so the two boxes own the whole card until you ask for the
    report. flex:0 when open — an expanded report must not start eating the boxes. */
 #memo-modal .memo-sec.memo-check { flex: 0 0 auto; display: none; }
@@ -2632,7 +2697,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div class="modal-card memo-card">
       <div class="modal-row memo-head">
         <h3>Task</h3>
-        <span id="memo-saved" class="hdr-fill"></span>
+        <!-- Which version the boxes are showing. It is the header's one stretchy cell,
+             so it also pushes 保存/✕ to the right edge. -->
+        <span id="memo-vercur" class="hdr-fill"></span>
+        <span id="memo-saved" class="memo-saved"></span>
         <!-- Font size for the boxes only. It is the one thing here that is about
              READING rather than doing, which is why it sits apart from the actions. -->
         <span class="memo-fontgrp">
@@ -2644,6 +2712,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
              one-glyph verdict so a bad result is never HIDDEN, only collapsed — a glyph
              and not a colour, because body.pure forces black-on-white with !important. -->
         <button id="memo-checktoggle" class="btn memo-smallbtn" title="展开/收起自检结果">自检 —</button>
+        <!-- Versions. Editing rewrites the version you are looking at; `fork` is what
+             makes a new one, and any version can be opened, edited, saved, or made the
+             current one. Taken out for a day and asked for again, with those semantics
+             spelled out — so they are the ones pinned in the tests. -->
+        <button id="memo-verlist" class="btn memo-smallbtn" title="列出所有版本:可载入编辑、可设为当前">versions</button>
+        <button id="memo-fork" class="btn memo-smallbtn" title="以当前内容为起点建立一个新版本(不影响旧版本)">fork</button>
         <button id="memo-fill-both" class="btn memo-smallbtn"
                 title="把两个框都填进输入框(不发送),你自己补一句要它做什么">填入输入框</button>
         <!-- A checkbox, not a button, and worded to kill the misreading it caused: the
@@ -2657,9 +2731,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <button id="memo-save" class="btn" title="保存两个框(只有这个按钮会写入)">保存</button>
         <button id="memo-close" class="btn" title="close">✕</button>
       </div>
+      <div id="memo-vers" class="memo-vers"></div>
       <div class="memo-sec">
         <div class="memo-lab">当前任务 <span class="memo-hint">随进展改写</span>
           <span id="memo-task-meta" class="memo-meta"></span>
+          <button class="btn memo-smallbtn memo-zoom" title="这个框占满整个窗口 / 退出">⤢</button>
           <button id="memo-task-send" class="btn memo-smallbtn"
                   title="把它放进下面的输入框(标注为 [当前任务]),你确认后再发">填入输入框</button></div>
         <textarea id="memo-task" class="memo-ta" rows="3"
@@ -2668,6 +2744,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <div class="memo-sec">
         <div class="memo-lab">注意事项 <span class="memo-hint">与当前任务无关, 长期有效</span>
           <span id="memo-notes-meta" class="memo-meta"></span>
+          <button class="btn memo-smallbtn memo-zoom" title="这个框占满整个窗口 / 退出">⤢</button>
           <button id="memo-notes-send" class="btn memo-smallbtn"
                   title="把它放进下面的输入框(标注为 [注意事项]),你确认后再发">填入输入框</button></div>
         <textarea id="memo-notes" class="memo-ta" rows="3"
@@ -2717,7 +2794,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <div class="memo-sec">
         <div class="memo-lab">策略
           <span class="memo-hint">可留空(用默认判据)。写了就高于默认 —— 它管的是「什么情况该催」</span>
-          <span id="watch-left" class="memo-meta"></span></div>
+          <span id="watch-left" class="memo-meta"></span>
+          <button class="btn memo-smallbtn memo-zoom" title="这个框占满整个窗口 / 退出">⤢</button></div>
         <textarea id="watch-policy" class="memo-ta" rows="6"
                   placeholder="它会周期性把上面的 Task 原文发回给 session, 问「确认完成了吗」;&#10;它明确说确认完成后就不再问这一版任务。这里写你要它怎么判断:&#10;&#10;· 它问方案怎么选时: 让它自己选最能推进任务的那个(那就会催它)&#10;· 涉及 push/部署/删数据的选择: 等我, 别催&#10;· 什么算完成: 测试跑绿 + 改动已 commit, 才算&#10;· 要密码/验证码这类只有我能给的: 别催"></textarea>
       </div>
@@ -2930,6 +3008,23 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     </div>
     <div id="statusline" style="display:none"></div>
   </footer>
+  <!-- Select any text in the transcript and this floats over it: two ways to quote it
+       into the composer, plus a copy that a phone's own selection menu buries.
+
+       A sibling of <footer>, not a child of it. It lived inside the footer for one
+       commit, and in the session list — where the footer carries .hidden — a
+       display:none PARENT leaves the child with no layout at all: measured 0x0 at
+       (0,0), so the bar could not appear there and its own display:inline-flex counted
+       for nothing. A viewport-positioned overlay does not belong inside something that
+       gets hidden or transformed. -->
+    <!-- Select any text in the transcript and this floats over it. Two actions and no
+       menu: quoting is the one you came for, copy is the one the browser's own
+       selection menu buries on a phone. -->
+  <div id="sel-bar" class="sel-bar" style="display:none">
+    <button id="sel-quote" title="引到输入框,后面接「关于这点,」,你接着写">引用</button>
+    <button id="sel-explain" title="引到输入框,后面接「解释一下这段。」,可以直接发">解释</button>
+    <button id="sel-copy" title="复制选中的文字">复制</button>
+  </div>
 
   <!-- attach loading overlay -->
   <div id="loading" class="loading">
@@ -3493,23 +3588,24 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const memoSaveBtn = document.getElementById("memo-save");
   const mmMemoHint = document.getElementById("mm-memo-hint");
   let memoRec = null, memoVerSeen = -1, memoSid = "";
+  // Which version is loaded in the boxes. Usually the current one, but ANY version can
+  // be opened and edited: a list you can only switch to is a list of things you cannot
+  // fix, and fixing a typo in an old version should not mean telling the session — even
+  // for a moment — that it is now working to it.
+  let memoEditing = 0;
+  function memoVer(id) {
+    const vs = (memoRec || {}).versions || [];
+    return vs.find((v) => v.id === id) || vs.find((v) => v.current) || null;
+  }
   const MEMO_TAG = { task: "[当前任务]", notes: "[注意事项]" };
-  // There were VERSIONS here — a list, `fork`, "set as current", per-version editing,
-  // and a header line saying which one the boxes were showing. Retired on request
-  // ("只要能维护好一个版本不就行了"), and it was the right call: the task is a thing you
-  // rewrite as the work moves, not a thing you keep a history of, and the history came
-  // with its own failure modes (editing an old version thinking it was the live one).
-  // The server still stores the same shape with a single entry, so nothing on disk was
-  // lost and old files with several versions simply show their current one.
-  //
-  // `rev` stayed: it counts TEXT changes, which is what the self-check's
-  // "对不上现在的任务" and the whip's "already confirmed this version" both key off.
-  //
-  // force=true still means an EXPLICIT load — the don't-stomp guard below exists for a
-  // poll landing mid-sentence, and must not refuse the thing you just asked for.
+  // force=true for an EXPLICIT load (opening another version). The don't-stomp guard
+  // below is there for a poll landing mid-sentence; it must not also refuse the one
+  // thing you just asked for — which it did: after loading v1 the box had focus, so
+  // clicking back to v2 left v1's text sitting there under an "editing v2" label.
   function memoRender(force) {
     const r = memoRec || { task: {}, notes: {} };
-    const v = { task: r.task || {}, notes: r.notes || {} };
+    const v = memoVer(memoEditing) || { task: r.task || {}, notes: r.notes || {} };
+    if (v && v.id) memoEditing = v.id;
     // Unsaved edits win over a refresh, in BOTH boxes. The focus test alone was not
     // enough: type in 注意事项, click into 当前任务, and a refresh (another device
     // edited, or a fork landed) overwrote the box you were not in and then reported
@@ -3552,6 +3648,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
               : "\n还没有自检报告");
       }
     }
+    memoVerRender();
     memoAskBtns();
     if (typeof watchRender === "function") watchRender();
   }
@@ -3662,22 +3759,190 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     memoCheckSec.classList.toggle("show");
   });
 
+  // ---- quote what it said ----
+  // Selecting text in the transcript floats a two-button bar over it. `引用` drops the
+  // selection into the composer as a markdown quote and follows it with "关于这点,", so
+  // the next thing you type is the thing you wanted to say about it.
+  //
+  // Markdown `>` rather than 「」 or a code fence: it survives into the terminal
+  // readably, claude-code renders it as a quote, and a fence would claim the text is
+  // code. (`>` used to be risky — the whip read it as a prompt cursor — but that was
+  // fixed to accept only ❯/›.)
+  const selBar = document.getElementById("sel-bar");
+  // The two quoting buttons differ only in the sentence that follows. 引用 leaves you
+  // mid-sentence with the caret after it; 解释 is already a complete request, so it can
+  // be sent as it stands.
+  const SEL_LEAD = { quote: "关于这点,", explain: "有点不懂,能通俗解释下吗" };
+  function selText() {
+    const sel = window.getSelection && window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+    const t = String(sel).trim();
+    if (!t) return null;
+    // Only in the transcript. A selection in the composer, or in a modal, is being
+    // made for some other reason and a bar over it would be in the way.
+    // Looked up here, not captured at init: `mainEl` is declared a thousand lines
+    // below this block, and referencing it from here is a ReferenceError at STARTUP
+    // that kills the whole script (const, temporal dead zone — node --check cannot see
+    // it, and the page renders as a bare shell).
+    const main = document.getElementById("main");
+    const node = sel.anchorNode;
+    const el = node && (node.nodeType === 1 ? node : node.parentElement);
+    if (!main || !el || !main.contains(el)) return null;
+    return { text: t, rect: sel.getRangeAt(0).getBoundingClientRect() };
+  }
+  function selHide() { selBar.style.display = "none"; }
+  function selShow() {
+    const s = selText();
+    if (!s || !s.rect || (!s.rect.width && !s.rect.height)) { selHide(); return; }
+    selBar.style.display = "inline-flex";
+    // Measure AFTER it is displayed, then clamp: a selection at the very top or hard
+    // against a side would otherwise put the bar off screen.
+    const bw = selBar.offsetWidth, bh = selBar.offsetHeight, pad = 6;
+    const vh = window.innerHeight;
+    // Which side, and why it is not simply "above":
+    //
+    // iOS puts its own Look Up / Copy / Share bar just ABOVE the selection whenever
+    // there is room, which is most of the time once the selection is past the top of
+    // the screen — and two bars in the same place means ours is the one you cannot
+    // reach. So the side is chosen to be the opposite of the one iOS will take: for a
+    // selection in the lower part of the screen we go BELOW the text, and only for one
+    // near the top (where iOS drops its menu underneath) do we sit above.
+    const low = s.rect.top > vh * 0.45;
+    let top = low ? s.rect.bottom + pad : s.rect.top - bh - pad;
+    // ...and if the chosen side does not fit, the other one, clamped into view.
+    if (top < pad || top + bh > vh - pad) {
+      top = low ? s.rect.top - bh - pad : s.rect.bottom + pad;
+      top = Math.max(pad, Math.min(top, vh - bh - pad));
+    }
+    let left = s.rect.left + s.rect.width / 2 - bw / 2;
+    left = Math.max(pad, Math.min(left, window.innerWidth - bw - pad));
+    selBar.style.top = Math.round(top) + "px";
+    selBar.style.left = Math.round(left) + "px";
+  }
+  // mouseup/touchend rather than selectionchange: the latter fires for every character
+  // as a drag grows, which moves the bar around under the finger doing the dragging.
+  for (const ev of ["mouseup", "touchend"]) {
+    document.addEventListener(ev, () => setTimeout(selShow, 10));
+  }
+  document.addEventListener("selectionchange", () => { if (!selText()) selHide(); });
+  // Capture phase on document: scroll does not bubble, and this way it needs no
+  // reference to the scroller at bind time.
+  document.addEventListener("scroll", selHide, true);
+  window.addEventListener("resize", selHide);
+  function selQuote(text, lead) {
+    // Collapse runs of blank lines: quoting a spaced-out answer should not paste half a
+    // screen of "> " into the box.
+    const q = text.replace(/\r/g, "").split("\n").map((l) => "> " + l.trimEnd())
+                  .join("\n").replace(/(?:\n> )+(?=\n> )/g, "\n>");
+    const cur = inputEl.value;
+    // Appended, not prepended: "关于这点," has to end up immediately before the caret,
+    // and a half-written draft should stay where it was rather than be wrapped around.
+    inputEl.value = (cur.trim() ? cur.replace(/\s*$/, "") + "\n\n" : "") + q + "\n\n" + lead;
+    inputEl.dispatchEvent(new Event("input"));
+    // Focused twice: once now, and again on the next frame if it did not stick. On a
+    // phone the OS selection menu is dismissing at this exact moment and can take the
+    // focus back with it — which is the whole reason the lead-in exists, since a
+    // sentence you then have to tap into the box is no better than no sentence. Cannot
+    // be reproduced in a desktop browser, so it is a hedge rather than a fix; the
+    // assertion below only pins that the first focus works.
+    const caret = () => {
+      const end = inputEl.value.length;
+      try { inputEl.setSelectionRange(end, end); } catch {}
+    };
+    inputEl.focus(); caret();
+    requestAnimationFrame(() => {
+      if (document.activeElement !== inputEl) { inputEl.focus(); caret(); }
+    });
+  }
+  for (const [id, kind] of [["sel-quote", "quote"], ["sel-explain", "explain"]]) {
+    document.getElementById(id).addEventListener("click", (e) => {
+      e.stopPropagation(); e.preventDefault();
+      const s = selText();
+      if (!s) { selHide(); return; }
+      const text = s.text;
+      // Selection cleared BEFORE the composer is focused. Not because clearing it after
+      // steals focus — measured, and it does not: focus survived removeAllRanges() in
+      // Firefox. It is just the honest order, since after focusing, the document's
+      // selection IS the textarea's caret, and "clear the selection" should mean the
+      // transcript's, not the one we just created.
+      try { window.getSelection().removeAllRanges(); } catch {}
+      selHide();
+      selQuote(text, SEL_LEAD[kind]);
+    });
+  }
+  document.getElementById("sel-copy").addEventListener("click", (e) => {
+    e.stopPropagation(); e.preventDefault();
+    const s = selText();
+    const text = s ? s.text : "";
+    try { window.getSelection().removeAllRanges(); } catch {}
+    selHide();
+    if (text) copyText(text);
+  });
+  // The bar must not steal the selection out from under itself.
+  selBar.addEventListener("mousedown", (e) => e.preventDefault());
+
+  // ---- ⤢ : one box takes the whole card ----
+  // Delegated once for both windows. The zoom is NOT remembered: it is a thing you do
+  // to read or type a long one right now, and a window that opens zoomed hides the
+  // other box from someone who came to look at both.
+  function memoZoomClear(card) {
+    if (!card) return;
+    card.classList.remove("has-zoom");
+    card.querySelectorAll(".memo-sec.zoomed").forEach((x) => x.classList.remove("zoomed"));
+    card.querySelectorAll(".memo-zoom").forEach((b) => { b.textContent = "⤢"; });
+  }
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest(".memo-zoom");
+    if (!btn) return;
+    e.stopPropagation();
+    const sec = btn.closest(".memo-sec"), card = btn.closest(".modal-card");
+    if (!sec || !card) return;
+    const on = !sec.classList.contains("zoomed");
+    memoZoomClear(card);                     // only ever one box zoomed
+    if (on) {
+      card.classList.add("has-zoom");
+      sec.classList.add("zoomed");
+      // The self-check section's `.show` rule is id-scoped, so it outranks the zoom
+      // rule and would stay on screen. Fold it instead of fighting specificity.
+      card.querySelectorAll(".memo-check.show").forEach((x) => x.classList.remove("show"));
+      btn.textContent = "⤡";
+      const ta = sec.querySelector("textarea");
+      if (ta && !isPhone()) ta.focus();
+    }
+  });
+
   // ---- A- / A+ : the size of the text IN the boxes, remembered ----
   // Only the boxes and the evidence pane move. The chrome stays put: this is about
   // reading a task you wrote, and a window whose buttons grow with it just loses the
   // space that was being made for the text.
-  const MEMO_FS_MIN = 11, MEMO_FS_MAX = 26;
+  // iOS Safari zooms the whole page when you focus an input whose font is under 16px.
+  // This file already knows that — four other inputs carry a "≥16px → no iOS focus
+  // auto-zoom" comment — and the two memo boxes were the ones that did not, so tapping
+  // into the Task box on a phone blew the page up.
+  //
+  // Not fixed by raising the size everywhere: on a desktop 13px is the point of the
+  // small text. The FLOOR is what moves, and only where the problem exists — so A- on
+  // a phone stops at 16 and its button goes disabled there, rather than staying live
+  // and appearing to do nothing.
+  const FS_TOUCH = () => {
+    try { return !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches); }
+    catch { return false; }
+  };
+  const fsFloor = () => (FS_TOUCH() ? 16 : 11);
+  const MEMO_FS_MAX = 26;
   let memoFs = parseInt(localStorage.getItem("ccweb.memoFs") || "", 10);
-  if (!(memoFs >= MEMO_FS_MIN && memoFs <= MEMO_FS_MAX)) memoFs = 13;
+  // Clamped on load as well as on click: a 13 stored from a desktop browser would
+  // otherwise come back on the phone and zoom again.
+  if (!(memoFs >= fsFloor() && memoFs <= MEMO_FS_MAX)) memoFs = Math.max(13, fsFloor());
   function memoApplyFs() {
     const card = document.querySelector("#memo-modal .memo-card");
     if (card) card.style.setProperty("--memo-fs", memoFs + "px");
     const dn = document.getElementById("memo-fontdn"), up = document.getElementById("memo-fontup");
-    if (dn) dn.disabled = memoFs <= MEMO_FS_MIN;
+    if (dn) dn.disabled = memoFs <= fsFloor();
     if (up) up.disabled = memoFs >= MEMO_FS_MAX;
   }
   function memoStepFs(d) {
-    memoFs = Math.max(MEMO_FS_MIN, Math.min(MEMO_FS_MAX, memoFs + d));
+    memoFs = Math.max(fsFloor(), Math.min(MEMO_FS_MAX, memoFs + d));
     try { localStorage.setItem("ccweb.memoFs", String(memoFs)); } catch {}
     memoApplyFs();
   }
@@ -3704,6 +3969,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (!r.ok || sid !== attachedSid) return;
       const was = memoSid;
       memoRec = await r.json(); memoSid = sid; memoVerSeen = ver;
+      if (was !== sid) memoEditing = memoRec.current;   // another session → its current
       memoRender();
       // ...unless something is unsaved, in which case it is NOT stored and must not
       // be labelled as if it were.
@@ -3715,6 +3981,68 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const v = (ver == null ? 0 : ver);
     if (attachedSid !== memoSid || v !== memoVerSeen) memoLoad(attachedSid, v);
   }
+  const memoVerCur = document.getElementById("memo-vercur");
+  const memoVersEl = document.getElementById("memo-vers");
+  function memoVerRender() {
+    const r = memoRec || {}, vs = r.versions || [];
+    if (memoVerCur) {
+      const editingCur = memoEditing === r.current;
+      // Say WHICH version the boxes are showing, and shout when it is not the live
+      // one — otherwise you edit history thinking you are editing the task.
+      memoVerCur.innerHTML = !vs.length ? ""
+        : editingCur
+          ? `正在编辑 v${memoEditing}(当前)` + (vs.length > 1 ? ` · 共 ${vs.length} 版` : "")
+          : `<span class="mv-warn">正在编辑 v${memoEditing} —— 不是当前版本(当前 v${r.current})</span>`;
+    }
+    if (!memoVersEl) return;
+    // Newest first: the one you are most likely to be switching back FROM is the one
+    // you just made.
+    memoVersEl.innerHTML = vs.slice().reverse().map((v) => {
+      // v.task / v.notes are the full field objects (that is what made an old version
+      // editable): reading them as strings printed "[object Object]" in the list for a
+      // while. Found reviewing, not by anything failing.
+      const vt = (v.task && v.task.text || "").trim(), vn = (v.notes && v.notes.text || "").trim();
+      const when = ((v.task && v.task.updated_at) || v.created_at || "").replace("T", " ").slice(5, 16);
+      const txt = _escHtml(v.label || vt || vn || "(空)");
+      return `<div class="mv-row${v.id === memoEditing ? " editing" : ""}" data-id="${v.id}">`
+        + `<span class="mv-id">v${v.id}</span>`
+        + `<span class="mv-txt mv-open" data-id="${v.id}" title="${_escHtml(vt || vn)}\n(点开载入这个版本编辑)">${txt}</span>`
+        + `<span class="mc-stale">${when}</span>`
+        + (v.current ? '<span class="mv-cur">当前</span>'
+                     : `<button class="btn memo-smallbtn mv-set" data-id="${v.id}">设为当前</button>`
+                       + `<button class="btn memo-smallbtn mv-del" data-id="${v.id}" title="删除这个版本">✕</button>`)
+        + "</div>";
+    }).join("");
+  }
+  if (memoVersEl) memoVersEl.addEventListener("click", async (e) => {
+    const open = e.target.closest(".mv-open");
+    const set = e.target.closest(".mv-set"), del = e.target.closest(".mv-del");
+    if (!open && !set && !del) return;
+    e.stopPropagation();
+    // Unsaved edits belong to the version you are LEAVING, so moving away would
+    // quietly drop them. Say so instead.
+    if (memoDirty && !confirm("当前编辑的版本有未保存的改动 —— 离开会丢弃它, 继续?")) return;
+    const id = parseInt((open || set || del).dataset.id, 10);
+    if (open) {                       // load it into the boxes; current stays current
+      memoEditing = id;
+      memoRender(true); memoVerRender(); memoMark(false);
+      memoTA.task.focus();
+      return;
+    }
+    const r = await memoPost(set ? { set_current: id } : { delete: id });
+    if (r) { if (set) { memoEditing = id; memoRender(true); memoVerRender(); } memoMark(false); }
+  });
+  document.getElementById("memo-verlist").addEventListener("click", (e) => {
+    e.stopPropagation(); memoVersEl.classList.toggle("show");
+  });
+  document.getElementById("memo-fork").addEventListener("click", async (e) => {
+    e.stopPropagation();
+    // Fork carries whatever is in the boxes right now, saved or not: you pressed fork
+    // BECAUSE of what you were typing, and making you save into the old version first
+    // would put it in the wrong place.
+    const ok = await memoPost({ fork: true, task: memoTA.task.value, notes: memoTA.notes.value });
+    if (ok) { memoMark(false); memoVersEl.classList.add("show"); }
+  });
   async function memoPost(body) {
     const r = await authedFetch("/api/session-memo", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -3750,7 +4078,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   async function memoSaveAll() {
     if (!attachedSid) return;
     if (memoSaveBtn) memoSaveBtn.textContent = "保存中…";
-    const ok = await memoPost({
+    const ok = await memoPost({ version: memoEditing || undefined,
                                 task: memoTA.task.value, notes: memoTA.notes.value });
     if (!ok) {
       // Say it failed on the button too, where you are already looking.
@@ -3825,6 +4153,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // previously opened via `view run` would still be unfolded — and the two buttons
     // would go back to being indistinguishable, which is how they looked.
     memoCheckSec.classList.remove("show");
+    // Cleared on OPEN rather than on each close path: there are several ways to close
+    // (✕, backdrop, ESC) and only one way in, so this cannot be the one that was missed.
+    memoZoomClear(memoModal.querySelector(".modal-card"));
     memoModal.classList.add("show");
     if (!isPhone()) setTimeout(() => memoTA.task.focus(), 50);
   });
@@ -3968,7 +4299,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       return false;
     }
     memoRec = await r.json(); memoVerSeen = -1;
-    watchDirty = false; watchRender(); memoRender();
+    watchDirty = false; watchRender(); memoRender(); memoVerRender();
     return true;
   }
   // The "最近动作" pane is gone from this window — asked for directly, and it was the
@@ -4011,6 +4342,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
     modeMenu.style.display = "none";
     memoLoad(attachedSid, memoVerSeen).then(() => { watchRender(); });
+    memoZoomClear(watchModal.querySelector(".modal-card"));
     watchModal.classList.add("show");
   }
   document.getElementById("mm-watch").addEventListener("click", (e) => { e.stopPropagation(); watchOpen(); });
@@ -4041,18 +4373,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
 
   // ---- A- / A+ for the policy box (same deal as the Task window) ----
-  const WATCH_FS_MIN = 11, WATCH_FS_MAX = 26;
+  const WATCH_FS_MAX = 26;
   let watchFs = parseInt(localStorage.getItem("ccweb.watchFs") || "", 10);
-  if (!(watchFs >= WATCH_FS_MIN && watchFs <= WATCH_FS_MAX)) watchFs = 13;
+  if (!(watchFs >= fsFloor() && watchFs <= WATCH_FS_MAX)) watchFs = Math.max(13, fsFloor());
   function watchApplyFs() {
     const card = document.querySelector("#watch-modal .watch-card");
     if (card) card.style.setProperty("--memo-fs", watchFs + "px");
     const dn = document.getElementById("watch-fontdn"), up = document.getElementById("watch-fontup");
-    if (dn) dn.disabled = watchFs <= WATCH_FS_MIN;
+    if (dn) dn.disabled = watchFs <= fsFloor();
     if (up) up.disabled = watchFs >= WATCH_FS_MAX;
   }
   function watchStepFs(d) {
-    watchFs = Math.max(WATCH_FS_MIN, Math.min(WATCH_FS_MAX, watchFs + d));
+    watchFs = Math.max(fsFloor(), Math.min(WATCH_FS_MAX, watchFs + d));
     try { localStorage.setItem("ccweb.watchFs", String(watchFs)); } catch {}
     watchApplyFs();
   }
@@ -10516,7 +10848,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // A memo counts as sent when it is SENT, not when it was dropped into the box —
         // and this way a reminder typed by hand counts too, since the tag is all it reads.
         const mtag = Object.keys(MEMO_TAG).find((k) => body.startsWith(MEMO_TAG[k]));
-        if (mtag) memoPost({ mark_sent: mtag });
+        if (mtag) memoPost({ mark_sent: mtag, version: memoEditing || undefined });
         inputEl.value = ""; inputEl.style.height = "auto";
         pendingUploads = []; renderUploadRow();
         keepAlive(); schedulePoll(400);
@@ -10656,9 +10988,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (!attachedSid) { alert("当前没有 attach 的 session。"); return; }
       // Post the ONE field: the endpoint leaves the other alone, so this cannot
       // clobber whatever is in the other box (which may not even be loaded here).
-      // (This used to fork a new version when the text arrived from the composer. There
-      // are no versions any more — it overwrites, like every other edit.)
-      const ok = await memoPost(field === "task" ? { task: text } : { notes: text });
+      // Through the composer means a NEW version, per the panel's rule: the boxes are
+      // edited in place, and anything arriving from outside is a turn the work took.
+      const ok = await memoPost(field === "task" ? { fork: true, task: text }
+                                                 : { fork: true, notes: text });
       if (!ok) { alert("保存失败"); return; }
       inputEl.value = ""; inputEl.style.height = "auto"; inputEl.dispatchEvent(new Event("input"));
       await memoLoad(attachedSid, memoVerSeen);   // read back the stored copy

@@ -135,6 +135,22 @@ check("a tiny budget still produces something usable, not a crash",
 
 __WMARKS__
 
+__FSFLOOR__
+
+console.log("=== the A-/A+ floor keeps iOS from zooming the page ===");
+// Focusing a field under 16px makes iOS Safari zoom the whole page. Four other inputs
+// in this file carry a "≥16px → no iOS focus auto-zoom" comment; the two memo boxes
+// did not, so tapping into the Task box on a phone blew the page up. The fix is the
+// FLOOR, not the size: a desktop keeps the small text that A- exists for.
+globalThis.window = { matchMedia: () => ({ matches: false }) };
+check("a desktop can still go down to 11", fsFloor() === 11, String(fsFloor()));
+globalThis.window = { matchMedia: (q) => ({ matches: q.indexOf("coarse") >= 0 }) };
+check("a touch device stops at 16", fsFloor() === 16, String(fsFloor()));
+// A browser without matchMedia must not throw on the way to a font size.
+globalThis.window = {};
+check("...and a browser without matchMedia falls back, not throws", fsFloor() === 11,
+      String(fsFloor()));
+
 console.log("=== Watch: which button is lit in each row ===");
 // The bug this replaced: the expiry mark was computed from `expires_at`, an absolute
 // timestamp that cannot say which button produced it — so only 不限 could ever light up
@@ -182,9 +198,15 @@ def main():
     w = re.search(r"\n  (function watchMarks\(sup, armed\) \{.*?\n  \})\n", src, re.S)
     if not w:
         print("  FAIL  could not extract watchMarks() from static/index.html"); return 1
+    # The A-/A+ floor. iOS zooms the whole page when you focus a field under 16px, so
+    # the floor has to move on touch devices — and it is a function, not a constant,
+    # which is the sort of thing that silently stops being called.
+    f = re.search(r"\n  (const FS_TOUCH = .*?\n  const fsFloor = [^\n]*\n)", src, re.S)
+    if not f:
+        print("  FAIL  could not extract fsFloor() from static/index.html"); return 1
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as fh:
         fh.write(JS.replace("__RENDER__", m.group(1)).replace("__CLAMP__", c.group(1))
-                   .replace("__WMARKS__", w.group(1)))
+                   .replace("__WMARKS__", w.group(1)).replace("__FSFLOOR__", f.group(1)))
         path = fh.name
     try:
         r = subprocess.run([node, path], capture_output=True, text=True)

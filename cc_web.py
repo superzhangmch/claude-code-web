@@ -6702,15 +6702,25 @@ class MemoPayload(BaseModel):
     two concurrent writes to the same file at all (belt as well as the braces of the
     lock above). A field left as None is left alone; "" clears it.
 
-    There were `fork` / `set_current` / `delete` / `label` / `version` fields here, for
-    keeping several versions of the task. Retired on request — "只要能维护好一个版本不就
-    行了" — and the storage keeps its shape with a single entry, so old files still load
-    and nothing on disk was thrown away.
+    Applied in this order, so one request can say "fork and put this in it": delete,
+    then set_current, then fork, then the text.
+
+    (These were taken out for a day — "只要能维护好一个版本不就行了" — and asked for
+    again. The storage never changed shape, which is why coming back cost nothing and
+    no file written in between needs migrating.)
     """
     claude_session_id: str
     task: Optional[str] = None
     notes: Optional[str] = None
     mark_sent: Optional[str] = None          # "task" | "notes" — stamp "just sent this"
+    fork: bool = False                       # new version, copied from the current one
+    set_current: Optional[int] = None
+    delete: Optional[int] = None
+    label: Optional[str] = None              # name the version being written
+    # Which version the text/label/mark_sent apply to. Default: whichever is current.
+    # An old version must be editable WITHOUT being made current — otherwise fixing a
+    # typo in one means telling the session, for a moment, that it is working to it.
+    version: Optional[int] = None
     # The whip's policy for THIS session, and whether it is armed. Both are needed for
     # the session to count as registered — a policy with the switch off is a draft.
     supervisor_policy: Optional[str] = None
@@ -6727,13 +6737,15 @@ def get_session_memo(claude_session_id: str):
 
 @app.post("/api/session-memo", dependencies=[Depends(require_token)])
 def post_session_memo(payload: MemoPayload):
-    """Set the two boxes' text, or stamp that one was just sent. The SENDING itself is
-    not here: the client posts the message through /api/input like any other, so a
-    reminder queues behind a running turn and lands in the transcript exactly like
-    something typed by hand."""
+    """Set a version's text, switch/fork/delete a version, or stamp that a box was just
+    sent. The SENDING itself is not here: the client posts the message through
+    /api/input like any other, so a reminder queues behind a running turn and lands in
+    the transcript exactly like something typed by hand."""
     if payload.mark_sent is not None and payload.mark_sent not in _MEMO_FIELDS:
         raise HTTPException(status_code=400, detail="mark_sent must be task or notes")
     if (payload.task is None and payload.notes is None and payload.mark_sent is None
+            and payload.label is None and not payload.fork
+            and payload.set_current is None and payload.delete is None
             and payload.supervisor_policy is None and payload.supervisor_enabled is None
             and payload.supervisor_period_min is None
             and payload.supervisor_hours is None):
@@ -6743,18 +6755,63 @@ def post_session_memo(payload: MemoPayload):
     with _STATE_WRITE_LOCK:
         rec = _memo_read(payload.claude_session_id, strict=True)
 
-        # The current (and now only) version is what everything writes into.
-        cur = _memo_cur(rec)
+        if payload.delete is not None:
+            if len(rec["versions"]) <= 1:
+                raise HTTPException(status_code=400, detail="that is the only version")
+            if payload.delete == rec["current"]:
+                raise HTTPException(status_code=400,
+                                    detail="that version is current — make another one "
+                                           "current first, so a delete cannot silently "
+                                           "change what the session is working to")
+            keep = [v for v in rec["versions"] if v["id"] != payload.delete]
+            if len(keep) == len(rec["versions"]):
+                raise HTTPException(status_code=404, detail="no such version")
+            rec["versions"] = keep
+
+        if payload.set_current is not None:
+            if not any(v["id"] == payload.set_current for v in rec["versions"]):
+                raise HTTPException(status_code=404, detail="no such version")
+            if payload.set_current != rec["current"]:
+                rec["current"] = payload.set_current
+                rec["rev"] = int(rec.get("rev") or 0) + 1   # effective intent changed
+
+        if payload.fork:
+            # A copy of the current one, not a blank: a fork is "this task, but going
+            # a different way", and starting from empty would mean retyping the half
+            # of it that has not changed — which is how the standing notes stop being
+            # kept up to date.
+            src = _memo_cur(rec)
+            vid = max((v["id"] for v in rec["versions"]), default=0) + 1
+            new_v = json.loads(json.dumps(src))
+            new_v.update({"id": vid, "created_at": now, "label": ""})
+            for fld in _MEMO_FIELDS:                        # a fork has sent nothing yet
+                new_v[fld]["sent_at"] = ""
+                new_v[fld]["sent_count"] = 0
+            rec["versions"].append(new_v)
+            rec["current"] = vid
+            rec["rev"] = int(rec.get("rev") or 0) + 1
+
+        if payload.version is not None and not payload.fork:
+            cur = next((v for v in rec["versions"] if v["id"] == payload.version), None)
+            if cur is None:
+                raise HTTPException(status_code=404, detail="no such version")
+        else:
+            cur = _memo_cur(rec)     # a fork writes into the version it just made
+        # `rev` is about the EFFECTIVE intent, so editing a version that is not current
+        # must not bump it: nothing the session is working to has changed.
+        bump = cur["id"] == rec["current"]
+        if payload.label is not None:
+            cur["label"] = payload.label.strip()[:40]
         for field, new_text in (("task", payload.task), ("notes", payload.notes)):
             if new_text is None:
                 continue
             new_text = new_text.strip()
-            # `rev` counts TEXT changes and nothing else. It is what the self-check's
-            # "对不上现在的任务" compares against, and what the whip uses to decide that a
-            # confirmation it already has belongs to an older task. (It used to also be
-            # guarded by `bump` — "only if the version being written is the current one"
-            # — which had no meaning once there was one version.)
-            if new_text != cur[field]["text"]:
+            # `rev` counts changes to the EFFECTIVE intent: the text of the version the
+            # session is actually working to. It is what the self-check's "对不上现在的
+            # 任务" compares against, and what the whip uses to decide a confirmation it
+            # holds belongs to an older task — so editing a version that is NOT current
+            # must leave it alone, and `bump` is what says so.
+            if new_text != cur[field]["text"] and bump:
                 rec["rev"] = int(rec.get("rev") or 0) + 1
             cur[field]["text"] = new_text
             cur[field]["updated_at"] = now

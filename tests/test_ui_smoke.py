@@ -333,6 +333,252 @@ def main():
         drv.js("document.getElementById('picker-brief').click()")
         check("back to brief", drv.wait("document.querySelectorAll('#picker-list .brief-row').length") == 3)
 
+        src_index = open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8").read()
+
+        print("=== select a response → 引用 | copy ===")
+        # This view is the session LIST, where <footer> carries .hidden — and an element
+        # inside a display:none subtree cannot take focus at all. So the footer is
+        # un-hidden for these checks; otherwise "did it focus the composer" is
+        # unanswerable here rather than answered no.
+        #
+        # A fabricated state, and therefore worth only as much as its resemblance to the
+        # real one — so it is pinned to the app's own code path first. showTranscript()
+        # is what reveals the composer when you open a session; if it ever stops doing
+        # it this way, the fabrication below is a fiction and these two fail.
+        _st = src_index[src_index.index("function showTranscript()"):]
+        _st = _st[:_st.index("\n  }")]
+        check("the state faked below is the one showTranscript() produces",
+              'footerEl.classList.remove("hidden")' in _st,
+              _st.strip().splitlines()[1][:60])
+        check("...and the composer really is inside that footer",
+              src_index.index('<footer') < src_index.index('id="input"') < src_index.index("</footer>"))
+        drv.js("document.querySelector('footer').classList.remove('hidden')")
+        check("...so with it un-hidden the composer can be focused at all",
+              drv.js("""
+                const i = document.getElementById('input');
+                i.focus();
+                return (document.activeElement || {}).id;
+              """) == "input")
+        # Measured while chasing the focus: clearing the page selection does NOT blur a
+        # focused textarea (afterFocus=input → afterRemoveRanges=input). The BODY reading
+        # that started the hunt came from this view's hidden footer, not from the order
+        # of those two calls — worth recording, because the code carries a comment about
+        # that order and it would otherwise read as the fix for something it did not fix.
+        blur = drv.js("""
+          const inp = document.getElementById('input');
+          inp.focus();
+          const a1 = (document.activeElement || {}).id;
+          inp.setSelectionRange(0, 0);
+          try { window.getSelection().removeAllRanges(); } catch (e) {}
+          return [a1, (document.activeElement || {}).id];
+        """)
+        check("clearing the selection does not blur the composer",
+              blur == ["input", "input"], str(blur))
+        # Driven as a real selection in a real browser: the bar's whole job is to appear
+        # over a Range, and a Range's geometry does not exist without layout.
+        selres = drv.js("""
+          const m = document.getElementById('main');
+          m.innerHTML = '';
+          const a = document.createElement('div');
+          a.className = 'msg assistant';
+          a.textContent = '官方合成就是加权和, 四个分量等权相加。';
+          m.appendChild(a);
+          const bar = document.getElementById('sel-bar');
+          const before = getComputedStyle(bar).display;
+          const r = document.createRange();
+          r.selectNodeContents(a);
+          const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+          document.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+          return { before, txt: String(sel).slice(0, 20) };
+        """)
+        shown = drv.wait("getComputedStyle(document.getElementById('sel-bar')).display !== 'none' ? 1 : 0",
+                         tries=20)
+        check("the bar is hidden until something is selected", selres["before"] == "none",
+              selres["before"])
+        check("...and appears on a selection in the transcript", bool(shown), str(shown))
+        placed = drv.js("""
+          const bar = document.getElementById('sel-bar');
+          const b = bar.getBoundingClientRect();
+          const sr = window.getSelection().getRangeAt(0).getBoundingClientRect();
+          return { over: Math.round(sr.top - b.bottom),
+                   above: b.bottom <= sr.top + 1 && sr.top - b.bottom <= 12,
+                   below: b.top >= sr.bottom - 1 && b.top - sr.bottom <= 12,
+                   onScreen: b.left >= 0 && b.top >= 0 && b.right <= window.innerWidth,
+                   parent: bar.parentElement.tagName,
+                   labels: [...bar.querySelectorAll('button')].map(x => x.textContent.trim()) };
+        """)
+        # The invariant is "next to the selection and not covering it", not "above it":
+        # a selection near the top of the viewport has no room above, and the code drops
+        # the bar below — which is right, and is what this assertion originally got
+        # wrong (it read the correct fallback as a 64px error).
+        check("...adjacent to the selection, and not over the words",
+              placed["above"] or placed["below"], f'gapAbove={placed["over"]}')
+        # ...and when there IS room above, that is where it goes: over the text you just
+        # selected is where a thumb already is.
+        lower = drv.js("""
+          // Hidden FIRST: the bar is already on screen from the case above, so waiting
+          // for "visible" would be satisfied instantly and measure the OLD position —
+          // the reposition runs 10ms after the mouseup. (Measured 236px of "error"
+          // that way, which was the test racing itself, not the bar being wrong.)
+          document.getElementById('sel-bar').style.display = 'none';
+          const m = document.getElementById('main');
+          m.innerHTML = '';
+          const pad = document.createElement('div'); pad.style.height = '300px';
+          m.appendChild(pad);
+          const a = document.createElement('div');
+          // Same text as above: the assertions further down quote it back, and a probe
+          // that swaps the fixture out from under them is a probe that breaks them.
+          a.className = 'msg assistant';
+          a.textContent = '官方合成就是加权和, 四个分量等权相加。';
+          m.appendChild(a);
+          const r = document.createRange(); r.selectNodeContents(a);
+          const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+          document.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+          return null;
+        """)
+        drv.wait("getComputedStyle(document.getElementById('sel-bar')).display !== 'none' ? 1 : 0", tries=20)
+        mid = drv.js("""
+          const b = document.getElementById('sel-bar').getBoundingClientRect();
+          const sr = window.getSelection().getRangeAt(0).getBoundingClientRect();
+          return { gap: Math.round(sr.top - b.bottom), selTop: Math.round(sr.top) };
+        """)
+        check("...a selection in the TOP part gets the bar above it",
+              0 <= mid["gap"] <= 12, str(mid))
+        # The other side, and the reason for it: iOS puts its own Look Up / Copy bar
+        # just above the selection whenever there is room, so for anything past the
+        # middle of the screen ours has to go below or the two land on top of each
+        # other — reported from a phone, where ours was the unreachable one.
+        drv.js("""
+          document.getElementById('sel-bar').style.display = 'none';
+          const m = document.getElementById('main');
+          m.innerHTML = '';
+          const pad = document.createElement('div');
+          pad.style.height = Math.round(window.innerHeight * 0.75) + 'px';
+          m.appendChild(pad);
+          const a = document.createElement('div');
+          a.className = 'msg assistant';
+          a.textContent = '官方合成就是加权和, 四个分量等权相加。';
+          m.appendChild(a);
+          m.scrollTop = 0;
+          const r = document.createRange(); r.selectNodeContents(a);
+          const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+          document.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+        """)
+        drv.wait("getComputedStyle(document.getElementById('sel-bar')).display !== 'none' ? 1 : 0", tries=20)
+        lowsel = drv.js("""
+          const b = document.getElementById('sel-bar').getBoundingClientRect();
+          const sr = window.getSelection().getRangeAt(0).getBoundingClientRect();
+          return { below: Math.round(b.top - sr.bottom), selTop: Math.round(sr.top),
+                   vh: window.innerHeight, onScreen: b.bottom <= window.innerHeight };
+        """)
+        check("...and one in the LOWER part gets it below, clear of iOS's own bar",
+              0 <= lowsel["below"] <= 12 and lowsel["onScreen"], str(lowsel))
+        check("...fully on screen", placed["onScreen"] is True)
+        # It has to be a child of something that is never hidden. Inside <footer> it was
+        # 0x0 at (0,0) in the session list, because a display:none parent leaves a child
+        # with no layout whatever the child's own display says.
+        check("...and not nested in anything that gets hidden",
+              placed["parent"] == "BODY", placed["parent"])
+        check("...with the three actions", placed["labels"] == ["引用", "解释", "复制"],
+              str(placed["labels"]))
+        quoted = drv.js("""
+          document.getElementById('input').value = '';
+          document.getElementById('sel-quote').click();
+          return { v: document.getElementById('input').value,
+                   active: (document.activeElement || {}).id,
+                   bar: getComputedStyle(document.getElementById('sel-bar')).display,
+                   caret: document.getElementById('input').selectionStart,
+                   len: document.getElementById('input').value.length };
+        """)
+        check("引用 quotes it with markdown, then the lead-in",
+              quoted["v"].startswith("> 官方合成") and quoted["v"].endswith("关于这点,"),
+              quoted["v"].replace("\n", "\\n"))
+        # The lead-in only helps if you can type straight after it.
+        check("...and the caret sits at the end, ready to type",
+              quoted["caret"] == quoted["len"], f'{quoted["caret"]}/{quoted["len"]}')
+        check("...and the bar gets out of the way", quoted["bar"] == "none")
+        # The composer has to be the thing listening afterwards, or the lead-in is a
+        # sentence you then have to go and tap into. Measured, because the first version
+        # cleared the page selection AFTER focusing — and once a textarea has focus the
+        # document selection IS its caret, so removeAllRanges() wiped the caret and
+        # handed focus back to <body>.
+        check("...and the composer has focus", quoted["active"] == "input", str(quoted["active"]))
+        # A half-written draft must survive being quoted at.
+        kept = drv.js("""
+          const inp = document.getElementById('input');
+          inp.value = '我已经写了半句';
+          const a = document.querySelector('#main .msg.assistant');
+          const r = document.createRange(); r.selectNodeContents(a);
+          const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+          document.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+          document.getElementById('sel-quote').click();
+          return inp.value;
+        """)
+        check("...a draft already in the box is kept, above the quote",
+              kept.startswith("我已经写了半句") and "> 官方合成" in kept,
+              kept.replace("\n", "\\n")[:60])
+        # 解释 is the same machinery with a different tail — and its tail is a whole
+        # sentence, because you press it to send, not to keep typing.
+        expl = drv.js("""
+          const inp = document.getElementById('input');
+          inp.value = '';
+          const a = document.querySelector('#main .msg.assistant');
+          const r = document.createRange(); r.selectNodeContents(a);
+          const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+          document.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+          document.getElementById('sel-explain').click();
+          return { v: inp.value, active: (document.activeElement || {}).id };
+        """)
+        check("解释 quotes it and asks, in a sendable sentence",
+              expl["v"].startswith("> 官方合成") and expl["v"].rstrip().endswith("能通俗解释下吗"),
+              expl["v"].replace("\n", "\\n")[-30:])
+        check("...and it focuses the composer too", expl["active"] == "input", str(expl["active"]))
+        # Selecting in the composer is being done for some other reason; a bar over it
+        # would be in the way.
+        elsewhere = drv.js("""
+          const sel = window.getSelection(); sel.removeAllRanges();
+          const inp = document.getElementById('input');
+          inp.focus(); inp.setSelectionRange(0, 5);
+          document.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+          return getComputedStyle(document.getElementById('sel-bar')).display;
+        """)
+        check("a selection outside the transcript shows nothing", elsewhere == "none", elsewhere)
+        drv.js("document.getElementById('main').innerHTML = ''; document.getElementById('input').value = '';")
+
+        print("=== a quoted line still LOOKS quoted after markdown ===")
+        # User messages go through marked, so `> …` becomes a <blockquote> and the
+        # marker itself is gone from the text. With no styling for it — and there was
+        # none — what you get back is a line indistinguishable from your own words,
+        # which is the one thing 引用 must not produce.
+        qv = drv.js("""
+          const m = document.getElementById('main');
+          m.innerHTML = '';
+          const d = document.createElement('div');
+          d.className = 'msg user';
+          const md = document.createElement('div');
+          md.className = 'markdown';
+          md.innerHTML = renderMarkdownProbe('> 被引用的那一句\n\n关于这点,');
+          d.appendChild(md); m.appendChild(d);
+          const bq = md.querySelector('blockquote');
+          if (!bq) return { none: true, html: md.innerHTML.slice(0, 80) };
+          const cs = getComputedStyle(bq);
+          return { border: cs.borderLeftWidth, colour: cs.color,
+                   textColour: getComputedStyle(md).color,
+                   pad: cs.paddingLeft };
+        """) if drv.js("return typeof renderMarkdownProbe") == "function" else {"skip": True}
+        if qv.get("skip"):
+            # renderMarkdown lives inside the page's IIFE, so it cannot be called from
+            # here. The CSS is what was missing, so the CSS is what gets pinned.
+            bqcss = src_index[src_index.index(".msg .markdown blockquote {"):]
+            bqcss = bqcss[:bqcss.index("}")]
+            check("a blockquote has a bar down its left", "border-left" in bqcss, bqcss.strip()[:60])
+            check("...and is dimmed apart from the surrounding text", "color:" in bqcss)
+            check("...and the user's own bubble gets an accent bar, since it is dim already",
+                  ".msg.user .markdown blockquote" in src_index)
+        else:
+            check("a quoted line renders with a visible bar",
+                  qv.get("border", "0px") != "0px", str(qv))
+
         print("=== ↑ in the float pill steps back one request ===")
         # ↑/↓ were taken OUT of this pill once, in favour of ☰ (the list), on the
         # grounds that stepping is worse than being shown your requests. True for "find
@@ -490,8 +736,6 @@ def main():
                   st["live"][:60])
         drv.js("document.getElementById('rec-cancel').click()")
 
-        src_index = open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8").read()
-
         print("=== the Task window gives its height to the two boxes ===")
         # "input box 之外的地方要紧凑显示,让 input box 占据更大空间." Measured, because
         # "looks tighter" is not a property: what matters is the share of the card the
@@ -524,17 +768,27 @@ def main():
         # you open it for, so it starts folded — but its verdict rides on the button, or
         # folding it would mean hiding a bad result.
         check("the self-check report starts folded", box["checkShown"] is False)
-        # Versions are gone — a list, fork, set-current, per-version editing, and a
-        # header line naming the one you were looking at. Retired on request; the task
-        # is a thing you rewrite as the work moves, not a history you keep.
-        gone = drv.js("""
-          return { verlist: !document.getElementById('memo-verlist'),
-                   fork: !document.getElementById('memo-fork'),
-                   list: !document.getElementById('memo-vers'),
-                   label: !document.getElementById('memo-vercur') };
+        # Versions: switched off for a day, then asked for again with the semantics
+        # spelled out — fork makes one, each can be edited on its own, each can be made
+        # the current one. Those three are pinned server-side (test_session_memo); here
+        # only that the controls exist and the list folds like everything else in this
+        # window.
+        vers = drv.js("""
+          const list = document.getElementById('memo-vers');
+          return { verlist: !!document.getElementById('memo-verlist'),
+                   fork: !!document.getElementById('memo-fork'),
+                   label: !!document.getElementById('memo-vercur'),
+                   listHidden: getComputedStyle(list).display === 'none',
+                   opens: (document.getElementById('memo-verlist').click(),
+                           getComputedStyle(list).display !== 'none') };
         """)
-        check("no versions / fork / list / 'editing vN' label",
-              all(gone.values()), str(gone))
+        check("versions / fork / the 'editing vN' label are all there",
+              vers["verlist"] and vers["fork"] and vers["label"], str(vers))
+        # Folded by default: most of the time there is one version, and a row saying so
+        # is furniture taking height from the boxes.
+        check("...the list starts folded", vers["listHidden"] is True)
+        check("...and `versions` opens it", vers["opens"] is True)
+        drv.js("document.getElementById('memo-verlist').click()")
         # Three buttons said "run check" and differed only by which row they stood in —
         # "这四个啥意思?". Now each says its scope, and the fourth (periodic) is gone:
         # it typed "起一个每 30 分钟的 watcher" at the session, which ⚙ → Watch → 检查周期
@@ -624,6 +878,54 @@ def main():
               'memoCheckSec.classList.remove("show")' in src_index[_i:_i + 900])
         drv.js("document.getElementById('memo-checktoggle').click()")
 
+        print("=== ⤢ gives one box the whole card ===")
+        z = drv.js("""
+          const m = document.getElementById('memo-modal');
+          m.classList.add('show');
+          const card = m.querySelector('.memo-card');
+          const t = document.getElementById('memo-task'), n = document.getElementById('memo-notes');
+          const h = e => Math.round(e.getBoundingClientRect().height);
+          const before = { task: h(t), notes: getComputedStyle(n.closest('.memo-sec')).display };
+          const btn = t.closest('.memo-sec').querySelector('.memo-zoom');
+          btn.click();
+          const zoom = { task: h(t), notes: getComputedStyle(n.closest('.memo-sec')).display,
+                         glyph: btn.textContent.trim(),
+                         hdr: getComputedStyle(m.querySelector('.memo-head')).display,
+                         save: !!document.getElementById('memo-save').offsetParent };
+          btn.click();
+          const back = { task: h(t), notes: getComputedStyle(n.closest('.memo-sec')).display,
+                         glyph: btn.textContent.trim() };
+          return { before, zoom, back };
+        """)
+        # Hidden, not shrunk: the point is a phone, where "bigger" means nothing unless
+        # the other box stops taking room.
+        check("the other box gets out of the way", z["zoom"]["notes"] == "none",
+              str(z["zoom"]["notes"]))
+        check("...and this one takes the height", z["zoom"]["task"] > z["before"]["task"] * 1.6,
+              f'{z["before"]["task"]} → {z["zoom"]["task"]}')
+        # 保存 and ✕ have to stay reachable, or the only way out is a reload.
+        check("...while the header stays", z["zoom"]["hdr"] != "none" and z["zoom"]["save"] is True)
+        check("the button says which way it goes", z["zoom"]["glyph"] == "⤡", z["zoom"]["glyph"])
+        check("...and pressing it again restores both boxes",
+              z["back"]["notes"] != "none" and z["back"]["task"] == z["before"]["task"]
+              and z["back"]["glyph"] == "⤢", f'{z["back"]["task"]} vs {z["before"]["task"]}')
+        wz = drv.js("""
+          const m = document.getElementById('watch-modal');
+          m.classList.add('show');
+          const ta = document.getElementById('watch-policy');
+          const h = e => Math.round(e.getBoundingClientRect().height);
+          const before = h(ta);
+          ta.closest('.memo-sec').querySelector('.memo-zoom').click();
+          const opts = [...m.querySelectorAll('.wt-opts')].map(o => getComputedStyle(o).display);
+          const after = h(ta);
+          ta.closest('.memo-sec').querySelector('.memo-zoom').click();
+          m.classList.remove('show');
+          return { before, after, opts };
+        """)
+        check("Watch zooms too, hiding the cadence rows",
+              set(wz["opts"]) == {"none"} and wz["after"] > wz["before"], str(wz))
+        drv.js("document.getElementById('memo-modal').classList.remove('show')")
+
         print("=== A- / A+ resize the boxes, and only the boxes ===")
         sizes = drv.js("""
           const t = document.getElementById('memo-task');
@@ -644,6 +946,12 @@ def main():
         check("...and leaves the labels alone", sizes["up"]["lab"] == sizes["before"]["lab"],
               f'{sizes["before"]["lab"]} → {sizes["up"]["lab"]}')
         check("A- shrinks it, and stops at a floor", sizes["dn"]["dis"] is True, sizes["dn"]["fs"])
+        # The CSS half of the no-iOS-zoom fix: whatever --memo-fs ends up as (a 13 kept
+        # in localStorage from a desktop, say), a coarse pointer never renders these
+        # under 16px. The JS floor is driven separately, in test_gear_menu_ui.
+        check("...and a touch device is floored at 16px in CSS too",
+              "@media (pointer: coarse)" in src_index
+              and "max(16px, var(--memo-fs))" in src_index)
         check("...and A+ stops at a ceiling", sizes["max"]["dis"] is True, sizes["max"]["fs"])
         check("the choice is remembered", sizes["stored"] is not None, str(sizes["stored"]))
         drv.js("document.getElementById('memo-modal').classList.remove('show')")

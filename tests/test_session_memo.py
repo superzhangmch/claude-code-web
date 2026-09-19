@@ -81,33 +81,138 @@ def main():
     check("...without touching the other field's count", rec["notes"]["sent_count"] == 0)
     check("mark_sent alone does not alter the text", rec["task"]["text"] == "改成: 查缓存问题")
 
-    print("=== one version, and editing rewrites it ===")
-    # There WERE versions here: a list, fork, set-current, delete, and editing an old
-    # one without making it current. Retired on request — "只要能维护好一个版本不就行了" —
-    # and it was the right call: the task is a thing you rewrite as the work moves, not
-    # a thing you keep a history of, and the history came with its own way to go wrong
-    # (editing an old version believing it was the live one).
-    #
-    # The storage kept its shape with a single entry, so files written by the versions
-    # build still load. What had to survive is `rev`.
-    cc_web.post_session_memo(P(claude_session_id=SID, task="第一版"))
-    cc_web.post_session_memo(P(claude_session_id=SID, task="改过的"))
+    print("=== versions: editing is not a version, forking is ===")
+    cc_web.post_session_memo(P(claude_session_id=SID, task="第一版任务", notes="长期规矩"))
     got = cc_web.get_session_memo(claude_session_id=SID)
-    check("still exactly one version", len(got["versions"]) == 1, str(len(got["versions"])))
-    check("...and the text is the latest", got["task"]["text"] == "改过的", got["task"]["text"])
-    # rev is the load-bearing survivor: the self-check's "对不上现在的任务" and the whip's
-    # "I already have a confirmation for this task" both compare against it.
-    r1 = got["rev"]
-    cc_web.post_session_memo(P(claude_session_id=SID, task="又改了"))
-    check("rev moves when the text moves",
-          cc_web.get_session_memo(claude_session_id=SID)["rev"] == r1 + 1, str(r1))
-    cc_web.post_session_memo(P(claude_session_id=SID, task="又改了"))
-    check("...and not when the same text is posted again",
-          cc_web.get_session_memo(claude_session_id=SID)["rev"] == r1 + 1)
-    # The actions are gone from the API, not just from the buttons: a stale client
-    # posting `fork: true` must not quietly get a second version.
-    for gone in ("fork", "set_current", "delete", "label", "version"):
-        check(f"the `{gone}` action is gone from the API", gone not in cc_web.MemoPayload.model_fields)
+    check("one version to begin with", len(got["versions"]) == 1 and got["current"] == 1,
+          json.dumps(got["versions"])[:60])
+    cc_web.post_session_memo(P(claude_session_id=SID, task="第一版任务(改了措辞)"))
+    got = cc_web.get_session_memo(claude_session_id=SID)
+    check("...and editing does NOT make another one — that is the whole split",
+          len(got["versions"]) == 1 and got["task"]["text"] == "第一版任务(改了措辞)",
+          str(len(got["versions"])))
+    r2 = cc_web.post_session_memo(P(claude_session_id=SID, fork=True))
+    check("fork makes one and switches to it", len(r2["versions"]) == 2 and r2["current"] == 2,
+          f'{len(r2["versions"])} / v{r2["current"]}')
+    # A fork starts from the current content, not from blank: it is "this task, but
+    # going a different way", and an empty start means retyping the half that has not
+    # changed — which is how the standing notes stop being kept up to date.
+    check("...copied from the one you were on", r2["task"]["text"] == "第一版任务(改了措辞)"
+          and r2["notes"]["text"] == "长期规矩", r2["task"]["text"])
+    check("...and it has sent nothing yet, whatever the old one had sent",
+          r2["task"]["sent_count"] == 0)
+    cc_web.post_session_memo(P(claude_session_id=SID, task="第二版: 换个方向"))
+    texts = [v["task"]["text"] for v in cc_web.get_session_memo(claude_session_id=SID)["versions"]]
+    check("editing the fork leaves the older version alone",
+          texts == ["第一版任务(改了措辞)", "第二版: 换个方向"], str(texts))
+
+    print("=== ...and one of them is current ===")
+    r3 = cc_web.post_session_memo(P(claude_session_id=SID, set_current=1))
+    check("set_current switches which boxes everything else sees",
+          r3["current"] == 1 and r3["task"]["text"] == "第一版任务(改了措辞)", r3["task"]["text"])
+    check("...and that counts as a change of intent, so a self-check re-derives",
+          cc_web._memo_ver_str(SID) == f"r{r3['rev']}" and r3["rev"] > r2["rev"],
+          f"{r2['rev']} -> {r3['rev']}")
+    got = None
+    try:
+        cc_web.post_session_memo(P(claude_session_id=SID, delete=1))
+    except HTTPException as e:
+        got = e.detail
+    check("deleting the CURRENT version is refused — a delete must not silently change "
+          "what the session is working to", got and "current" in str(got), str(got)[:60])
+    cc_web.post_session_memo(P(claude_session_id=SID, delete=2))
+    check("...a non-current one goes",
+          len(cc_web.get_session_memo(claude_session_id=SID)["versions"]) == 1)
+    got = None
+    try:
+        cc_web.post_session_memo(P(claude_session_id=SID, delete=1))
+    except HTTPException as e:
+        got = e.detail
+    check("...and the last one cannot be deleted at all", got and "only version" in str(got), str(got)[:50])
+    got = None
+    try:
+        cc_web.post_session_memo(P(claude_session_id=SID, set_current=99))
+    except HTTPException as e:
+        got = e.status_code
+    check("a version that does not exist is a 404, not a new blank one", got == 404, str(got))
+
+    print("=== an OLD version can be opened, edited and saved — without going current ===")
+    # A list you can only switch to is a list of things you cannot fix. And fixing a
+    # typo in an old version must not mean telling the session, even for a moment,
+    # that it is now working to it.
+    cc_web.post_session_memo(P(claude_session_id=SID, task="v1 的任务", notes="规矩"))
+    cc_web.post_session_memo(P(claude_session_id=SID, fork=True, task="v2 的任务"))
+    before = cc_web.get_session_memo(claude_session_id=SID)
+    r = cc_web.post_session_memo(P(claude_session_id=SID, version=1, task="v1 被修好了"))
+    check("the write lands in the version named", 
+          [v["task"]["text"] for v in r["versions"]] == ["v1 被修好了", "v2 的任务"],
+          str([v["task"]["text"] for v in r["versions"]]))
+    check("...current is untouched", r["current"] == before["current"] == 2, str(r["current"]))
+    check("...and so are the boxes everything downstream reads",
+          r["task"]["text"] == "v2 的任务", r["task"]["text"])
+    # rev is the EFFECTIVE intent. Editing a version nobody is working to changes none.
+    check("...and rev does not move, so a self-check report stays valid",
+          r["rev"] == before["rev"], f"{before['rev']} -> {r['rev']}")
+    check("editing the current one DOES move rev",
+          cc_web.post_session_memo(P(claude_session_id=SID, version=2, task="v2 改了"))["rev"]
+          > before["rev"])
+    got = None
+    try:
+        cc_web.post_session_memo(P(claude_session_id=SID, version=99, task="x"))
+    except HTTPException as e:
+        got = e.status_code
+    check("a version that does not exist is a 404, not a new one", got == 404, str(got))
+    r = cc_web.post_session_memo(P(claude_session_id=SID, fork=True, version=1, task="进了新版本"))
+    check("fork ignores `version` — a fork writes into the one it just made",
+          r["current"] == 3 and r["task"]["text"] == "进了新版本", f'v{r["current"]} {r["task"]["text"]}')
+    check("...and every version comes back IN FULL, or it could not be edited",
+          all(isinstance(v["task"], dict) and "text" in v["task"] for v in r["versions"]),
+          str(type(r["versions"][0]["task"])))
+
+    print("=== ...and the panel loads it without the guard fighting the click ===")
+    src1 = open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8").read()
+    check("opening a version forces the boxes to redraw",
+          "memoRender(true); memoVerRender(); memoMark(false);" in src1)
+    # The don't-stomp-what-you-are-typing guard is for a poll landing mid-sentence; it
+    # must not refuse the load you just asked for. It did: after loading v1 the box had
+    # focus, so clicking back to v2 left v1's text under a "editing v2" label.
+    check("...over the mid-typing guard, which is what force is for",
+          "(force || document.activeElement !== memoTA[f])" in src1)
+    check("saving names the version being edited", "version: memoEditing || undefined" in src1)
+    check("the bar says when the boxes are NOT the live version",
+          "不是当前版本" in src1)
+    # Both found by reading the diff, not by anything failing.
+    # (a) versions[].task is the full field object now — reading it as a string put
+    #     "[object Object]" in the list for every row.
+    check("the version list reads .text, not the field object",
+          "v.task && v.task.text" in src1 and "v.label || v.task ||" not in src1)
+    # (b) the focus test alone let a refresh overwrite the box you were NOT in and
+    #     then report 已保存. Unsaved edits have to win over a refresh in BOTH boxes.
+    check("unsaved edits survive a refresh in both boxes",
+          "const keepTyping = memoDirty && !force;" in src1 and "!keepTyping" in src1)
+    check("...and a refresh does not claim 已保存 while something is unsaved",
+          "if (!memoDirty) memoMark(false);" in src1)
+
+    print("=== rev follows the EFFECTIVE text, and nothing else ===")
+    # `rev` is the one thing that outlived the day these versions were switched off, and
+    # two other features read it: the self-check's "⚠自检对不上任务" and the whip's "I
+    # already have a confirmation for this task". So it has to move when the task the
+    # session is working to changes, and stay put otherwise.
+    cc_web.post_session_memo(P(claude_session_id=SID, set_current=1))
+    base = cc_web.get_session_memo(claude_session_id=SID)["rev"]
+    cc_web.post_session_memo(P(claude_session_id=SID, task="新的当前任务"))
+    r1 = cc_web.get_session_memo(claude_session_id=SID)["rev"]
+    check("editing the CURRENT version moves it", r1 == base + 1, f"{base} → {r1}")
+    cc_web.post_session_memo(P(claude_session_id=SID, task="新的当前任务"))
+    check("...and posting the same text again does not",
+          cc_web.get_session_memo(claude_session_id=SID)["rev"] == r1)
+    # Editing a version nobody is working to changes no intent, so a self-check report
+    # about the current task must not be marked stale by it.
+    vs = [v["id"] for v in cc_web.get_session_memo(claude_session_id=SID)["versions"]]
+    other = next(i for i in vs if i != 1)
+    cc_web.post_session_memo(P(claude_session_id=SID, version=other, task="改历史版本"))
+    check("editing a NON-current version leaves it alone",
+          cc_web.get_session_memo(claude_session_id=SID)["rev"] == r1, str(r1))
 
     print("=== a file written by the pre-versions build still opens ===")
     # Those files were written by an earlier build of this same panel; "please re-type
@@ -127,16 +232,18 @@ def main():
     check("...and its rev is kept, so an existing self-check report is not made stale "
           "by the migration alone", got["rev"] == 7, str(got["rev"]))
 
-    print("=== the composer route writes the box, like every other edit ===")
+    print("=== the composer route makes a version, the boxes are edited in place ===")
     src0 = open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8").read()
     menu0 = re.search(r"const setBox = \(field\) => async \(\) => \{.*?\n    \};", src0, re.S)
-    check("set task desc/constrain posts the one field", bool(menu0)
-          and "{ task: text }" in menu0.group(0), (menu0.group(0)[:60] if menu0 else "?"))
-    # It used to fork a new version when the text arrived from outside the panel. There
-    # is nothing to fork into now.
-    check("...and no version machinery is left in the page",
-          "fork: true" not in src0 and "memoEditing" not in src0
-          and "memo-vers" not in src0)
+    check("set task desc/constrain forks",
+          menu0 and "fork: true" in menu0.group(0), (menu0.group(0)[:60] if menu0 else "?"))
+    check("...while 保存 does not — it writes the version being edited",
+          "version: memoEditing || undefined" in src0 and "fork" not in
+          src0[src0.index("async function memoSaveAll"):src0.index("async function memoSaveAll") + 400])
+    check("fork takes what is in the boxes right now, saved or not",
+          "memoPost({ fork: true, task: memoTA.task.value, notes: memoTA.notes.value })" in src0)
+    check("moving to another version with unsaved edits warns instead of dropping them",
+          "未保存的改动 —— 离开会丢弃它" in src0)
 
     print("=== the poll only carries a version, not the strings ===")
     v1 = cc_web._memo_ver(SID)
@@ -311,7 +418,7 @@ def main():
     # both would write whatever stale value is sitting in the DOM. The endpoint leaves
     # an omitted field alone, which is what makes that safe.
     check("it names ONE field, so the other box cannot be clobbered",
-          "{ task: text }" in mb and "{ notes: text }" in mb,
+          "{ fork: true, task: text }" in mb and "{ fork: true, notes: text }" in mb,
           mb[mb.find("const ok"):][:90])
     check("...clears the composer (the box owns the text now)", 'inputEl.value = ""' in mb)
     check("...then re-reads the stored copy and opens the modal, so 'saved' is visible",
