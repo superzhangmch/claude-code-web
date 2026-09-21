@@ -111,12 +111,26 @@ renderAsrMenu();
 check("one option keeps its whole name", rows()[1][1][0] === "OpenAI 4o-mini",
       JSON.stringify(rows()[1][1]));
 
-console.log("=== nothing configured still explains itself ===");
+console.log("=== nothing configured: one line, not a paragraph ===");
+// The mic button is hidden when no engine is configured, so this row is the only place
+// you can find out that voice input exists at all. It used to spell the conf keys out
+// right here in four lines — a paragraph inside a menu, needed exactly once. The words
+// moved to the row's tooltip: still findable, no height.
 reset(); asrConfigs = []; asrRtAvail = false; realtimeEngines = [];
 renderAsrMenu();
-const flat = JSON.stringify(SEC.children.map(c => c.innerHTML || c.textContent || ""));
-check("it names the config keys rather than rendering blank",
-      /cc_web\.conf/.test(flat) && /asr=/.test(flat), flat.slice(0, 120));
+const un = rows();
+const unBox = SEC.children.filter(c => (c.className || "").includes("scr-cfg-row"))[0].children[1];
+check("one row, labelled voice like the configured one",
+      un.length === 1 && un[0][0] === "voice", JSON.stringify(un));
+check("...saying only that it is not configured",
+      unBox.textContent === "not configured yet", JSON.stringify(unBox.textContent));
+check("...with no how-to in the row itself",
+      !/cc_web\.conf|HTTPS/.test(unBox.textContent + (unBox.innerHTML || "")),
+      JSON.stringify((unBox.innerHTML || "") + unBox.textContent));
+check("...but the how-to kept on hover, naming the exact keys and file",
+      /cc_web\.conf/.test(unBox.title) && /asr=/.test(unBox.title)
+      && /soniox=/.test(unBox.title) && /HTTPS/.test(unBox.title),
+      JSON.stringify((unBox.title || "").slice(0, 44)));
 
 console.log("=== a long ask keeps its head AND its tail ===");
 check("a short ask is left alone", clampHT("短的一条", 40) === "短的一条", clampHT("短的一条", 40));

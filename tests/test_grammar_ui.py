@@ -51,6 +51,10 @@ def main():
     # unhelpful "could not extract".
     cache_line = extract(r"\n\s*((?:if \([^\n]*\) )?manualGrammarMap\.set\(key, res\);)",
                          "the manualGrammarMap.set call")
+    # The result's way out, and the placement helper it lands through. Shipped code,
+    # pulled in rather than copied, so a change to either shows up here.
+    hide = extract(r"\n  (function _ghHide\(box\) \{.*?\n  \})", "_ghHide")
+    putg = extract(r"\n  (function _putGrammar\(div, line\) \{.*?\n  \})", "_putGrammar")
 
     js = r"""
 const _fails = [];
@@ -60,9 +64,24 @@ function check(name, cond, detail) {
 }
 // minimal DOM: _showManualCorrection only builds divs/spans and appends them
 function mkEl(tag) {
-  return { tagName: tag, className: "", textContent: "", children: [],
-           appendChild(c) { this.children.push(c); return c; },
-           querySelector() { return null; }, remove() {} };
+  const el = {
+    tagName: tag, className: "", textContent: "", title: "", children: [], parent: null,
+    handlers: {},
+    appendChild(c) { c.parent = this; this.children.push(c); return c; },
+    insertBefore(c, ref) {
+      c.parent = this;
+      const i = this.children.indexOf(ref);
+      this.children.splice(i < 0 ? this.children.length : i, 0, c);
+      return c;
+    },
+    addEventListener(ev, fn) { this.handlers[ev] = fn; },
+    click() { if (this.handlers.click) this.handlers.click({ stopPropagation() {} }); },
+    remove() { const p = this.parent; if (!p) return;
+               p.children = p.children.filter(x => x !== this); this.parent = null; },
+    querySelector() { return null; },
+  };
+  el.classList = { contains: (c) => (" " + el.className + " ").includes(" " + c + " ") };
+  return el;
 }
 const document = { createElement: mkEl, createTextNode: t => ({ text: String(t) }) };
 function flat(el) {
@@ -70,9 +89,30 @@ function flat(el) {
   for (const c of el.children || []) s += " " + flat(c);
   return s;
 }
+__HIDE__
+__PUTG__
 __SHOW__
 
 function render(res) { const div = mkEl("div"); _showManualCorrection(div, res); return flat(div); }
+function renderTo(res) { const div = mkEl("div"); _showManualCorrection(div, res); return div; }
+
+console.log("=== the result has a way out ===");
+// It used to stay on the message for as long as the page did, and the 🔧 that opened it
+// only ever re-opened it.
+{
+  const div = renderTo({ status: "ok", correction: "I went to the store.", native: "" });
+  const box = div.children[div.children.length - 1];
+  const btn = box.children[box.children.length - 1];
+  check("a hide button sits after the result",
+        (btn.className || "").includes("gh-hide") && btn.textContent === "hide",
+        JSON.stringify([btn.className, btn.textContent]));
+  check("...saying it can be brought back without another call",
+        /🔧/.test(btn.title) && /不会重新请求/.test(btn.title), JSON.stringify(btn.title));
+  check("the box is on the message before it is hidden", div.children.includes(box));
+  btn.click();
+  check("...and clicking it drops the box", !div.children.includes(box),
+        String(div.children.length));
+}
 
 console.log("=== what each status renders ===");
 let h = render({ status: "ok", correction: "I went to the store.", native: "I popped to the shop." });
@@ -118,7 +158,8 @@ check("a statusless reply is NOT cached", cached({ status: "", correction: "" })
 console.log(_fails.length ? "\nFAILED: " + _fails.join(", ") : "\nall pass");
 process.exit(_fails.length ? 1 : 0);
 """
-    js = js.replace("__SHOW__", show).replace("__CACHE__", cache_line)
+    js = (js.replace("__SHOW__", show).replace("__CACHE__", cache_line)
+            .replace("__HIDE__", hide).replace("__PUTG__", putg))
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as fh:
         fh.write(js)
         path = fh.name

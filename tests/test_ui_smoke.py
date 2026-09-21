@@ -335,6 +335,47 @@ def main():
 
         src_index = open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8").read()
 
+        print("=== desktop keyboard: i is gone, t is the terminal, p peeks ===")
+        # Plain letters, only when you are not typing in a field. Remapped 2026-09-21:
+        # the tab list lost its letter (the ⇆ button opens it, and 1–9 still pick a tab
+        # once it is open), the terminal window moved s→t, and tailScr moved t→p (peek).
+        gone = drv.js("""
+          const tv = document.getElementById('transcript-view');
+          const sm = document.getElementById('switch-menu');
+          const scr = document.getElementById('screen-modal');
+          const tail = document.getElementById('tail-box');
+          const had = tv.classList.contains('show');
+          tv.classList.add('show');            // the handler bails unless a view is open
+          sm.style.display = 'none';
+          document.dispatchEvent(new KeyboardEvent('keydown',
+            { key: 'i', bubbles: true, cancelable: true }));
+          const r = { menu: sm.style.display, scr: scr.classList.contains('show'),
+                      tail: tail.style.display };
+          if (!had) tv.classList.remove('show');
+          return r;
+        """)
+        # Driven, because "the key does nothing" is exactly what a leftover handler would
+        # break. (t and p are not driven here: both open a window that talks to the
+        # attached session, and with none attached they raise a native dialog that
+        # freezes the driver. Their MAPPING is checked below instead.)
+        check("i no longer opens the tab list", gone["menu"] == "none", str(gone))
+        check("...and does nothing else either",
+              gone["scr"] is False and gone["tail"] != "block", str(gone))
+        _sw = src_index[src_index.index("switch (e.key) {"):]
+        _sw = _sw[:_sw.index("\n  });")]
+        check("t opens the terminal window (was s)",
+              'case "t": case "T": e.preventDefault(); openScreenInfo();' in _sw)
+        check("p peeks at the tail (was t)",
+              'case "p": case "P": e.preventDefault(); tailScreen();' in _sw)
+        check("...and no letter is left bound to the tab list",
+              "openSwitchMenu()" not in _sw.replace("hideSwitchMenu(); openSwitchMenu();", ""),
+              "a letter still opens it")
+        # The help inside that window has to say the same thing, or it teaches old keys.
+        check("...and the in-app shortcut list was updated with them",
+              'appendInfoRow(infoBody, "t", "terminal window' in src_index
+              and 'appendInfoRow(infoBody, "p", "peek' in src_index
+              and '"i", "toggle tab list' not in src_index)
+
         print("=== select a response → 引用 | copy ===")
         # This view is the session LIST, where <footer> carries .hidden — and an element
         # inside a display:none subtree cannot take focus at all. So the footer is
@@ -574,6 +615,10 @@ def main():
           return getComputedStyle(document.getElementById('sel-bar')).display;
         """)
         check("a selection outside the transcript shows nothing", elsewhere == "none", elsewhere)
+        # NOTE: this wipes #main — which holds the picker AND #transcript-view. Anything
+        # after this line is looking at a gutted DOM, so probes that need either of those
+        # belong ABOVE it. (Cost me a while: getElementById('transcript-view') returning
+        # null reads like a typo, not like "a previous test removed it".)
         drv.js("document.getElementById('main').innerHTML = ''; document.getElementById('input').value = '';")
 
         row2 = drv.js("""

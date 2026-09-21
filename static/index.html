@@ -843,6 +843,8 @@ body.pure #closetab-btn.active {
   letter-spacing: 0.06em; color: var(--muted);
   margin-bottom: 4px; display: flex; align-items: center; gap: 8px;
 }
+/* …and when it sits under the text, the gap belongs on the other side. */
+.msg.meta-below .role { margin-bottom: 0; margin-top: 5px; }
 .msg .role .idx {
   color: #5a5f6c; font-size: 10px; font-weight: normal;
   letter-spacing: 0; text-transform: none; margin-left: auto;
@@ -900,6 +902,14 @@ body.pure #closetab-btn.active {
 .msg .grammar-hint .gh-row { display: block; }
 .msg .grammar-hint .gh-row + .gh-row { margin-top: 4px; }
 .msg .grammar-hint .gh-label { color: var(--muted); font-weight: 700; font-size: 0.9em; margin-right: 3px; }
+/* Its own line, right-aligned: on the last row it would sit after a sentence of
+   arbitrary length, which is nowhere in particular. */
+.msg .grammar-hint .gh-hide {
+  display: block; margin: 5px 0 0 auto; padding: 0 2px;
+  background: none; border: 0; cursor: pointer;
+  color: var(--muted); font-size: 0.9em; line-height: 1.2;
+}
+.msg .grammar-hint .gh-hide:hover { color: var(--text); text-decoration: underline; }
 /* stacked compact rows (System msgs / brief tool-calls) — INLINE flow, wraps */
 .msg.system .sys-lines { font-size: 0.75em; line-height: 1.55; color: var(--muted); word-break: break-word; }
 .msg.system .sys-item { }
@@ -1402,9 +1412,7 @@ footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
 #mm-asr-sec .asr-opt .asr-model { color: var(--muted); font-size: 11px; }
 /* "not configured" note in place of the engine list — an unconfigured feature
    should explain itself, not disappear. */
-#mm-asr-sec .asr-unset { color: var(--accent); font-size: 12px; padding: 3px 2px; line-height: 1.5; }
-#mm-asr-sec .asr-unset span { display: block; color: var(--muted); font-size: 11px; }
-#mm-asr-sec .asr-unset code { font-size: 11px; word-break: break-all; }
+#mm-asr-sec .asr-unset { color: var(--accent); font-size: 12px; }
 /* The jump-to-request list. Anchored to the bottom right, above the float controls
    it belongs to (.switch-menu is top-anchored, so it can't be reused as-is). */
 /* Floats over the selection. Same translucent pill as the tail/↑/⤓ controls, so it
@@ -7606,9 +7614,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       appendInfoRow(infoBody, "⌨ shortcuts", "(when not typing in the reply box)");
       appendInfoRow(infoBody, "A / a", "font bigger / smaller (screenshot window: zooms it)");
       appendInfoRow(infoBody, "/", "focus reply box");
-      appendInfoRow(infoBody, "i", "toggle tab list  →  1–9 opens that tab");
-      appendInfoRow(infoBody, "t", "tailScr window (open / refresh)");
-      appendInfoRow(infoBody, "s", "screenshot window");
+      appendInfoRow(infoBody, "t", "terminal window (screenshot + session info)");
+      appendInfoRow(infoBody, "p", "peek: tailScr window (open / refresh)");
+      appendInfoRow(infoBody, "1–9", "switch to that tab (⇆ opens the list)");
       appendInfoRow(infoBody, "x / q / Esc", "close the open popup");
       appendInfoRow(infoBody, "r", "refresh open popup, else get latest");
       appendInfoRow(infoBody, "Esc", "blur the reply box");
@@ -10141,9 +10149,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // is an implementation detail — strip it for display so we show small
     // human-readable numbers (r42 · #1302), not r1000000042 · #1000001302.
     const _disp = n => (typeof n === "number" && n >= 1000000000) ? n - 1000000000 : n;
-    const r = (b.round != null) ? ("r" + _disp(b.round) + " · ") : "";
-    const sidTag = b.sid ? ` · ${shortSid(b.sid)}` : "";
-    idx.textContent = r + "#" + (b.idx != null ? _disp(b.idx) : "?") + sidTag + when;
+    // Round + time only. #idx and the short sid are addresses, not information you read
+    // a message by — and on the row under every message they were two thirds of it. Both
+    // stay on hover, and neither was load-bearing: the mismatch warning has its own
+    // flagMismatch(), and dataset.idx (what find and "load this answer" look up) is set
+    // from b.idx above, not from this text.
+    const r = (b.round != null) ? ("r" + _disp(b.round)) : "";
+    idx.textContent = r + (r && when ? when : when.replace(/^ · /, ""));
+    idx.title = "#" + (b.idx != null ? _disp(b.idx) : "?") + (b.sid ? " · " + shortSid(b.sid) : "");
     role.appendChild(label); role.appendChild(idx);
 
     // Stack consecutive compact rows: System msgs (all modes) and, in BRIEF
@@ -10197,7 +10210,13 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (extractCommands(rawTextFor(b)).length) role.appendChild(makeCmdsBtn(() => rawTextFor(b)));
       if (b.role === "user" && !b.system) role.appendChild(makeCorrectBtn(div, b.text));
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
-      div.appendChild(role); div.appendChild(md);
+      // The meta row goes UNDER the text. Experiment (2026-09-21): it carries who said
+      // it, r/#/time and the per-message buttons — none of which you need BEFORE
+      // reading, and above the text they put a band of chrome between every pair of
+      // messages. Tool cards keep theirs on top: their content is a box you decide
+      // whether to open, so its label has to come first.
+      div.appendChild(md); div.appendChild(role);
+      div.classList.add("meta-below");
       // Your own typed message → attach the English-learning correction if we have
       // one. INCLUDES the inline "Queued" box: if the msg got queued, the 🔧 shows
       // there; when the placeholder is later replaced by the processed user turn
@@ -10258,7 +10277,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
       role.appendChild(makeLinksBtn(() => rawTextFor(b)));
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
-      div.appendChild(role); div.appendChild(md);
+      div.appendChild(md); div.appendChild(role);      // same as text — see meta-below
+      div.classList.add("meta-below");
       _lastBottomToolUse = null;
     } else return null;
 
@@ -10377,18 +10397,34 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const d = document.createElement("div"); d.className = "grammar-hint";
     const m = document.createElement("span"); m.className = "gh-mark"; m.textContent = "🔧";
     d.appendChild(m); d.appendChild(document.createTextNode(correction));
+    d.appendChild(_ghHide(d));   // this one arrives unasked — all the more reason
     return d;
+  }
+  // hide = drop the node, not the result: it stays cached, so 🔧 brings it back without
+  // another call.
+  function _ghHide(box) {
+    const b = document.createElement("button");
+    b.className = "gh-hide"; b.textContent = "hide";
+    b.title = "收起这条纠正(🔧 可以再叫出来,不会重新请求)";
+    b.addEventListener("click", (e) => { e.stopPropagation(); box.remove(); });
+    return b;
+  }
+  // The correction belongs next to the words it corrects. With the meta row moved under
+  // the text, a plain appendChild put it BELOW that row, adrift from the message.
+  function _putGrammar(div, line) {
+    const meta = div.classList.contains("meta-below") ? div.querySelector(":scope > .role") : null;
+    if (meta) div.insertBefore(line, meta); else div.appendChild(line);
   }
   function _attachGrammar(div, text) {          // called from renderBlock for your own msgs
     const key = (text || "").trim();
     div.dataset.gk = _gkHash(key);
     const corr = grammarMap.get(key);
-    if (corr && !div.querySelector(".grammar-hint")) div.appendChild(_grammarLine(corr));
+    if (corr && !div.querySelector(".grammar-hint")) _putGrammar(div, _grammarLine(corr));
   }
   function _applyGrammar(key, correction) {     // inject into already-rendered box(es)
     const sel = '[data-gk="' + _gkHash(key) + '"]';
     for (const el of transcriptEl.querySelectorAll(sel))
-      if (!el.querySelector(".grammar-hint")) el.appendChild(_grammarLine(correction));
+      if (!el.querySelector(".grammar-hint")) _putGrammar(el, _grammarLine(correction));
   }
   async function fireGrammar(text) {
     const key = (text || "").trim();
@@ -10437,7 +10473,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         row("?", "", "no result");
       }
     }
-    div.appendChild(box);
+    // A way out. The correction is something you asked for and then finish with; before
+    // this it stayed on the message for as long as the page did, and the 🔧 that opened
+    // it only ever re-opened it.
+    box.appendChild(_ghHide(box));
+    _putGrammar(div, box);
   }
   function makeCorrectBtn(div, text) {
     const btn = document.createElement("button");
@@ -10940,9 +10980,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // Transcript-page keyboard shortcuts (desktop). Plain keys, ONLY when you're
   // NOT typing in a field and no modifier is held (so typing in the reply box,
   // and Cmd/Ctrl+R page reload, are unaffected):
-  //   /  focus reply box      i  toggle tab list      t  tailScr window
+  //   /  focus reply box      t  terminal window      p  peek (tailScr)
   //   u  prev user request   U  next user request
-  //   s  screenshot window    x  close open popup      r  refresh open popup / get latest
+  //   x  close open popup    r  refresh open popup / get latest
   //   1-9 (while tab list open)  switch to that tab    Esc (in reply box)  blur
   function _isEditable(el) {
     return el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA"
@@ -11060,9 +11100,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       case "U":                                           // next user request
         if (!tailOpen && !screenOpen && !switchOpen) { e.preventDefault(); jumpUserRequest(1); }
         break;
-      case "i": case "I": e.preventDefault(); openSwitchMenu(); break;   // toggle tab list
-      case "t": case "T": e.preventDefault(); tailScreen(); break;       // open/refresh tailScr
-      case "s": case "S": e.preventDefault(); openScreenInfo(); break;   // open screenshot
+      // No letter for the tab list any more — the ⇆ button in the header opens it, and
+      // the digits still pick a tab once it is open.
+      case "t": case "T": e.preventDefault(); openScreenInfo(); break;   // terminal window (was s)
+      case "p": case "P": e.preventDefault(); tailScreen(); break;       // peek: tailScr (was t)
       case "ArrowUp":                                     // screen: send Arrow Up to the tab (drive a menu)
         if (screenOpen) { e.preventDefault(); document.getElementById("key-up").click(); }
         break;
@@ -11881,18 +11922,16 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       r.appendChild(box); sec.appendChild(r);
       return box;
     };
-    // Nothing configured: say so. The mic button is hidden in that case, and
-    // silently hiding BOTH it and this section left no way to find out that voice
-    // input exists at all, let alone what to set. Name the exact keys + file.
+    // Nothing configured: one line, same shape as every other row. The mic button is
+    // hidden in that case, and hiding this section too left no way to find out that voice
+    // input exists at all — but the four-line how-to that used to sit here was a
+    // paragraph in a menu, needed exactly once. It moved to the row's tooltip.
     if (!asrConfigs.length && !asrRtAvail) {
-      const p = document.createElement("div");
-      p.className = "asr-unset";
-      sec.appendChild(Object.assign(document.createElement("div"),
-                                    {className: "menu-sec", textContent: "voice"}));
-      p.innerHTML = "not configured yet · 未配置<span>在 <code>~/.claude/cc_web.conf</code> 里加 "
-        + "<code>asr=</code>(批量) 或 <code>soniox=</code> / <code>openai_realtime=</code>(实时)，"
-        + "重启服务生效。录音还需要通过 HTTPS 打开本页(getUserMedia 要 secure context)。</span>";
-      sec.appendChild(p);
+      const box = line("voice");
+      box.textContent = "not configured yet";
+      box.className = "asr-inline asr-unset";
+      box.title = "在 ~/.claude/cc_web.conf 里加 asr=(批量) 或 soniox= / openai_realtime=(实时),"
+        + "重启服务生效。录音还需要通过 HTTPS 打开本页(getUserMedia 要 secure context)。";
       return;
     }
     // 1) mode selector (only shown when a realtime engine exists)
