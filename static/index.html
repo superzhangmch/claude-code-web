@@ -190,6 +190,10 @@ header #picker-cfg-group { display: inline-flex; align-items: center; }
 .switch-menu .sw-item .sw-sess { color: var(--muted); }   /* dimmer inside the popup */
 .switch-menu .menu-sec { font-size: 10px; color: var(--muted); margin: 6px 2px 3px; text-transform: uppercase; letter-spacing: .05em; }
 .switch-menu .menu-sec:first-child { margin-top: 0; }
+/* Group separator. Twelve rows with nothing between them had become a wall; the groups
+   are by WHAT a row acts on (this session · how it reads · finding something in it ·
+   dictation · the way out), which survives new rows better than "these feel related". */
+.switch-menu .sw-sep { height: 0; border-top: 1px solid var(--border); margin: 6px 2px; }
 .switch-menu .sw-empty { color: var(--muted); font-size: 12px; padding: 8px; }
 /* A .sw-item inside a .scr-cfg-row is one control among several on that line, not a
    full-width block. Same rule for the voice models, which are rendered into a span. */
@@ -1239,14 +1243,17 @@ footer .input-row {
 footer .input-row > button { flex-shrink: 0; }
 /* recording overlay — covers the input row while the mic is capturing; the whole
    bar is a stop button, with a live elapsed timer + animated level bars. */
-footer .rec-bar {
+/* NOT scoped to the footer any more. The bar is moved next to whatever you are
+   dictating into — the composer, or a Task box inside a full-screen window — and with
+   `footer .rec-bar` it simply lost every style the moment it left. */
+.rec-bar {
   position: absolute; inset: 8px 5px; z-index: 5;
   display: flex; align-items: center; gap: 7px;
   padding: 0 12px; border-radius: 10px; cursor: pointer;
   background: var(--panel2); color: var(--text); border: 1.5px solid var(--accent);
   box-shadow: 0 1px 6px rgba(0,0,0,.18);
 }
-footer .rec-bar .rec-dot {
+.rec-bar .rec-dot {
   width: 10px; height: 10px; border-radius: 50%; background: #e53935; flex-shrink: 0;   /* red = recording (theme-agnostic signal) */
   animation: rec-blink 1s steps(2, start) infinite;
 }
@@ -1256,43 +1263,64 @@ footer .rec-bar .rec-dot {
    stops blinking, and turns red at the instant capture starts. The text line says the
    same thing in words, but only realtime keeps it on screen — batch overwrites that row
    with its own hint, and this stays true in both. */
-footer .rec-bar.rec-arming .rec-dot {
+.rec-bar.rec-arming .rec-dot {
   background: transparent; border: 2px solid var(--border); animation: none;
 }
-footer .rec-bar.rec-arming .rec-time { color: var(--muted); }
-footer .rec-bar .rec-time { font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 600; }
-footer .rec-bar .rec-wave { display: flex; align-items: center; gap: 3px; flex: 0 0 auto; height: 20px; }
-footer .rec-bar .rec-wave > span:nth-child(n+7) { display: none; }   /* short wave (6 bars) so the buttons fit one line */
-footer .rec-bar .rec-wave > span {
+.rec-bar.rec-arming .rec-time { color: var(--muted); }
+.rec-bar .rec-time { font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 600; }
+.rec-bar .rec-wave { display: flex; align-items: center; gap: 3px; flex: 0 0 auto; height: 20px; }
+.rec-bar .rec-wave > span:nth-child(n+7) { display: none; }   /* short wave (6 bars) so the buttons fit one line */
+.rec-bar .rec-wave > span {
   width: 3px; height: 30%; background: var(--accent); border-radius: 2px;
   animation: rec-wave 1.1s ease-in-out infinite;
 }
-footer .rec-bar .rec-wave > span:nth-child(2n) { animation-delay: .18s; }
-footer .rec-bar .rec-wave > span:nth-child(3n) { animation-delay: .36s; }
-footer .rec-bar .rec-wave > span:nth-child(4n) { animation-delay: .54s; }
+.rec-bar .rec-wave > span:nth-child(2n) { animation-delay: .18s; }
+.rec-bar .rec-wave > span:nth-child(3n) { animation-delay: .36s; }
+.rec-bar .rec-wave > span:nth-child(4n) { animation-delay: .54s; }
 /* realtime mode: anchor to the bottom and grow UPWARD so the transcript gets its own full-width row */
-footer .rec-bar.rec-live-on {
+.rec-bar.rec-live-on {
   inset: auto 5px 8px 5px; height: auto; max-height: 28vh;
   flex-wrap: wrap; align-items: flex-start; padding: 8px 12px; cursor: default;
 }
-footer .rec-bar.rec-live-on .rec-cancel { margin-left: auto; }
-footer .rec-bar .rec-live {
+.rec-bar.rec-live-on .rec-cancel { margin-left: auto; }
+/* In the footer the bar is absolutely positioned to COVER the composer row — that is
+   what `inset` does here. Dropped into a Task section unchanged it would cover the
+   textarea instead of sitting above it, so moving it switches it into normal flow.
+   Declared after .rec-live-on deliberately: same specificity, and this has to win. */
+/* Task-box mode — only reachable from a Task/notes box, and the composer's bar keeps
+   its own look and buttons untouched. Different job, different bar: there is no Send
+   here (a Task box submits nothing) and no Edit (inserting into the box you are editing
+   IS the edit), so both collapse into one 插入. The dashed frame says the same thing the
+   flow does — nothing has been written into your box yet. */
+.rec-bar.rec-memo { border-style: dashed; }
+.rec-bar.rec-memo .rec-send, .rec-bar.rec-memo .rec-edit { display: none !important; }
+.rec-bar.rec-memo .rec-use { display: inline-block !important; }
+/* The swap only exists once there are two versions to swap between. */
+.rec-bar.rec-memo.rec-two .rec-swap { display: inline-block !important; }
+/* …and once polished, Polish has nothing left to do. */
+.rec-bar.rec-memo.rec-picked .rec-stop { display: none !important; }
+.rec-bar .rec-memo-which { color: var(--muted); font-size: 11px; }
+.rec-bar.rec-inline {
+  position: static; inset: auto; margin-bottom: 5px; padding: 6px 10px;
+  flex-wrap: wrap; row-gap: 4px; cursor: default; max-height: 40vh;
+}
+.rec-bar .rec-live {
   flex-basis: 100%; width: 100%; order: 5; text-align: left;
   font-size: 15px; line-height: 1.5; max-height: 20vh; overflow-y: auto;
   word-break: break-word; margin-top: 2px; padding-top: 6px;
   border-top: 1px solid var(--border);
 }
-footer .rec-bar .rec-live .rec-live-partial { color: var(--muted); }
+.rec-bar .rec-live .rec-live-partial { color: var(--muted); }
 /* Why a recording stopped, shown IN the popup. The popup then stays put until the
    user picks an action — a voice bar that vanishes on its own is indistinguishable
    from a bug, and it silently throws away a half-finished transcript. */
-footer .rec-bar .rec-live .rec-live-err {
+.rec-bar .rec-live .rec-live-err {
   display: block; color: #e8833a; font-weight: 600; font-size: 13px; margin-bottom: 3px;
 }
-footer .rec-bar .rec-live .rec-live-hint { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 14px; }
+.rec-bar .rec-live .rec-live-hint { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 14px; }
 /* Scoped to the whole bar, not just .rec-live: the same spinner is reused in the
    time slot while a polish round-trip is in flight. */
-footer .rec-bar .rec-spin {
+.rec-bar .rec-spin {
   display: inline-block; width: 13px; height: 13px; flex-shrink: 0;
   border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%;
   animation: rec-spin .8s linear infinite;
@@ -1302,26 +1330,32 @@ footer .rec-bar .rec-spin {
    rather than wedged. Nothing else moves — Cancel / Polish / Edit / Send all stay
    put and stay usable while the request is out (see _voiceStop / _voiceCancel).
    Declared after .rec-spin so the hidden-by-default wins on equal specificity. */
-footer .rec-bar .rec-spin-time { display: none; }
-footer .rec-bar.rec-polishing .rec-spin-time { display: inline-block; }
-footer .rec-bar.rec-polishing .rec-time { color: var(--accent); }
+.rec-bar .rec-spin-time { display: none; }
+.rec-bar.rec-polishing .rec-spin-time { display: inline-block; }
+.rec-bar.rec-polishing .rec-time { color: var(--accent); }
 @keyframes rec-spin { to { transform: rotate(360deg); } }
 @keyframes rec-wave { 0%,100% { height: 25%; } 50% { height: 90%; } }
 /* Send is disabled until there is something to send (see Voice.start / render). */
-footer .rec-bar .rec-send:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
+.rec-bar .rec-send:disabled, .rec-bar .rec-use:disabled, .rec-bar .rec-swap:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
 /* Icon-only controls: square-ish and narrow so five buttons fit one phone row. */
-footer .rec-bar .rec-ico { min-width: 30px; padding: 4px 6px; font-size: 14px; line-height: 1; }
+.rec-bar .rec-ico { min-width: 30px; padding: 4px 6px; font-size: 14px; line-height: 1; }
 /* Paused: the blinking red dot means "capturing", so make it plainly not that. */
-footer .rec-bar.rec-paused .rec-dot { background: #8a8a8a; animation: none; }
-footer .rec-bar.rec-paused .rec-time { color: var(--muted); }
-footer .rec-bar .rec-stop, footer .rec-bar .rec-cancel, footer .rec-bar .rec-pause, footer .rec-bar .rec-send, footer .rec-bar .rec-edit {
+.rec-bar.rec-paused .rec-dot { background: #8a8a8a; animation: none; }
+.rec-bar.rec-paused .rec-time { color: var(--muted); }
+/* EVERY button on the bar, the Task-box pair included. They were added without being
+   put on this list and fell back to the browser's default button — same row, visibly
+   not the same kind of thing. */
+.rec-bar .rec-stop, .rec-bar .rec-cancel, .rec-bar .rec-pause, .rec-bar .rec-send, .rec-bar .rec-edit,
+.rec-bar .rec-swap, .rec-bar .rec-use {
   flex-shrink: 0; background: var(--panel); color: var(--text);
   border: 1px solid var(--border); border-radius: 7px;
   font-size: 12px; padding: 4px 9px; cursor: pointer;
 }
-footer .rec-bar .rec-stop:hover, footer .rec-bar .rec-cancel:hover, footer .rec-bar .rec-send:hover, footer .rec-bar .rec-edit:hover { border-color: var(--accent); }
-footer .rec-bar .rec-send { background: var(--accent); color: var(--bg); font-weight: 700; border-color: var(--accent); }  /* accent fill: commit directly, skip polish */
-footer .rec-bar .rec-send:hover { opacity: .85; }
+.rec-bar .rec-stop:hover, .rec-bar .rec-cancel:hover, .rec-bar .rec-send:hover, .rec-bar .rec-edit:hover,
+.rec-bar .rec-swap:hover, .rec-bar .rec-use:hover { border-color: var(--accent); }
+/* accent fill = the one that commits: Send in the composer, 插入 in a Task box. */
+.rec-bar .rec-send, .rec-bar .rec-use { background: var(--accent); color: var(--bg); font-weight: 700; border-color: var(--accent); }
+.rec-bar .rec-send:hover, .rec-bar .rec-use:hover { opacity: .85; }
 /* mic stays static (🎤) in all states — recording/processing state shows in the rec-bar popup, not on the button */
 /* 🎤 + 📎 stacked in a column beside the input (frees width for the textarea);
    the column stretches to the input height, each button = half. */
@@ -2011,6 +2045,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 .scr-cfg-row { display: flex; align-items: center; gap: 6px; padding: 4px 2px; font-size: 12px; color: var(--text); }
 .scr-cfg-row > span:first-child { flex: 1; color: var(--muted); white-space: nowrap; }
 .scr-cfg-row .btn { padding: 3px 9px; }
+/* A row whose control names itself needs no label, but still lines up with the rows
+   that have one — the label is what pushes their controls to the right. */
+.scr-cfg-row.row-solo { justify-content: flex-end; }
+/* Where one setting ends and the next begins, on a row that has no labels to say so. */
+.scr-cfg-row .row-bar { color: var(--border); padding: 0 1px; user-select: none; }
 #cfg-cols-val { min-width: 34px; text-align: center; font-variant-numeric: tabular-nums; }
 
 @media (orientation: portrait), (max-width: 640px) {
@@ -2570,64 +2609,98 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
        heading line plus a full-width button line — two lines to say one thing, four times
        over, plus one line per voice model. -->
   <div id="mode-menu" class="switch-menu" style="display:none">
-    <div class="scr-cfg-row"><span>显示详略</span>
-      <button class="sw-item mode-opt" data-mode="brief" title="brief (the default)">brief</button>
-      <button class="sw-item mode-opt" data-mode="medium" title="medium">medium</button>
-      <button class="sw-item mode-opt" data-mode="all" title="all">all</button>
+    <!-- No labels on either row: brief/medium/all and a − / A + / ◐ have been these
+         buttons since the beginning, and "显示详略" / "外观" only said again, in four
+         characters, what the buttons already say. The bar does the work a label was
+         doing here — it marks where one setting ends and the next begins, which is the
+         only thing that was ambiguous once two settings share a line. -->
+    <div class="scr-cfg-row row-solo">
+      <!-- min/mid/max rather than brief/medium/all: same three server modes (the API
+           words are in the tooltips), three equal-length labels, and an obvious scale.
+           NOT S/M/L — the next row down is the font size, and S/M/L there would read as
+           one. data-mode keeps the protocol name, so nothing but the face changed. -->
+      <button class="sw-item mode-opt" data-mode="brief"
+              title="brief (默认) — 工具只留一行摘要">min</button>
+      <button class="sw-item mode-opt" data-mode="medium"
+              title="medium — 工具参数/输出截断后显示">mid</button>
+      <button class="sw-item mode-opt" data-mode="all"
+              title="all — 原样, 不截断">max</button>
+      <span class="row-bar">|</span>
+      <!-- Same axis — how much text do you want — so it rides on the same row. One
+           button that names its own state instead of a pair under a label of their own:
+           full/2 行 was three lines' worth of menu for one binary choice. -->
+      <button class="sw-item" id="mm-live"
+              title="生成过程中显示多少: 全部, 还是只有末尾两行">live full</button>
     </div>
-    <div class="scr-cfg-row"><span>生成中预览</span>
-      <button class="sw-item" id="mm-live-full">full</button>
-      <button class="sw-item" id="mm-live-2" title="2 lines · lite">2 行</button>
-    </div>
-    <!-- filled by renderAsrMenu with .scr-cfg-row lines of its own (mode, then model) -->
-    <div id="mm-asr-sec"></div>
-    <div class="scr-cfg-row"><span>字号</span>
+    <!-- Four small things on one row, none of which needs a line of its own. The LaTeX
+         button says its own state ("latex on" / "latex off") rather than sitting under a
+         label that repeats the word — which is what let it move onto this row. -->
+    <div class="scr-cfg-row row-solo">
       <button class="sw-item" id="mm-fontdown" title="smaller">a −</button>
       <button class="sw-item" id="mm-fontup" title="bigger">A +</button>
+      <button class="sw-item" id="mm-theme" title="主题">◐</button>
+      <span class="row-bar">|</span>
+      <button class="sw-item" id="mm-latex" title="数学公式渲染(KaTeX)">latex off</button>
     </div>
-    <div class="scr-cfg-row"><span>主题</span>
-      <button class="sw-item" id="mm-theme">◐</button>
-    </div>
+
     <!-- Paging back through a long session drags in every response with it. When what
          you are after is something YOU said, they are the part you scroll past — so
          this can bring back the requests alone. On by default: a half transcript is a
-         surprise unless you asked for it. -->
-    <div class="scr-cfg-row"><span>搜索</span>
-      <button class="sw-item" id="mm-search"
-              title="在整个 session 里搜(不只是已载入的部分)。装成 App 的时候浏览器没有页内查找,而页内查找本来也只看得到屏幕上的">🔍 搜索</button>
-    </div>
-    <div class="scr-cfg-row"><span>往前翻</span>
+         surprise unless you asked for it. Labelled after the button they change, not
+         after what they do, so the pairing is obvious from the row. -->
+    <div class="scr-cfg-row"><span>load more</span>
       <button class="sw-item" id="mm-earlier-resp"
-              title="「Load earlier rounds」要不要连回复一起取。默认只取你的提问(翻得快、省流量);想看某条的回复,点那条提问就能单独载入">只要提问</button>
+              title="「Load earlier rounds」要不要连回复一起取。默认只取你的提问(翻得快、省流量);想看某条的回复,点那条提问就能单独载入">reqs only</button>
+      <!-- ask-peer relays are tagged, so they can be told apart from things you typed.
+           They are another session talking to this one — not requests you made, which
+           makes them noise in the one view whose job is finding a request you made. -->
+      <button class="sw-item" id="mm-earlier-peer"
+              title="ask-peer 转发进来的消息(带「⇄ from peer claude」标记)不是你发的。默认连它那一轮一起隐藏">no peer</button>
     </div>
-    <div class="scr-cfg-row"><span>LaTeX 公式</span>
-      <button class="sw-item" id="mm-latex">关</button>
-    </div>
-    <div class="scr-cfg-row"><span>发送后翻译</span>
-      <button class="sw-item" id="mm-autotranslate">关</button>
-    </div>
+
+    <div class="sw-sep"></div>
+    <!-- filled by renderAsrMenu with .scr-cfg-row lines of its own (mode, then model) -->
+    <div id="mm-asr-sec"></div>
+
+
+    <div class="sw-sep"></div>
     <!-- Maintaining the tree happens HERE, from inside the session being moved: the
          context ("who should this sit under?") is already on screen, so it needs no
          organise mode, no per-row widgets in the lists, and no drag surface. -->
-    <div class="scr-cfg-row"><span>层级</span>
-      <button class="sw-item" id="mm-set-parent" title="把当前 session 挂到另一个 session 下面">⤵ 设为…的子</button>
-      <button class="sw-item" id="mm-detach-parent" title="脱离父级,成为顶层">⤴ 脱离</button>
+    <div class="scr-cfg-row"><span>tree</span>
+      <button class="sw-item" id="mm-set-parent" title="把当前 session 挂到另一个 session 下面">⤵ under…</button>
+      <button class="sw-item" id="mm-detach-parent" title="脱离父级,成为顶层">⤴ detach</button>
     </div>
-    <div class="scr-cfg-row"><span>结束这个 session</span>
+    <!-- Two buttons that name themselves, so neither needs a label: the two rows they
+         used to have were one button each. ("结束这个 session  [⏏ exit & close]" was also
+         the same sentence twice, on the one row where the words matter most.)
+         exit sits at the RIGHT end, behind the bar and behind a confirm dialog — it is
+         the only thing in this menu that cannot be undone, so it must not be what a
+         thumb meets on its way to find. -->
+    <div class="scr-cfg-row row-solo">
+      <button class="sw-item" id="mm-search"
+              title="在整个 session 里搜(不只是已载入的部分)。装成 App 的时候浏览器没有页内查找,而页内查找本来也只看得到屏幕上的">🔍 find</button>
+      <span class="row-bar">|</span>
       <button class="sw-item" id="mm-exit-close"
-              id="exit-close-btn" title="退出 claude 并关闭它的终端 tab(有后台作业时不关)">⏏ exit &amp; close</button>
+              title="退出 claude 并关闭它的终端 tab(有后台作业时不关)">⏏ session exit</button>
     </div>
-    <!-- One row, two windows: what this session is doing, and who is watching it. They
-         were two rows with a `set` each plus a `view run`, which is three buttons for
-         two places. `view run` is gone — the self-check report lives inside the Task
-         window, on its own 自检 button — but its VERDICT stays here, on `set`: the
-         point of a check is to be noticed, and a result you have to open a window to
-         find is one you find late. -->
-    <div class="scr-cfg-row"><span>Task</span>
+    <!-- Grouped by WHAT each row acts on, not by "feels related": how it reads ·
+         dictation · the session itself (its place in the tree, the way in and out of it,
+         its task). Twelve rows with no lines between them had become a wall.
+         The session's own group sits LAST on purpose: this menu hangs from the ⚙ at the
+         top of the screen, and on a phone the bottom of it is what a thumb reaches
+         without moving your hand.
+         One row, two windows: what this session is doing, and who is watching it. They
+         were two rows with a `set` each plus a `view run` — three buttons for two places.
+         `view run` is gone (the self-check report lives inside the Task window, on its
+         own 自检 button). Its verdict was on `set` for a while too; that went as well,
+         because a warning you cannot act on from where it is shown is just noise on a
+         button you press for another reason. ✓ = there is something written in there. -->
+    <div class="scr-cfg-row"><span>task</span>
       <button class="sw-item" id="mm-memo"
               title="写这个 session 的当前任务和长期注意事项;自检结果也在里面">set<span id="mm-memo-hint" class="mm-dim"></span></button>
       <button class="sw-item" id="mm-watch"
-              title="看门 agent: 策略、开关、有效期、检查周期都在里面">watch <span id="mm-watch-hint" class="mm-dim">关</span></button>
+              title="看门 agent: 策略、开关、有效期、检查周期都在里面">watch <span id="mm-watch-hint" class="mm-dim">off</span></button>
     </div>
   </div>
 
@@ -2673,6 +2746,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <button class="tk" data-raw="&#13;">⏎ Enter</button>
         <button class="tk" data-raw="&#27;">Esc</button>
         <button class="tk" data-raw="&#9;">Tab</button>
+        <!-- CSI Z (ESC [ Z) — the standard back-tab sequence, which is what claude's TUI
+             reads shift+tab as: it cycles the permission mode (the "auto mode on
+             (shift+tab to cycle)" line under the input). Unreachable from a phone
+             keyboard, and unreachable through the text box too, since a sequence typed
+             there arrives as characters rather than as a key. -->
+        <button class="tk" data-raw="&#27;[Z" title="Shift+Tab — claude: 切换权限模式(auto / plan / …)">⇧Tab</button>
         <span class="tk-sep">|</span>
         <button class="tk" data-raw="&#27;[A">↑</button>
         <button class="tk" data-raw="&#27;[B">↓</button>
@@ -2803,6 +2882,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <div class="memo-sec">
         <div class="memo-lab">当前任务 <span class="memo-hint">随进展改写</span>
           <span id="memo-task-meta" class="memo-meta"></span>
+          <button class="btn memo-smallbtn memo-mic" data-box="task" title="语音输入(插在光标处)">🎤</button>
           <button class="btn memo-smallbtn memo-zoom" title="这个框占满整个窗口 / 退出">⤢</button>
           <button id="memo-task-send" class="btn memo-smallbtn"
                   title="把它放进下面的输入框(标注为 [当前任务]),你确认后再发">填入输入框</button></div>
@@ -2812,6 +2892,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <div class="memo-sec">
         <div class="memo-lab">注意事项 <span class="memo-hint">与当前任务无关, 长期有效</span>
           <span id="memo-notes-meta" class="memo-meta"></span>
+          <button class="btn memo-smallbtn memo-mic" data-box="notes" title="语音输入(插在光标处)">🎤</button>
           <button class="btn memo-smallbtn memo-zoom" title="这个框占满整个窗口 / 退出">⤢</button>
           <button id="memo-notes-send" class="btn memo-smallbtn"
                   title="把它放进下面的输入框(标注为 [注意事项]),你确认后再发">填入输入框</button></div>
@@ -3084,6 +3165,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <button id="rec-pause" class="rec-pause rec-ico" style="display:none" title="Stop recording (keep the result)" aria-label="Stop recording">⏸</button>
         <button id="rec-stop" class="rec-stop">Polish</button>
         <button id="rec-edit" class="rec-edit" style="display:none">Edit</button>
+        <!-- Task-box mode only, and the composer never shows these. Two jobs, two
+             button sets: the composer decides "polish / edit / send" because the text
+             is a MESSAGE; a Task box has no send and editing it is what you are already
+             doing, so Edit and Send collapse into one 插入. Polish stays, and the choice
+             it creates is made HERE, under the text the bar already echoes, instead of
+             in a window that covers it. -->
+        <button id="rec-swap" class="rec-swap" style="display:none">看润色</button>
+        <button id="rec-use" class="rec-use" style="display:none">插入</button>
         <button id="rec-send" class="rec-send" style="display:none">Send</button>
       </div>
     </div>
@@ -3104,6 +3193,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   <div id="sel-bar" class="sel-bar" style="display:none">
     <button id="sel-quote" title="引到输入框,后面接「关于这点,」,你接着写">引用</button>
     <button id="sel-explain" title="引到输入框,后面接「解释一下这段。」,可以直接发">解释</button>
+    <!-- Same destination as 引用, none of its dressing: no `>` quote, no lead-in
+         sentence. For when the selection is a path, a command, a model name — something
+         you are about to type INTO your own sentence, where a quote block would be in
+         the way. Named 追加 because that is the whole difference from 引用. -->
+    <button id="sel-append" title="原样追加到输入框(不加引号,也不接提示语)">追加</button>
     <button id="sel-copy" title="复制选中的文字">复制</button>
   </div>
 
@@ -3247,7 +3341,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     setText("newsess-title", "New " + AGENT_LABEL + " session");
     const inp = document.getElementById("input");
     if (inp) inp.placeholder = "Reply to " + AGENT_LABEL + "…";
-    setTitle("exit-close-btn", `退出 ${agentLc()} 并关闭它的终端 tab(有后台作业时不关)`);
+    // mm-exit-close, not exit-close-btn: the button carried BOTH ids (two id= attributes
+    // on one tag), the parser kept the first, and so this agent-specific title — the
+    // whole point of the call — has been updating nothing.
+    setTitle("mm-exit-close", `退出 ${agentLc()} 并关闭它的终端 tab(有后台作业时不关)`);
     setTitle("tabs-exit-btn", `退出并关闭选中的 tab(${agentLc()} tab 会先 /exit)`);
     setTitle("tabs-snap-save", `保存当前所有 ${agentLc()} tab（含顺序），重启前点`);
     setTitle("tabs-snap-resume", `按选中的快照 ${agentLc()} --resume 恢复，重启后点`);
@@ -3511,6 +3608,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // something you said, and the answers are both the bulk of the bytes and the part
   // you scroll past. Any one of them is a tap away.
   let earlierResp = localStorage.getItem("cc_web_earlier_resp") === "1";
+  // Hidden by default, for the same reason the answers are: you press this button when
+  // you are looking for something YOU said, and a relayed exchange is neither yours nor
+  // usually what you remember.
+  let earlierPeer = localStorage.getItem("cc_web_earlier_peer") === "1";
   let latexAuto = localStorage.getItem("cc_web_latex_auto") === "1";
   function autoRenderMath(mdEl, roleEl) {
     if (mdEl.dataset.mathDone) return;
@@ -3538,14 +3639,36 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     localStorage.setItem("cc_web_earlier_resp", earlierResp ? "1" : "0");
     const mm = document.getElementById("mm-earlier-resp");
     if (mm) {
-      mm.textContent = earlierResp ? "带回复" : "只要提问";
+      mm.textContent = earlierResp ? "+replies" : "reqs only";
       mm.classList.toggle("current", earlierResp);
     }
+    localStorage.setItem("cc_web_earlier_peer", earlierPeer ? "1" : "0");
+    const pm = document.getElementById("mm-earlier-peer");
+    if (pm) {
+      pm.textContent = earlierPeer ? "+peer" : "no peer";
+      pm.classList.toggle("current", earlierPeer);
+    }
   }
+  const recSwapEl = document.getElementById("rec-swap");
+  const recUseEl = document.getElementById("rec-use");
+  if (recSwapEl) recSwapEl.addEventListener("click", (e) => { e.stopPropagation(); _pickSwap(); });
+  // One button, two moments: mid-recording it means "stop and insert what you said",
+  // after a polish it means "insert the version I am looking at".
+  if (recUseEl) recUseEl.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (_pick) _pickTake(); else _voiceStop("send");
+  });
+
   const mmEarlierResp = document.getElementById("mm-earlier-resp");
   if (mmEarlierResp) mmEarlierResp.addEventListener("click", (e) => {
     e.stopPropagation();
     earlierResp = !earlierResp;
+    applyEarlierResp();
+  });
+  const mmEarlierPeer = document.getElementById("mm-earlier-peer");
+  if (mmEarlierPeer) mmEarlierPeer.addEventListener("click", (e) => {
+    e.stopPropagation();
+    earlierPeer = !earlierPeer;
     applyEarlierResp();
   });
   applyEarlierResp();
@@ -3554,7 +3677,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     localStorage.setItem("cc_web_latex_auto", latexAuto ? "1" : "0");
     const mm = document.getElementById("mm-latex");
     if (mm) {
-      mm.textContent = latexAuto ? "自动" : "关";   // the row is labelled "LaTeX 公式"
+      // Says which state it is IN, not which one it would switch to: a button labelled
+      // with its own name and no label column has to answer "is it on right now".
+      mm.textContent = latexAuto ? "latex on" : "latex off";
       mm.classList.toggle("current", latexAuto);
     }
     const pk = document.getElementById("picker-latex");
@@ -3806,8 +3931,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // Two facts on one hint: is anything written, and what did the last self-check
       // say. The verdict used to have its own `view run` button here; the button went,
       // the verdict did not.
-      const tag = memoCheckTag();
-      mmMemoHint.textContent = ((t || n) ? " ✓" : "") + (tag === "—" ? "" : " " + tag);
+      // Just "is there anything in there". The last self-check's verdict used to hang
+      // here too — dropped: you cannot act on it from this button (you press it to open
+      // the window, not to deal with a warning), so it was a word of alarm on a row you
+      // were reading for another reason. The verdict is in the Task window, next to the
+      // 自检 button that produced it, and in this button's tooltip.
+      mmMemoHint.textContent = (t || n) ? " ✓" : "";
       // Spelled out where there is room for a sentence. The hint has to fit on a button,
       // so it can only ever be a label; this is the explanation behind it.
       const mm = document.getElementById("mm-memo");
@@ -3884,15 +4013,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         + "</div>");
     }
     memoCheckDetail.innerHTML = parts.join("") || '<span class="mc-stale">(无细节)</span>';
-    // The ⚙ row carries the verdict too — via memoCheckTag(), which memoRender() reads
-    // for the `set` hint. One computation, two places it shows up.
+    // memoRender() again, for `set`'s TOOLTIP: the verdict is no longer on the button's
+    // face (you cannot act on it from there), but the sentence behind it still says what
+    // the last check found.
     if (mmMemoHint) memoRender();
   }
-  // The self-check verdict in a few characters. ONE computation, shown in two places:
-  // the ⚙ row's `set` hint (glanceable without opening anything) and the 自检 button
-  // inside the Task window. Two copies of this existed for about ten minutes and that
-  // is exactly how the pair drifts. Glyphs rather than colour, because body.pure forces
-  // black-on-white with !important.
+  // The self-check verdict in a few characters — for the 自检 button inside the Task
+  // window (where the report is) and for `set`'s tooltip. It used to ride on `set`'s face
+  // as well; that went, because a warning shown where you cannot act on it is noise.
+  // Glyphs rather than colour, because body.pure forces black-on-white with !important.
   function memoCheckTag() {
     const got = checkRec;
     if (!got || !got.exists) return "—";
@@ -3930,6 +4059,195 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     e.stopPropagation();
     memoCheckSec.classList.toggle("show");
   });
+
+  // ---- pick what goes in, on the bar ----
+  // For one day this was a full-screen window, and it was the wrong shape: the bar
+  // already echoes what was heard, so a panel covered the very thing you were choosing
+  // between. Now the choice lives under that echo — 看润色 / 看原文 swaps which version
+  // the bar shows, 插入 takes the one on screen. Task boxes only; the composer's bar is
+  // unchanged.
+  let _pick = null;                 // { raw, polished, before, show: "pol" | "raw" }
+  function _pickText() {
+    if (!_pick) return "";
+    return _pick.show === "raw" ? _pick.raw : (_pick.polished || _pick.raw);
+  }
+  // Recording finished, nothing written into the box. Polish and 插入 both act on this.
+  function _pickPark(raw, before, reason) {
+    _pick = { raw: raw || "", polished: "", before: before || "", show: "raw", note: reason || "" };
+    _pickBar();
+  }
+  // Polish came back (or failed) — same bar, now with two versions to look at.
+  function voicePickShow(raw, polished, before, failReason) {
+    _pick = { raw: raw || "", polished: polished || "", before: before || "",
+              show: polished ? "pol" : "raw",
+              // A polish that failed must never read as "it was already fine" — and the
+              // reason has to survive a swap, so it lives on the state, not on one render.
+              note: failReason ? "润色没成功 — " + failReason.replace(/^not polished — /, "") : "" };
+    recBar.classList.add("rec-picked");
+    _pickBar();
+  }
+  function _pickBar() {
+    if (!_pick) return;
+    recBar.style.display = "flex";
+    recBar.classList.add("rec-memo", "rec-live-on");
+    recBar.classList.remove("rec-arming", "rec-paused");
+    recBar.classList.toggle("rec-two", !!(_pick.polished && _pick.raw && _pick.polished !== _pick.raw));
+    if (recWaveEl) recWaveEl.style.display = "none";
+    if (recPauseEl) recPauseEl.style.display = "none";   // recording is over
+    [recCancelEl, recStopEl].forEach((b) => b && (b.style.display = "", b.disabled = false));
+    if (recStopEl) { recStopEl.textContent = "Polish"; recStopEl.disabled = !_pick.raw; }
+    clearInterval(_recTimer); _recTimer = null;
+    _recPolishStop();
+    // Mic back to its idle look WITHOUT _setMic("idle") — that hides the bar, which is
+    // the one thing this state must not do.
+    micBtn.classList.remove("busy", "recording"); micBtn.disabled = false;
+    _pickRender();
+  }
+  function _pickRender() {
+    if (!_pick || !recLiveEl) return;
+    const pol = _pick.show !== "raw";
+    // Say which version is on screen, and — when polish failed — why there is only one.
+    // A missing polished version must never read as "it was already fine".
+    const head = pol ? (_pick.polished ? "润色后" : "润色没成功") : "识别原文";
+    recLiveEl.style.display = "";
+    recLiveEl.innerHTML = '<span class="rec-memo-which">' + _escHtml(head)
+      + (_pick.note ? " — " + _escHtml(_pick.note) : "") + "</span><br>"
+      + _escHtml(_pickText() || "(空)");
+    if (recSwapEl) {
+      recSwapEl.textContent = pol ? "看原文" : "看润色";
+      recSwapEl.title = pol ? "看识别出的原话" : "看润色后的版本";
+    }
+    if (recUseEl) {
+      recUseEl.disabled = !_pickText();
+      recUseEl.title = "把上面这一版插入到光标处";
+    }
+  }
+  function _pickSwap() {
+    if (!_pick) return;
+    _pick.show = _pick.show === "raw" ? "pol" : "raw";
+    _pickRender();
+  }
+  function _pickTake() {
+    const t = _pickText(), before = _pick ? _pick.before : "";
+    // 插入 can be tapped while the polish is still out (you read the raw version and
+    // decided it was fine). Drop the request first, or its reply re-opens the bar over
+    // a box you have already finished with.
+    _polishAbort(); _recPolishStop();
+    _pick = null;
+    if (t) vtWrite(before, t);
+    const el = vtEl();
+    _voiceDone();
+    if (!isPhone()) el.focus();
+  }
+
+  // ---- where dictation goes ----
+  // The voice path was written against the composer and said so in every line: fifteen
+  // references to inputEl inside Voice. Rather than a second copy of it for the Task
+  // boxes, the TARGET became a value. Null means the composer, which keeps its old
+  // behaviour exactly (append at the end); anything else is a textarea that gets the
+  // text at its CARET, because a task description is something you fix in the middle.
+  let voiceTarget = null;          // { el, before, after, pick } | null
+  const vtEl = () => (voiceTarget && voiceTarget.el) || inputEl;
+  // Dictating into a Task box, the words are not written as you speak — so until now
+  // there was nothing on screen saying WHERE they would go. The caret is invisible in an
+  // unfocused textarea, and the bar appears above the box and shifts it. So the insertion
+  // point is made a thing you can see: a marker goes in at the caret when recording
+  // starts, and it is what gets replaced (or removed, if you cancel).
+  //
+  // Bracketed-emoji on purpose: one visible glyph reads as decoration, and a word like
+  // [语音] reads as text you might have typed. Nobody types this.
+  const VT_MARK = "[🎤]";
+  // Put the marker in, and hold the slots on the target: once the marker is in the box, a
+  // fresh caret read would include it.
+  function vtMarkIn() {
+    if (!voiceTarget) return;
+    const el = vtEl();
+    const slots = vtSlots(el);
+    voiceTarget.before = slots.before;
+    voiceTarget.after = slots.after;
+    // Strip any stray marker first — one box must never end up with two insertion points.
+    el.value = slots.before.split(VT_MARK).join("") + VT_MARK + slots.after.split(VT_MARK).join("");
+    try {
+      const at = slots.before.length + VT_MARK.length;
+      el.setSelectionRange(at, at);
+    } catch {}
+    el.dispatchEvent(new Event("input"));
+  }
+  // Cancelled, or ended without inserting: it was a placeholder, not text you wrote.
+  function vtMarkOut() {
+    if (!voiceTarget) return;
+    const el = vtEl(), i = el.value.indexOf(VT_MARK);
+    if (i < 0) return;
+    el.value = el.value.slice(0, i) + el.value.slice(i + VT_MARK.length);
+    try { el.setSelectionRange(i, i); } catch {}
+    el.dispatchEvent(new Event("input"));
+  }
+  // Captured when recording STARTS: the caret can move while you talk (a phone
+  // scrolling, a stray tap), and the text belongs where you put the cursor.
+  function vtSlots(el) {
+    if (!voiceTarget) {
+      // Composer: unchanged — appended after whatever is there.
+      return { before: el.value ? (el.value.replace(/\s*$/, "") + " ") : "", after: "" };
+    }
+    const a = el.selectionStart != null ? el.selectionStart : el.value.length;
+    const b = el.selectionEnd != null ? el.selectionEnd : a;
+    return { before: el.value.slice(0, a), after: el.value.slice(b) };
+  }
+  // The bar shows the time, the wave, and every button that ends a recording — so it
+  // has to be where you are looking. Dictating into a Task box, that is inside a
+  // full-screen window and the footer is behind it: the bar was running, correctly,
+  // completely out of sight.
+  //
+  // Moved rather than duplicated. A second bar would be a second copy of the timer,
+  // the wave, the ⏸ state and four buttons; moving the node keeps every listener
+  // already bound to it.
+  //
+  // The element is looked up on each call rather than captured: `recBar` is declared
+  // further down, and this block is reachable from _hideRecBar — a const read before
+  // its declaration is a ReferenceError at startup that kills the whole script, which
+  // this file has now been bitten by twice.
+  let _recHome = null;
+  const _recBarEl = () => document.getElementById("rec-bar");
+  function recBarTo(sec) {
+    const bar = _recBarEl();
+    if (!bar) return;
+    if (!_recHome) _recHome = { parent: bar.parentNode, next: bar.nextSibling };
+    const ta = sec && sec.querySelector("textarea");
+    if (ta) { bar.classList.add("rec-inline"); sec.insertBefore(bar, ta); }
+  }
+  function recBarHome() {
+    const bar = _recBarEl();
+    if (!bar || !_recHome) return;
+    bar.classList.remove("rec-inline");
+    _recHome.parent.insertBefore(bar, _recHome.next);
+    _recHome = null;
+  }
+
+  function vtWrite(before, text) {
+    const el = vtEl();
+    let head, after;
+    // The marker IS the insertion point, so go by where it sits now rather than by the
+    // offsets captured at the start: anything typed into the box while you were talking
+    // survives, which rebuilding from stale slices would have thrown away.
+    const at = voiceTarget ? el.value.indexOf(VT_MARK) : -1;
+    if (at >= 0) {
+      head = _joinDict(el.value.slice(0, at), text);
+      after = el.value.slice(at + VT_MARK.length);
+    } else {
+      head = _joinDict(before, text);
+      after = (voiceTarget && voiceTarget.after) || "";
+    }
+    el.value = head + after;
+    if (!voiceTarget) inputFromVoice = true;   // grammar-correction flag: composer only
+    el.dispatchEvent(new Event("input"));
+    if (voiceTarget) {
+      // Caret after the inserted words, so you can keep typing where you left off.
+      try { el.setSelectionRange(head.length, head.length); } catch {}
+    }
+  }
+  function vtCurrent(before, text) {   // what the box would hold for this pair
+    return _joinDict(before, text) + ((voiceTarget && voiceTarget.after) || "");
+  }
 
   // ---- find in what is loaded ----
   // Filters the LOADED transcript — not a server search. That is the deliberate half of
@@ -4132,15 +4450,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // reference to the scroller at bind time.
   document.addEventListener("scroll", selHide, true);
   window.addEventListener("resize", selHide);
-  function selQuote(text, lead) {
-    // Collapse runs of blank lines: quoting a spaced-out answer should not paste half a
-    // screen of "> " into the box.
-    const q = text.replace(/\r/g, "").split("\n").map((l) => "> " + l.trimEnd())
-                  .join("\n").replace(/(?:\n> )+(?=\n> )/g, "\n>");
+  // Appended, not prepended: the lead-in has to end up immediately before the caret,
+  // and a half-written draft should stay where it was rather than be wrapped around.
+  function selIntoInput(add) {
     const cur = inputEl.value;
-    // Appended, not prepended: "关于这点," has to end up immediately before the caret,
-    // and a half-written draft should stay where it was rather than be wrapped around.
-    inputEl.value = (cur.trim() ? cur.replace(/\s*$/, "") + "\n\n" : "") + q + "\n\n" + lead;
+    inputEl.value = (cur.trim() ? cur.replace(/\s*$/, "") + "\n\n" : "") + add;
     inputEl.dispatchEvent(new Event("input"));
     // Focused twice: once now, and again on the next frame if it did not stick. On a
     // phone the OS selection menu is dismissing at this exact moment and can take the
@@ -4157,7 +4471,20 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (document.activeElement !== inputEl) { inputEl.focus(); caret(); }
     });
   }
-  for (const [id, kind] of [["sel-quote", "quote"], ["sel-explain", "explain"]]) {
+  function selQuote(text, lead) {
+    // Collapse runs of blank lines: quoting a spaced-out answer should not paste half a
+    // screen of "> " into the box.
+    const q = text.replace(/\r/g, "").split("\n").map((l) => "> " + l.trimEnd())
+                  .join("\n").replace(/(?:\n> )+(?=\n> )/g, "\n>");
+    selIntoInput(q + "\n\n" + lead);
+  }
+  // 追加: the selection as it stands. Only \r and the outer whitespace go — nothing is
+  // added, nothing is re-wrapped, and no caret is parked after a sentence you did not
+  // write, because there is no sentence.
+  function selAppend(text) {
+    selIntoInput(text.replace(/\r/g, "").trim());
+  }
+  for (const [id, kind] of [["sel-quote", "quote"], ["sel-explain", "explain"], ["sel-append", "append"]]) {
     document.getElementById(id).addEventListener("click", (e) => {
       e.stopPropagation(); e.preventDefault();
       const s = selText();
@@ -4170,7 +4497,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // transcript's, not the one we just created.
       try { window.getSelection().removeAllRanges(); } catch {}
       selHide();
-      selQuote(text, SEL_LEAD[kind]);
+      if (kind === "append") selAppend(text);
+      else selQuote(text, SEL_LEAD[kind]);
     });
   }
   document.getElementById("sel-copy").addEventListener("click", (e) => {
@@ -4584,8 +4912,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     }
     if (mmWatchHint) {
       mmWatchHint.textContent = armed
-        ? (left == null ? "开·不限" : "开·" + (left >= 3600 ? Math.floor(left / 3600) + "h" : Math.ceil(left / 60) + "m"))
-        : (expired ? "已过期" : (sup.policy ? "有策略未开" : "关"));
+        ? (left == null ? "on" : "on·" + (left >= 3600 ? Math.floor(left / 3600) + "h" : Math.ceil(left / 60) + "m"))
+        : (expired ? "expired" : (sup.policy ? "set·off" : "off"));
     }
   }
   async function watchPost(body) {
@@ -7298,8 +7626,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (b.dataset.mode === renderMode) b.classList.add("current");
       else b.classList.remove("current");
     }
-    const lf = document.getElementById("mm-live-full"), l2 = document.getElementById("mm-live-2");
-    if (lf && l2) { lf.classList.toggle("current", liveLines === 0); l2.classList.toggle("current", liveLines === 2); }
+    const lv = document.getElementById("mm-live");
+    if (lv) {
+      // Its own state, since it has no label beside it to carry the word.
+      lv.textContent = liveLines === 0 ? "live full" : "live 2";
+      lv.classList.toggle("current", liveLines === 2);   // accent = not the default
+    }
   }
 
   // ---------- picker ----------
@@ -10377,6 +10709,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     params.set("rounds", String(rounds));
     params.set("before_idx", String(earliestIdxLoaded));
     if (!earlierResp) params.set("users_only", "1");   // requests only
+    if (!earlierPeer) params.set("skip_peer", "1");    // and none of another session's
     const resp = await authedFetch("/api/state?" + params.toString());
     if (!resp.ok) return false;
     const m = await resp.json();
@@ -10446,16 +10779,24 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     hbVer = ""; hbFrame = []; hbBuf = []; hbSimple = []; if (hbEl) hbEl._sig = null;   // switch mode → clean baseline
     hbNextAt = Date.now(); refreshModeButtons();
   };
-  document.getElementById("mm-live-full").addEventListener("click", _setLive(0));
-  document.getElementById("mm-live-2").addEventListener("click", _setLive(2));
+  // One button, two states: all ⇄ 2 lines.
+  document.getElementById("mm-live").addEventListener("click", (e) => _setLive(liveLines === 0 ? 2 : 0)(e));
   document.getElementById("mm-theme").addEventListener("click", (e) => {
     e.stopPropagation(); cycleTheme();
   });
-  // Toggle the existing auto correct/translate-on-send (fireGrammar). Default OFF.
+  // Auto correct/translate-on-send (fireGrammar). Its row is no longer in the ⚙ menu:
+  // it was a whole line for something that is off by default and stays off. The feature
+  // itself is untouched — set cc_web_auto_translate=1 in localStorage to turn it on, and
+  // the 🔧 button on a request still corrects one message at a time. Kept behind a null
+  // check rather than deleted, so putting the row back is a markup change and nothing else.
   const mmAutoTr = document.getElementById("mm-autotranslate");
-  function refreshAutoTr() { mmAutoTr.textContent = autoTranslate ? "开" : "关"; mmAutoTr.classList.toggle("current", autoTranslate); }
+  function refreshAutoTr() {
+    if (!mmAutoTr) return;
+    mmAutoTr.textContent = autoTranslate ? "开" : "关";
+    mmAutoTr.classList.toggle("current", autoTranslate);
+  }
   refreshAutoTr();
-  mmAutoTr.addEventListener("click", (e) => {
+  if (mmAutoTr) mmAutoTr.addEventListener("click", (e) => {
     e.stopPropagation();
     autoTranslate = !autoTranslate;
     localStorage.setItem("cc_web_auto_translate", autoTranslate ? "1" : "0");
@@ -11547,7 +11888,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const p = document.createElement("div");
       p.className = "asr-unset";
       sec.appendChild(Object.assign(document.createElement("div"),
-                                    {className: "menu-sec", textContent: "语音输入 Voice"}));
+                                    {className: "menu-sec", textContent: "voice"}));
       p.innerHTML = "not configured yet · 未配置<span>在 <code>~/.claude/cc_web.conf</code> 里加 "
         + "<code>asr=</code>(批量) 或 <code>soniox=</code> / <code>openai_realtime=</code>(实时)，"
         + "重启服务生效。录音还需要通过 HTTPS 打开本页(getUserMedia 要 secure context)。</span>";
@@ -11556,15 +11897,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     }
     // 1) mode selector (only shown when a realtime engine exists)
     if (asrRtAvail) {
-      const box = line("语音输入");
+      const box = line("voice");
       const mk = (on, title) => {
         const b = document.createElement("button"); b.className = "sw-item"; b.textContent = title;
         if (asrRt === on) b.classList.add("current");
         b.addEventListener("click", (e) => { e.stopPropagation(); asrRt = on; localStorage.setItem("cc_asr_rt", on ? "1" : "0"); renderAsrMenu(); });
         return b;
       };
-      box.appendChild(mk(true, "⚡ 实时"));
-      box.appendChild(mk(false, "🎤 批量"));
+      box.appendChild(mk(true, "⚡ live"));
+      box.appendChild(mk(false, "🎤 batch"));
     }
     // 2) model for the chosen mode (display names only — real model names stay server-side)
     // Every option here is prefixed with the same vendor ("OpenAI 4o-mini", "OpenAI
@@ -11577,7 +11918,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       return (n) => common ? n.slice(first.length + 1) : n;
     };
     if (asrRt && asrRtAvail) {   // realtime: pick the streaming engine (Soniox / OpenAI / …)
-      const box = line("模型");
+      const box = line("model");
       const cut = shorten(realtimeEngines.map(e => e.display || ""));
       for (const e of realtimeEngines) {
         const b = document.createElement("button"); b.className = "sw-item"; b.dataset.engine = e.id;
@@ -11587,7 +11928,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         box.appendChild(b);
       }
     } else {   // non-realtime: pick the batch engine
-      const box = line("模型");
+      const box = line("model");
       const cut = shorten(asrConfigs.map(c => c.display || c.label));
       for (const c of asrConfigs) {
         const b = document.createElement("button"); b.className = "sw-item asr-opt"; b.dataset.label = c.label;
@@ -11711,6 +12052,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     [recCancelEl, recStopEl].forEach(b => b && (b.style.display = ""));
     [recEditEl, recSendEl, recPauseEl].forEach(b => b && (b.style.display = "none"));
     recBar.classList.remove("rec-paused");   // a fresh recording never inherits ⏸
+    _recMemoMode();
     if (recStopEl) recStopEl.textContent = "Stop";
     clearInterval(_recTimer);
     _recTimer = setInterval(() => { recTimeEl.textContent = _fmtDur(Date.now() - _recStartMs); }, 250);
@@ -11719,8 +12061,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // audio disabled until there is any. Laid out in full on purpose — buttons appearing
   // one after another a second later is its own kind of "did that work?", and a row that
   // changes width under your thumb is worse than one that starts complete.
+  // Which bar this is. Set from the first frame, not after the recording ends: a row
+  // that swaps its buttons halfway through is its own kind of "did that work?".
+  function _recMemoMode() {
+    const memo = !!(voiceTarget && voiceTarget.pick);
+    recBar.classList.toggle("rec-memo", memo);
+    recBar.classList.remove("rec-picked", "rec-two");
+    if (recUseEl) { recUseEl.disabled = false; recUseEl.title = "把听到的插入到光标处"; }
+  }
   function _recArmBar() {
     recBar.classList.add("rec-arming");
+    _recMemoMode();
+    // 插入 needs audio like the rest of them — nothing has been captured yet.
+    if (recUseEl) { recUseEl.disabled = true; recUseEl.title = "麦克风还在打开…"; }
     [recCancelEl, recStopEl, recEditEl, recSendEl, recPauseEl].forEach(b => b && (b.style.display = ""));
     // Cancel is the only thing that can mean anything yet — nothing has been captured,
     // so there is nothing to stop, pause, edit or send.
@@ -11778,6 +12131,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     _showVoiceNotice(reason, raw);
   }
   function _hideRecBar() {
+    recBarHome();     // every ending path comes through here
     recBar.classList.remove("rec-arming");
     clearInterval(_recTimer); _recTimer = null;
     _recPolishStop();          // the "finishing"/"Polish" counter must not outlive the bar
@@ -11816,6 +12170,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // Nothing has been captured yet — there is nothing to polish or send, so every
     // button on the bar means "never mind" during the opening gap.
     if (_micArming) { _voiceCancel(); return; }
+    // Same for a bar with no recording behind it at all: whatever it is showing, the
+    // buttons cannot act on anything, and the way out must work.
+    if (!Voice.s && !_polAbort && !_batchResult && !_pick) { _voiceDone(); return; }
+    // A Task-box result parked on the bar. Polish is the only thing left that can act
+    // on it (插入 is handled by its own button), and only while there is one version.
+    if (_pick) {
+      if (mode === "polish" && _pick.raw && !_pick.polished) return Voice.polish(_pick.raw, _pick.before);
+      return;
+    }
     // A polish request is out. The buttons stay live: the raw transcript is already
     // in the input box, so Send submits it as-is and Edit just hands it over — both
     // abort the request first so a late reply can't overwrite the user's choice.
@@ -11823,7 +12186,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (mode === "polish") return;              // repeat tap on Polish → keep waiting
       _polishAbort(); _recPolishStop();
       if (mode === "send") { _setMic("idle"); send(); return; }
-      _setMic("idle"); if (!isPhone()) inputEl.focus();
+      _setMic("idle"); if (!isPhone()) vtEl().focus();
       return;
     }
     if (Voice.s) { Voice.stop(mode); return; }                                           // a live recording (either mode) → finish it
@@ -11833,19 +12196,46 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // Cancelled while the mic is still opening. The getUserMedia promise cannot be
     // aborted, so it is flagged and the stream released the moment it arrives —
     // otherwise the device stays open with nothing using it.
-    if (_micArming) { _micArming.cancelled = true; _micArming = null; _setMic("idle"); return; }
+    // _voiceDone, not just _setMic("idle"): nothing was captured, so the marker has to
+    // come out of the box and the target has to be handed back. (The target was already
+    // being leaked here before the marker existed — it just did not show.)
+    if (_micArming) { _micArming.cancelled = true; _micArming = null; _voiceDone(); return; }
     // Cancel during polish = discard, same as everywhere else: drop the request and
     // restore the box to what was in it before dictation. Read _polCtx BEFORE the
     // abort — polish()'s finally clears it.
     if (_polAbort) {
       const before = (_polCtx || {}).before;
       _polishAbort(); _recPolishStop();
-      if (before != null) { inputEl.value = before; inputEl.dispatchEvent(new Event("input")); }
-      _setMic("idle");
+      // Restores the TARGET, which is not always the composer any more. These two
+      // writes were missed when the target became configurable: dictate into a Task
+      // box, press ✕, and the box's own text was written into the composer instead.
+      if (before != null) vtWrite(before, "");
+      _voiceDone();
       return;
     }
     if (Voice.s) { Voice.cancel(); return; }
-    if (_batchResult) { const r = _batchResult; _batchResult = null; inputEl.value = r.before; inputEl.dispatchEvent(new Event("input")); _setMic("idle"); return; }   // discard the batch result (restore the box)
+    if (_batchResult) {
+      const r = _batchResult; _batchResult = null;
+      vtWrite(r.before || "", "");
+      _voiceDone();
+      return;
+    }
+    // ...and if none of those hold, close it anyway. There was no branch here, so in
+    // any state the four above do not describe — a parked result with nothing left to
+    // restore, a recording that never started — ✕ did NOTHING and the bar could not be
+    // dismissed at all. A cancel button that cannot cancel is the worst of the options.
+    _voiceDone();
+  }
+  // One ending for all of them: drop whatever is half-finished, put the bar back where
+  // it lives, and hand the target back to the composer.
+  function _voiceDone() {
+    vtMarkOut();            // nothing was inserted → the placeholder goes too
+    _batchResult = null;
+    _pick = null;
+    recBar.classList.remove("rec-memo", "rec-picked", "rec-two");
+    [recSwapEl, recUseEl].forEach((b) => b && (b.style.display = "none"));
+    _setMic("idle");        // → _hideRecBar() → recBarHome()
+    voiceTarget = null;
   }
 
   // ---------- realtime (streaming) voice: browser PCM → /api/asr-stream → OpenAI ----------
@@ -11888,7 +12278,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           recLiveEl.textContent = "";
         }
       }
-      inputEl.value = _joinDict(s.before, full); inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
+      // Into a Task box nothing is written until 插入 — the words show up live in the
+      // bar's own row instead, which is where the choice between the two versions is
+      // then made. The composer keeps its live-into-the-box behaviour.
+      if (!(voiceTarget && voiceTarget.pick)) vtWrite(s.before, full);
     },
     teardown() {   // tear down everything incl. the mic stream + recorder
       const s = Voice.s; if (!s) return;
@@ -12137,7 +12530,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // "discard" has to put the box back the way it was — the batch path already did
       // this, the realtime path silently kept the text.
       _recording = false; Voice.teardown(); Voice.s = null;
-      inputEl.value = s.before; inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
+      vtWrite(s.before, "");
       _setMic("idle");
     },
     // Abnormal end (stream dead, audio capture blew up, mic taken away by the OS).
@@ -12257,7 +12650,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           body: JSON.stringify({ text: raw, claude_session_id: attachedSid || "", mode: "asr",
                                  before: before || "" }), signal: ctrl.signal });
         lastPolishSec = ((Date.now() - polT0) / 1000).toFixed(1);
-        if (pr.ok) { const d = await pr.json(); if (d && d.text) { lastPolished = d.text; if (inputEl.value === _joinDict(before, raw)) { inputEl.value = _joinDict(before, d.text); inputEl.dispatchEvent(new Event("input")); } } }
+        if (pr.ok) { const d = await pr.json(); if (d && d.text) { lastPolished = d.text; if (vtEl().value === vtCurrent(before, raw)) vtWrite(before, d.text); } }
         else if (pr.status === 503) failReason = "not polished — no LLM configured";
         else failReason = "not polished — HTTP " + pr.status;
       } catch (e) {
@@ -12273,9 +12666,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
       // Cancel/Send/Edit already finished the interaction — don't re-touch the UI.
       if (_polSuperseded) { _polSuperseded = false; return; }
+      // The choice stays on the bar (voicePickShow puts the mic back to idle itself —
+      // _setMic("idle") would hide the bar and take the text with it).
+      if (voiceTarget && voiceTarget.pick) { voicePickShow(raw, lastPolished, before, failReason); return; }
       // Park (don't hide): reason on screen, dictated text still there to Send/Edit.
       if (failReason) { _voiceParkResult(raw, before, failReason); return; }
-      _setMic("idle"); if (!isPhone()) inputEl.focus();
+      _setMic("idle"); if (!isPhone()) vtEl().focus();
     },
     apply(raw, before, mode) {   // put text in the box, then act by mode (both ⚙ modes)
       lastAsrRaw = raw || ""; lastAsrSec = null;   // long-press debug view: what the ASR returned
@@ -12285,14 +12681,32 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (mode === "park") {
         const reason = _voiceParkReason || "录音已自动停止";
         _voiceParkReason = "";
-        if (raw) { inputEl.value = _joinDict(before, raw); inputFromVoice = true; inputEl.dispatchEvent(new Event("input")); }
+        // Into a Task box nothing is written until you say so, so park it on the bar
+        // with the reason instead of writing it in and announcing that.
+        if (voiceTarget && voiceTarget.pick) { _pickPark(raw, before, reason); return; }
+        if (raw) vtWrite(before, raw);
         _voiceParkResult(raw, before, reason);
         return;
       }
       if (!raw) { _setMic("idle"); return; }
-      inputEl.value = _joinDict(before, raw); inputFromVoice = true; inputEl.dispatchEvent(new Event("input"));
+      // ---- Task box ----
+      // 插入 (mode send/edit — the two are the same thing here) puts the raw text in and
+      // is done; Polish parks it on the bar first and lets you pick a version. Either
+      // way the box is untouched until one of those two happens.
+      if (voiceTarget && voiceTarget.pick) {
+        if (mode === "send" || mode === "edit") {
+          vtWrite(before, raw);
+          const el = vtEl();
+          _voiceDone();
+          if (!isPhone()) el.focus();
+          return;
+        }
+        _pickPark(raw, before);
+        return Voice.polish(raw, before);
+      }
+      vtWrite(before, raw);
       if (mode === "send") { _setMic("idle"); send(); return; }
-      if (mode === "edit") { _setMic("idle"); if (!isPhone()) inputEl.focus(); return; }
+      if (mode === "edit") { _setMic("idle"); if (!isPhone()) vtEl().focus(); return; }
       return Voice.polish(raw, before);
     },
     async finalize() {
@@ -12438,7 +12852,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // park-with-a-reason on every dead end. The old batch path was a second,
     // less-capable implementation of all of that (_mediaRec + a two-step result bar).
     start(stream, batchOnly) {
-      const before = inputEl.value ? (inputEl.value.replace(/\s*$/, "") + " ") : "";
+      const el = vtEl();
+      // vtMarkIn() already read the caret and stored it; re-reading now would measure a
+      // box that has the marker in it.
+      const slots = (voiceTarget && voiceTarget.before != null)
+        ? { before: voiceTarget.before, after: voiceTarget.after }
+        : vtSlots(el);
+      if (voiceTarget) voiceTarget.after = slots.after;
+      const before = slots.before;
       const provider = batchOnly ? "" : (asrRtEngine || (sonioxAvail ? "soniox" : "openai"));   // user-chosen realtime engine
       const s = { before, provider, opened: false, gotAny: false, retries: 0, finalText: "", partial: "",
                   batchOnly: !!batchOnly,
@@ -12505,7 +12926,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (!batchOnly) Voice.openStream();
     },
   };
-  micBtn.addEventListener("click", async () => {
+  // The composer's 🎤 and the Task boxes' share ONE of these. Everything that took a
+  // while to get right — the bar going up in the same frame, the 12s cap, the
+  // permission hint, ignoring impatient double-taps — lives here, and a second copy
+  // for the memo boxes would have been a second copy of all of it.
+  async function micTap() {
     // Tapped again while the mic is still opening: IGNORE it. Impatient double-taps are
     // the whole reason this changed — "I thought it didn't register so I tapped a few
     // times" — and making the second tap cancel would punish exactly that. Cancel stays
@@ -12557,7 +12982,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
       if (e && e.name === "AbortError") { _micArming = null; return; }   // already handled
       _micArming = null;
-      if (arm.cancelled) { _setMic("idle"); return; }
+      if (arm.cancelled) { _voiceDone(); return; }
       // Parked with the reason, not an alert(): every other dead end in this popup
       // behaves that way, and an alert on a phone hides the thing it is talking about.
       _showVoiceNotice("麦克风打不开: " + e.name
@@ -12569,14 +12994,32 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     _micArming = null;
     if (arm.cancelled) {                 // cancelled during the gap: release the device
       stream.getTracks().forEach(t => { try { t.stop(); } catch {} });
-      _setMic("idle");
+      _voiceDone();
       return;
     }
     // One path, two modes: batchOnly when the ⚙ switch says 🎤 batch (or no realtime
     // engine is configured at all). start() re-shows the bar, which also restarts the
     // clock — so the seconds count real captured audio, not the time spent opening.
     Voice.start(stream, !(asrRt && asrRtAvail));
-  });
+  }
+  micBtn.addEventListener("click", () => { voiceTarget = null; micTap(); });
+
+  // The Task boxes. Same recorder, different destination — and `pick: true`, which is
+  // what makes it show you both versions instead of writing as it goes.
+  for (const b of document.querySelectorAll("#memo-modal .memo-mic")) {
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (_recording || _micArming) return;      // one recording at a time
+      const f = b.dataset.box;
+      const el = memoTA[f];
+      if (!el) return;
+      voiceTarget = { el, pick: true, after: "",
+                      label: f === "task" ? "当前任务" : "注意事项" };
+      vtMarkIn();       // before the mic is even asked for — see VT_MARK
+      recBarTo(el.closest(".memo-sec"));
+      micTap();
+    });
+  }
 
   // ---------- image upload ----------
   const uploadInput = document.getElementById("upload-input");

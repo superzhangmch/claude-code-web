@@ -59,6 +59,45 @@ def main():
     jm = re.search(r"\n  (const _CJK = .*?\n  function _joinDict\(before, add\) \{.*?\n  \})\n", src, re.S)
     if not jm:
         print("  FAIL  _joinDict is gone from static/index.html"); return 1
+    # Where dictation lands. The composer appends; a Task box takes it at the CARET,
+    # which is the whole point of dictating into something you are editing — and it is
+    # the part that is easy to get subtly wrong, so it is driven rather than read.
+    vt = re.search(r"\n  (const vtEl = .*?\n  function vtCurrent\(before, text\) \{[^}]*\})\n", src, re.S)
+    if not vt:
+        print("  FAIL  could not extract the vt* helpers from static/index.html"); return 1
+    # ✕ has to work from every state the bar can be in. It did not: the handler was a
+    # list of "if in THIS phase, undo it" branches with no else, so in any state they
+    # did not describe the button did nothing at all and the bar could not be dismissed.
+    cn = re.search(r"\n  (async function _voiceCancel\(\) \{.*?\n  \}\n  // One ending.*?\n  function _voiceDone\(\) \{.*?\n  \})\n", src, re.S)
+    if not cn:
+        print("  FAIL  could not extract _voiceCancel/_voiceDone from static/index.html"); return 1
+    # Dictating into a Task box ends in a choice — raw or polished — and that choice is
+    # made ON THE RECORDING BAR, under the text it already echoes (it was a full-screen
+    # window for a day; covering the thing you are choosing between is not a choice).
+    # Driven, not read: which version 插入 actually writes is the whole feature.
+    pk = re.search(r"\n  (let _pick = null;.*?\n  function _pickTake\(\) \{.*?\n  \})\n", src, re.S)
+    if not pk:
+        print("  FAIL  could not extract the _pick block from static/index.html"); return 1
+    for needed in ("function _pickSwap(", "function _pickTake(", "function voicePickShow("):
+        if needed not in pk.group(1):
+            print(f"  FAIL  {needed} is gone from the _pick block"); return 1
+    # Which bar this is, decided from the first frame. The _setMic("rec") stub below calls
+    # this, exactly as the real _showRecBar does.
+    mm = re.search(r"\n  (function _recMemoMode\(\) \{.*?\n  \})\n", src, re.S)
+    if not mm:
+        print("  FAIL  _recMemoMode is gone from static/index.html"); return 1
+    # Tapping ✕ (or a mic that never opens) while the device is still opening: nothing
+    # was captured, so the marker must come out and the target go back. Those paths used
+    # to call _setMic("idle") directly, which does neither.
+    mt = re.search(r"async function micTap\(\) \{.*?\n  \}\n", src, re.S)
+    if not mt or '_setMic("idle")' in mt.group(0):
+        print('  FAIL  micTap abandons a recording with _setMic("idle") — that leaves the '
+              "[🎤] marker in the box and the target pointing at it"); return 1
+    for fn in ("_showRecBar", "_recArmBar"):
+        body = re.search(r"function " + fn + r"\(\) \{.*?\n  \}", src, re.S)
+        if not body or "_recMemoMode()" not in body.group(0):
+            print(f"  FAIL  {fn} no longer sets the bar's mode — a Task box's bar would "
+                  "come up looking and behaving like the composer's"); return 1
 
     js = r"""
 const VOICE_MAX_MS = __CAP__;
@@ -75,18 +114,45 @@ const mkBtn = () => ({ style: {}, disabled: false, title: "", textContent: "", s
                        classList: { add() {}, remove() {}, toggle() {} } });
 const recLiveEl = Object.assign(mkBtn(), { innerHTML: "", scrollTop: 0, scrollHeight: 0 });
 const recWaveEl = mkBtn(), recSendEl = mkBtn(), recStopEl = mkBtn(), recEditEl = mkBtn(),
-      recCancelEl = mkBtn(), recPauseEl = mkBtn(), micBtn = mkBtn();
-const recBar = { style: {}, classList: { add() {}, remove() {}, toggle() {} } };
+      recCancelEl = mkBtn(), recPauseEl = mkBtn(), micBtn = mkBtn(),
+      recSwapEl = mkBtn(), recUseEl = mkBtn(), recTimeEl = mkBtn();
+// A classList that actually remembers, because the Task-box bar is a DIFFERENT bar and
+// the difference is carried by classes: the composer must never wear them.
+function mkClassList() {
+  const set = new Set();
+  return { _set: set, add: (...c) => c.forEach(x => set.add(x)),
+           remove: (...c) => c.forEach(x => set.delete(x)),
+           toggle: (c, on) => (on ? set.add(c) : set.delete(c)),
+           contains: (c) => set.has(c) };
+}
+const recBar = { style: {}, classList: mkClassList() };
+let _recTimer = null;
 const inputEl = { value: "", focus() {}, dispatchEvent() {} };
 let _recStatusHtml = "", _recording = false, inputFromVoice = false, _voiceParkReason = "";
 let _batchResult = null, _polAbort = null, _polCtx = null, _polSuperseded = false;
 let lastAsrRaw = "", lastPolished = "", lastAsrSec = null, lastPolishSec = null, lastAsrBefore = "";
+// The dictation target. Null = the composer (unchanged); a textarea = insert at its
+// caret. Extracted from the page so the real slot/write logic is what runs here.
+let voiceTarget = null;
+function mkTA(value, caret) {
+  return { value, selectionStart: caret, selectionEnd: caret,
+           focus() {}, dispatchEvent() {},
+           setSelectionRange(a, b) { this.selectionStart = a; this.selectionEnd = b; } };
+}
+let _micArming = null;
+function _polishAbort() { _polAbort = null; }
+__VT__
+__CANCEL__
 __JOIN__
+__PICK__
+__MEMOMODE__
 let asrRtEngine = "soniox", sonioxAvail = true, asrWhich = "whisper-big", attachedSid = "sid1", authToken = "t";
 const isPhone = () => false;
 const micStates = [], parked = [], sent = [], fetches = [], spins = [];
 function _recLiveStatus(msg) { _recStatusHtml = "STATUS:" + msg; recLiveEl.innerHTML = _recStatusHtml; }
-function _setMic(st) { micStates.push(st); }
+// Mirrors the real chain: _setMic("rec") → _showRecBar() → _recMemoMode(), the step that
+// dresses the bar as the composer's or as a Task box's.
+function _setMic(st) { micStates.push(st); if (st === "rec") _recMemoMode(); }
 function _syncPauseBtn() {}
 function _recTimerPause() {}
 function _recTimerResume() {}
@@ -145,6 +211,8 @@ function reset() {
   [micStates, parked, sent, fetches, sockets, recorders, spins].forEach(a => a.length = 0);
   endedHandler = null; FakeAC.last = null;
   inputEl.value = ""; recLiveEl.innerHTML = ""; _recStatusHtml = ""; _batchResult = null;
+  recBar.classList._set.clear(); _pick = null; voiceTarget = null;
+  [recSwapEl, recUseEl, recStopEl].forEach(b => { b.disabled = false; b.style.display = ""; b.textContent = ""; });
   _voiceParkReason = ""; asrQueue = []; asrDefault = "so this is what i said"; lastAsrRaw = "";
   recSendEl.disabled = false; recSendEl.title = ""; recPauseEl.style.display = "none";
   Voice.s = null; _recording = false;
@@ -343,11 +411,315 @@ check("...joined by the same helper, not by a second rule",
       inputEl.value === _joinDict("我改了 scorer, 加了四个 reward 分量, ",
                                   "POLISHED(然后把 total reward 也输出出来)"), inputEl.value);
 
+console.log("=== ✕ always closes the bar ===");
+// Reported from a real session: the bar was up with Polish/Edit/Send, no recording
+// behind it, and ✕ did nothing at all. The handler was a list of "if in THIS phase,
+// undo it" branches with no else — so any state they did not describe was a dead end.
+{
+  micStates.length = 0;
+  Voice.s = null; _polAbort = null; _batchResult = null; _micArming = null;
+  await _voiceCancel();
+  check("with nothing in flight, it still closes", micStates.includes("idle"),
+        JSON.stringify(micStates));
+  check("...and hands the target back to the composer", voiceTarget === null);
+}
+{
+  // Cancelling a Task-box dictation must restore THAT box — this wrote the box's text
+  // into the composer, because two restores were missed when the target became a value.
+  const ta = mkTA("原本的内容", 5);
+  voiceTarget = { el: ta, pick: true, after: "" };
+  const slots = vtSlots(ta); voiceTarget.after = slots.after;
+  inputEl.value = "composer 里的草稿";
+  _batchResult = { raw: "说了点什么", before: slots.before };
+  Voice.s = null; _polAbort = null; _micArming = null;
+  await _voiceCancel();
+  check("the box goes back to what it held", ta.value === "原本的内容", JSON.stringify(ta.value));
+  check("...and the composer was never touched",
+        inputEl.value === "composer 里的草稿", JSON.stringify(inputEl.value));
+  check("...and the parked result is dropped", _batchResult === null);
+}
+
+console.log("=== dictating into a Task box lands at the caret ===");
+// The composer appends, because you are about to read the whole message before
+// sending it. A task description is something you EDIT — so the words go where the
+// cursor is, which is also where you were looking when you reached for the mic.
+{
+  const ta = mkTA("前面的内容。后面的内容。", 6);   // caret right after 「前面的内容。」
+  voiceTarget = { el: ta, pick: true, after: "" };
+  const slots = vtSlots(ta);
+  voiceTarget.after = slots.after;
+  check("the text before the caret is kept", slots.before === "前面的内容。", JSON.stringify(slots.before));
+  check("...and so is the text after it", slots.after === "后面的内容。", JSON.stringify(slots.after));
+  vtWrite(slots.before, "插进来的话");
+  check("the new words land in the middle",
+        ta.value === "前面的内容。插进来的话后面的内容。", JSON.stringify(ta.value));
+  check("...and the caret follows them, ready to keep typing",
+        ta.selectionStart === "前面的内容。插进来的话".length, String(ta.selectionStart));
+}
+{
+  // A selection, not a caret: dictation replaces what was selected, like typing would.
+  const ta = mkTA("把这段换掉吧", 1);
+  ta.selectionStart = 1; ta.selectionEnd = 4;
+  voiceTarget = { el: ta, pick: true, after: "" };
+  const slots = vtSlots(ta);
+  voiceTarget.after = slots.after;
+  vtWrite(slots.before, "新的");
+  // 「把这段换掉吧」 with 1..4 selected is 「这段换」 — so what is left is 把 + 新的 + 掉吧.
+  check("a selected range is replaced, not pushed aside",
+        ta.value === "把新的掉吧", JSON.stringify(ta.value));
+}
+{
+  // The composer is untouched by all of this: same appending behaviour as before.
+  voiceTarget = null;
+  inputEl.value = "已经写了半句";
+  const slots = vtSlots(inputEl);
+  check("the composer still appends, with its space", slots.before === "已经写了半句 " && slots.after === "",
+        JSON.stringify(slots));
+  vtWrite(slots.before, "接着说");
+  // The seam rule applies here as everywhere: the trailing space that `before` carries
+  // is dropped between two Chinese sides and kept between Latin ones.
+  check("...and writes straight in, Chinese seam closed",
+        inputEl.value === "已经写了半句接着说", JSON.stringify(inputEl.value));
+  inputEl.value = "half a sentence";
+  const en = vtSlots(inputEl);
+  vtWrite(en.before, "and the rest");
+  check("...while an English seam keeps its space",
+        inputEl.value === "half a sentence and the rest", JSON.stringify(inputEl.value));
+  check("...still flagged as voice-typed, so the grammar pass knows", inputFromVoice === true);
+}
+{
+  // Into an empty box at position 0 — the common case the first time you use it.
+  const ta = mkTA("", 0);
+  voiceTarget = { el: ta, pick: true, after: "" };
+  const slots = vtSlots(ta);
+  vtWrite(slots.before, "第一句话");
+  check("an empty box just gets the words", ta.value === "第一句话", JSON.stringify(ta.value));
+  voiceTarget = null;
+}
+
+// =====================================================================
+console.log("=== Task box: nothing is written until you pick ===");
+reset();
+const ta1 = mkTA("先写了一句。", 6);          // caret at the end of what is already there
+voiceTarget = { el: ta1, pick: true, after: "", label: "当前任务" };
+vtMarkIn();
+Voice.start(mkStream(), true);
+feedAudio(2);
+asrQueue = ["把测试跑一遍"];
+Voice.togglePause(); await tick(60);          // ⏸ transcribes the segment
+check("the words show up in the bar as they arrive", bar().includes("把测试跑一遍"), bar().slice(0, 60));
+check("...but no words go into the Task box — only the marker holding the spot",
+      ta1.value === "先写了一句。[🎤]", JSON.stringify(ta1.value));
+check("the bar wears the Task-box mode from the start", recBar.classList.contains("rec-memo"));
+
+console.log("=== Polish → choose raw or polished, on the bar ===");
+Voice.togglePause(); feedAudio(1);            // ▶ and carry on
+asrQueue = [""];
+Voice.stop("polish"); await tick(120);
+check("Polish polishes", fetches.some(f => f.url === "/api/polish"));
+check("...and the bar shows the polished version, saying which one it is",
+      /润色后/.test(bar()) && bar().includes("POLISHED(把测试跑一遍)"), bar().slice(0, 120));
+check("...with the box still wordless — polish decides nothing for you",
+      ta1.value === "先写了一句。[🎤]", JSON.stringify(ta1.value));
+check("...the bar is still up (it used to close and take the text with it)",
+      recBar.style.display === "flex" && recBar.classList.contains("rec-picked"));
+check("...and there are two versions, so the swap is offered",
+      recBar.classList.contains("rec-two") && recSwapEl.textContent === "看原文", recSwapEl.textContent);
+check("Polish is gone once it has run — there is nothing left for it to do",
+      recBar.classList.contains("rec-picked"));
+_pickSwap();
+check("看原文 shows the raw text, and offers the way back",
+      /识别原文/.test(bar()) && bar().includes("把测试跑一遍") && !bar().includes("POLISHED")
+      && recSwapEl.textContent === "看润色", bar().slice(0, 120));
+_pickTake();
+check("插入 writes the version ON SCREEN, at the caret",
+      ta1.value === "先写了一句。把测试跑一遍", JSON.stringify(ta1.value));
+check("...and the composer was never touched", inputEl.value === "", JSON.stringify(inputEl.value));
+check("...the bar closes and hands the target back",
+      voiceTarget === null && !recBar.classList.contains("rec-memo") && micStates.includes("idle"));
+
+console.log("=== ...or 插入 the polished one ===");
+reset();
+const ta2 = mkTA("", 0);
+voiceTarget = { el: ta2, pick: true, after: "" };
+vtMarkIn();
+Voice.start(mkStream(), true); feedAudio(1);
+asrQueue = ["这段话有点乱"];
+Voice.stop("polish"); await tick(120);
+_pickTake();
+check("the polished version is what goes in", ta2.value === "POLISHED(这段话有点乱)", JSON.stringify(ta2.value));
+
+console.log("=== 插入 mid-recording: no polish, no choice, just the words ===");
+reset();
+const ta3 = mkTA("注意:", 3);
+voiceTarget = { el: ta3, pick: true, after: "" };
+vtMarkIn();
+Voice.start(mkStream(), true); feedAudio(1);
+asrQueue = ["别动那个文件"];
+Voice.stop("send"); await tick(120);          // the 插入 button while still recording
+check("the raw text goes straight in", ta3.value === "注意:别动那个文件", JSON.stringify(ta3.value));
+check("...nothing was polished — one button, one meaning",
+      !fetches.some(f => f.url === "/api/polish"));
+check("...and nothing was SENT: a Task box has nothing to submit", sent.length === 0);
+
+console.log("=== a failed polish must not read as \"it was already fine\" ===");
+reset();
+const ta4 = mkTA("", 0);
+voiceTarget = { el: ta4, pick: true, after: "" };
+vtMarkIn();
+Voice.start(mkStream(), true); feedAudio(1);
+asrQueue = ["原样保留这句"];
+const _af = authedFetch;
+authedFetch = async (url, opts) => {
+  if (url === "/api/polish") { fetches.push({ url, opts }); return { ok: false, status: 503, json: async () => ({}) }; }
+  return _af(url, opts);
+};
+Voice.stop("polish"); await tick(120);
+authedFetch = _af;
+check("the bar says the polish did not happen, and why",
+      /润色没成功/.test(bar()) && /no LLM configured/.test(bar()), bar().slice(0, 140));
+check("...shows the raw text instead of nothing", bar().includes("原样保留这句"), bar().slice(0, 140));
+check("...offers no swap, because there is only one version",
+      !recBar.classList.contains("rec-two"));
+_pickTake();
+check("...and 插入 still works", ta4.value === "原样保留这句", JSON.stringify(ta4.value));
+
+console.log("=== 插入 while the polish is still out ===");
+// You read the raw version on the bar, decided it was fine, and took it. The reply that
+// arrives afterwards must not re-open the bar over a box you have finished with.
+reset();
+const ta6 = mkTA("", 0);
+voiceTarget = { el: ta6, pick: true, after: "" };
+vtMarkIn();
+Voice.start(mkStream(), true); feedAudio(1);
+asrQueue = ["够用了不用润色"];
+let releasePolish;
+const _af2 = authedFetch;
+authedFetch = (url, opts) => {
+  if (url === "/api/polish") {
+    fetches.push({ url, opts });
+    return new Promise(r => { releasePolish = () => r({ ok: true, status: 200, json: async () => ({ text: "POLISHED(x)" }) }); });
+  }
+  return _af2(url, opts);
+};
+Voice.stop("polish"); await tick(80);
+check("the raw text is on the bar while the polish is out",
+      bar().includes("够用了不用润色") && _pick !== null, bar().slice(0, 90));
+_pickTake();
+check("插入 takes it at once", ta6.value === "够用了不用润色", JSON.stringify(ta6.value));
+releasePolish(); await tick(80);
+authedFetch = _af2;
+check("...and the late reply changes nothing — no bar, no overwrite",
+      _pick === null && ta6.value === "够用了不用润色"
+      && !recBar.classList.contains("rec-picked"), JSON.stringify(ta6.value));
+
+console.log("=== ✕ from the choice: box unchanged, bar gone ===");
+reset();
+const ta5 = mkTA("本来的内容", 5);
+voiceTarget = { el: ta5, pick: true, after: "" };
+vtMarkIn();
+Voice.start(mkStream(), true); feedAudio(1);
+asrQueue = ["说了但不想要"];
+Voice.stop("polish"); await tick(120);
+await _voiceCancel();
+check("the box keeps exactly what it held", ta5.value === "本来的内容", JSON.stringify(ta5.value));
+check("...and the bar is dismissed", _pick === null && voiceTarget === null
+      && !recBar.classList.contains("rec-memo") && !recBar.classList.contains("rec-picked"));
+
+console.log("=== the composer's bar is NOT this bar ===");
+reset();
+Voice.start(mkStream(), true); feedAudio(1);
+check("dictating into the composer wears none of the Task-box classes",
+      !recBar.classList.contains("rec-memo") && !recBar.classList.contains("rec-picked")
+      && !recBar.classList.contains("rec-two"), [...recBar.classList._set].join(","));
+asrQueue = ["a normal message"];
+Voice.stop("send"); await tick(120);
+check("...and Send still sends, unchanged", sent.length === 1 && sent[0] === "a normal message", sent.join("|"));
+check("...with no choice offered", _pick === null);
+
+console.log("=== the insertion point is something you can SEE ===");
+// Nothing is written while you talk, so until this marker existed there was nothing on
+// screen saying where the words would land — and an unfocused textarea shows no caret.
+reset();
+const tm = mkTA("头部。尾部。", 3);          // caret between the two sentences
+voiceTarget = { el: tm, pick: true, after: "" };
+vtMarkIn();
+check("a marker goes in at the caret", tm.value === "头部。[🎤]尾部。", JSON.stringify(tm.value));
+check("...and the caret sits after it, so typing carries on where you were",
+      tm.selectionStart === "头部。[🎤]".length, String(tm.selectionStart));
+Voice.start(mkStream(), true); feedAudio(1);
+asrQueue = ["插在中间的话"];
+Voice.togglePause(); await tick(60);
+check("while you talk the box holds the marker and nothing else",
+      tm.value === "头部。[🎤]尾部。", JSON.stringify(tm.value));
+Voice.stop("send"); await tick(100);
+check("插入 replaces the marker with the words", tm.value === "头部。插在中间的话尾部。", JSON.stringify(tm.value));
+check("...leaving no marker behind", !tm.value.includes("🎤"));
+
+console.log("=== edit the box while talking: the marker is where it lands ===");
+reset();
+const te = mkTA("原句。", 3);
+voiceTarget = { el: te, pick: true, after: "" };
+vtMarkIn();
+Voice.start(mkStream(), true); feedAudio(1);
+// You keep typing while dictating — the marker moves with your text, and the old
+// character offsets no longer describe the box at all.
+te.value = "改过的开头。" + "[🎤]" + "后来补的结尾。";
+asrQueue = ["说出来的那句"];
+Voice.stop("send"); await tick(100);
+check("the words land at the marker, not at a stale offset",
+      te.value === "改过的开头。说出来的那句后来补的结尾。", JSON.stringify(te.value));
+
+console.log("=== cancel takes the marker with it ===");
+reset();
+const tc = mkTA("一个字都不该变。", 4);
+voiceTarget = { el: tc, pick: true, after: "" };
+vtMarkIn();
+Voice.start(mkStream(), true); feedAudio(1);
+await _voiceCancel();
+check("✕ mid-recording leaves the box exactly as it was",
+      tc.value === "一个字都不该变。" && !tc.value.includes("🎤"), JSON.stringify(tc.value));
+reset();
+const tc2 = mkTA("说了但不要。", 6);
+voiceTarget = { el: tc2, pick: true, after: "" };
+vtMarkIn();
+Voice.start(mkStream(), true); feedAudio(1);
+asrQueue = ["录了一句"];
+Voice.stop("polish"); await tick(120);
+await _voiceCancel();
+check("...and so does ✕ from the raw/polished choice",
+      tc2.value === "说了但不要。" && !tc2.value.includes("🎤"), JSON.stringify(tc2.value));
+
+console.log("=== give up while the mic is still opening ===");
+reset();
+const tg = mkTA("别留下垃圾。", 6);
+voiceTarget = { el: tg, pick: true, after: "" };
+vtMarkIn();
+check("the marker is in", tg.value.includes("[🎤]"), tg.value);
+_micArming = { cancelled: false };      // the gap between tapping 🎤 and the device opening
+await _voiceCancel();
+_micArming = null;
+check("✕ during the opening gap cleans the box up",
+      tg.value === "别留下垃圾。", JSON.stringify(tg.value));
+check("...and hands the target back, so the next dictation is not aimed at this box",
+      voiceTarget === null);
+
+console.log("=== the composer never gets one ===");
+reset();
+Voice.start(mkStream(), true); feedAudio(1);
+asrQueue = ["普通的一条消息"];
+check("no marker while dictating into the composer", !inputEl.value.includes("🎤"), inputEl.value);
+Voice.stop("send"); await tick(100);
+check("...and the message is what was sent, unchanged",
+      sent.length === 1 && sent[0] === "普通的一条消息", sent.join("|"));
+
 console.log(_fails.length ? "\nFAILED: " + _fails.join(", ") : "\nall pass");
 process.exit(_fails.length ? 1 : 0);
 """
     js = (js.replace("__VOICE__", voice).replace("__CAP__", cap.group(1))
-            .replace("__JOIN__", jm.group(1)))
+            .replace("__JOIN__", jm.group(1)).replace("__VT__", vt.group(1))
+            .replace("__CANCEL__", cn.group(1)).replace("__PICK__", pk.group(1))
+            .replace("__MEMOMODE__", mm.group(1)))
     # top-level await → .mjs
     with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False, encoding="utf-8") as fh:
         fh.write(js)

@@ -479,7 +479,9 @@ def main():
         # with no layout whatever the child's own display says.
         check("...and not nested in anything that gets hidden",
               placed["parent"] == "BODY", placed["parent"])
-        check("...with the three actions", placed["labels"] == ["引用", "解释", "复制"],
+        # 引用 and 解释 both dress the text up; 追加 is the same destination with none of
+        # it; 复制 goes elsewhere entirely and stays last, where the thumb expects it.
+        check("...with the four actions", placed["labels"] == ["引用", "解释", "追加", "复制"],
               str(placed["labels"]))
         quoted = drv.js("""
           document.getElementById('input').value = '';
@@ -533,6 +535,35 @@ def main():
               expl["v"].startswith("> 官方合成") and expl["v"].rstrip().endswith("能通俗解释下吗"),
               expl["v"].replace("\n", "\\n")[-30:])
         check("...and it focuses the composer too", expl["active"] == "input", str(expl["active"]))
+        # 追加: for a path, a command, a model name — something you are about to type INTO
+        # your own sentence, where a `>` block and a canned lead-in are in the way.
+        app = drv.js("""
+          const inp = document.getElementById('input');
+          inp.value = '';
+          const a = document.querySelector('#main .msg.assistant');
+          const r = document.createRange(); r.selectNodeContents(a);
+          const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+          document.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+          document.getElementById('sel-append').click();
+          const plain = { v: inp.value, active: (document.activeElement || {}).id,
+                          caret: inp.selectionStart, len: inp.value.length };
+          inp.value = '我已经写了半句';
+          const r2 = document.createRange(); r2.selectNodeContents(a);
+          sel.removeAllRanges(); sel.addRange(r2);
+          document.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+          document.getElementById('sel-append').click();
+          return { plain, onto: inp.value };
+        """)
+        check("追加 puts the selection in as it stands",
+              app["plain"]["v"] == "官方合成就是加权和, 四个分量等权相加。", app["plain"]["v"])
+        check("...no quote marks and no lead-in — that is the whole difference from 引用",
+              ">" not in app["plain"]["v"] and "关于这点" not in app["plain"]["v"])
+        check("...caret at the end, composer focused, like the other two",
+              app["plain"]["caret"] == app["plain"]["len"] and app["plain"]["active"] == "input",
+              str(app["plain"]))
+        check("...and a draft in the box keeps its own line",
+              app["onto"].startswith("我已经写了半句\n\n官方合成"),
+              app["onto"].replace("\n", "\\n"))
         # Selecting in the composer is being done for some other reason; a bar over it
         # would be in the way.
         elsewhere = drv.js("""
@@ -545,10 +576,166 @@ def main():
         check("a selection outside the transcript shows nothing", elsewhere == "none", elsewhere)
         drv.js("document.getElementById('main').innerHTML = ''; document.getElementById('input').value = '';")
 
+        row2 = drv.js("""
+          const rows = [...document.querySelectorAll('.switch-menu .scr-cfg-row')];
+          const r = rows.find(x => (x.firstElementChild || {}).textContent === 'load more');
+          if (!r) return { missing: true };
+          return { btns: [...r.querySelectorAll('button')].map(b => b.id),
+                   texts: [...r.querySelectorAll('button')].map(b => b.textContent.trim()) };
+        """)
+        if not row2.get("missing"):
+            # Named after the button they change, so the pairing is obvious from the row.
+            check("load more carries both paging filters",
+                  row2["btns"] == ["mm-earlier-resp", "mm-earlier-peer"], str(row2["btns"]))
+            check("...both defaulting to the light option",
+                  row2["texts"] == ["reqs only", "no peer"], str(row2["texts"]))
+        check("the peer filter is applied on the server, like the other one",
+              'params.set("skip_peer", "1")' in src_index and "skip_peer: bool" in
+              open(os.path.join(ROOT, "cc_web.py"), encoding="utf-8").read())
+
+        print("=== the ⚙ menu is grouped, with a line between groups ===")
+        # Twelve rows with nothing between them had become a wall. Grouped by WHAT each
+        # row acts on — this session · how it reads · finding something in it · dictation
+        # · the way out — which is the grouping that survives new rows: a new setting has
+        # an obvious home instead of landing at the bottom.
+        grp = drv.js("""
+          const m = document.getElementById('mode-menu');
+          const prev = m.style.display; m.style.display = 'block';
+          const groups = [[]];
+          for (const el of m.children) {
+            if (el.classList.contains('sw-sep')) { groups.push([]); continue; }
+            if (el.id === 'mm-asr-sec') { groups[groups.length - 1].push('<语音>'); continue; }
+            if (!el.classList.contains('scr-cfg-row')) continue;
+            // A row whose controls name themselves has no label span; report its ids.
+            const first = el.firstElementChild || {};
+            groups[groups.length - 1].push(
+              (first.tagName === 'SPAN' && !first.classList.contains('row-bar'))
+                ? first.textContent
+                : '[' + [...el.querySelectorAll('button')].map(b => b.id || b.dataset.mode).join(' ') + ']');
+          }
+          const sepH = [...m.querySelectorAll('.sw-sep')].map(s => getComputedStyle(s).borderTopWidth);
+          m.style.display = prev;
+          return { groups, sepH, translate: !!document.getElementById('mm-autotranslate') };
+        """)
+        check("three groups, two lines",
+              len(grp["groups"]) == 3 and len(grp["sepH"]) == 2, str(grp["groups"]))
+        # Everything that acts on the session itself goes LAST — the menu hangs from the
+        # ⚙ at the top of the screen, so on a phone its bottom is what a thumb reaches.
+        check("...the session's own controls last, where a thumb lands",
+              grp["groups"][2] == ["tree", "[mm-search mm-exit-close]", "task"],
+              str(grp["groups"][2]))
+        # Not one setting per row: one row carries font size, theme AND latex, because
+        # none of them needs a line to itself. The latex button says its own state, which is
+        # what let it leave its label behind.
+        # No labels on these two: the buttons have been brief/medium/all and a−/A+/◐
+        # since the beginning, and the label only said it again in four characters.
+        check("...how the transcript reads comes first, two rows not five, no labels",
+              grp["groups"][0][:2] == ["[brief medium all mm-live]",
+                                       "[mm-fontdown mm-fontup mm-theme mm-latex]"],
+              str(grp["groups"][0]))
+        # With no label to divide them, the bar is the only thing saying where one
+        # setting stops and the next starts.
+        bars = drv.js("""
+          const m = document.getElementById('mode-menu');
+          const prev = m.style.display; m.style.display = 'block';
+          const shape = [...m.querySelectorAll('.scr-cfg-row')]
+            .filter(r => r.querySelector('.row-bar'))
+            .map(r => [...r.children].map(c => c.classList.contains('row-bar') ? '|'
+                                                : (c.id || c.dataset.mode || c.tagName)).join(' '));
+          const bar = m.querySelector('.row-bar');
+          const vis = bar ? getComputedStyle(bar).display !== 'none' && bar.offsetWidth > 0 : false;
+          m.style.display = prev;
+          return { shape, vis };
+        """)
+        check("a bar separates the two settings sharing a row",
+              sorted(bars["shape"]) == sorted(["brief medium all | mm-live",
+                                               "mm-fontdown mm-fontup mm-theme | mm-latex",
+                                               "mm-search | mm-exit-close"]), str(bars["shape"]))
+        check("...and it is actually visible", bars["vis"] is True)
+        live = drv.js("""
+          const b = document.getElementById('mm-live');
+          const row = b.closest('.scr-cfg-row');
+          const first = b.textContent.trim();
+          b.click();
+          const after = b.textContent.trim();
+          b.click();
+          return { ids: [...row.querySelectorAll('button')].map(x => x.id || x.dataset.mode),
+                   first, after, back: b.textContent.trim() };
+        """)
+        # Same axis as brief/medium/all — how much text do you want — so it rides along
+        # instead of spending a labelled row on one binary choice.
+        check("the live-preview toggle sits with brief/medium/all",
+              live["ids"] == ["brief", "medium", "all", "mm-live"], str(live["ids"]))
+        check("...as one button naming its own state",
+              {live["first"], live["after"]} == {"live full", "live 2"},
+              f'{live["first"]} → {live["after"]}')
+        check("...and it toggles back", live["back"] == live["first"], str(live))
+        look = drv.js("""
+          const m = document.getElementById('mode-menu');
+          const prev = m.style.display; m.style.display = 'block';
+          const lx = document.getElementById('mm-latex');
+          // By the button, not by a label: the row has none any more. Looked up by the
+          // old label, this returned undefined and the whole probe threw a 500.
+          const ids = [...lx.closest('.scr-cfg-row').querySelectorAll('button')].map(b => b.id);
+          const first = lx.textContent.trim();
+          lx.click();
+          const after = lx.textContent.trim();
+          lx.click();
+          m.style.display = prev;
+          return { ids, first, after, back: lx.textContent.trim() };
+        """)
+        check("one row carries the four small controls",
+              look["ids"] == ["mm-fontdown", "mm-fontup", "mm-theme", "mm-latex"], str(look["ids"]))
+        # It answers "is it on right now", not "what would happen if you pressed me" —
+        # with no label beside it, the second reading is a coin flip.
+        check("...and the latex button names its own state",
+              {look["first"], look["after"]} == {"latex on", "latex off"},
+              f'{look["first"]} → {look["after"]}')
+        check("...toggling it both ways", look["back"] == look["first"],
+              f'{look["first"]} → {look["after"]} → {look["back"]}')
+        check("...with paging in the same group — it governs what shows up there",
+              grp["groups"][0][-1] == "load more", str(grp["groups"][0]))
+        check("...then dictation", grp["groups"][1] == ["<语音>"], str(grp["groups"][1]))
+        # Two self-naming buttons share a row, so neither needs a label. exit is at the
+        # RIGHT end, behind the bar: it is the only irreversible thing in this menu, so it
+        # must not be what a thumb meets on its way to find.
+        check("...find and the way out on one row, exit at the right end",
+              grp["groups"][2][1] == "[mm-search mm-exit-close]", str(grp["groups"][2]))
+        _x = src_index.index('getElementById("mm-exit-close")')
+        check("...with exit still asking first",
+              "if (!confirm(q)) return false;" in src_index
+              and "noConfirm" not in src_index[_x:_x + 700])
+        check("the separators actually draw a line", set(grp["sepH"]) == {"1px"}, str(grp["sepH"]))
+        # One line for something that is off and stays off. The feature is still there
+        # (localStorage + the per-message 🔧), the row is not.
+        check("发送后翻译 no longer spends a row", grp["translate"] is False)
+        # Merging rows buys width problems, and the menu is `max-width: 80vw` — on a
+        # 390px phone that is 312px for a label plus three chips, with no flex-wrap on
+        # the row, so an overflow SHRINKS the buttons and clips their text. Measured at
+        # that width rather than at whatever this browser window happens to be.
+        narrow = drv.js("""
+          const m = document.getElementById('mode-menu');
+          const prevD = m.style.display, prevW = m.style.width, prevMax = m.style.maxWidth;
+          m.style.display = 'block'; m.style.maxWidth = 'none'; m.style.width = '312px';
+          const rows = [...m.querySelectorAll('.scr-cfg-row')];
+          const bad = [], stacked = [];
+          for (const r of rows) {
+            const bs = [...r.querySelectorAll('button')].filter(b => b.offsetHeight > 0);
+            for (const b of bs) if (b.scrollWidth > b.clientWidth + 1)
+              bad.push((r.firstElementChild || {}).textContent + '/' + b.textContent.trim());
+            const tops = new Set(bs.map(b => Math.round(b.getBoundingClientRect().top)));
+            if (tops.size > 1) stacked.push((r.firstElementChild || {}).textContent);
+          }
+          m.style.display = prevD; m.style.width = prevW; m.style.maxWidth = prevMax;
+          return { bad, stacked };
+        """)
+        check("at phone width nothing is clipped", narrow["bad"] == [], str(narrow["bad"]))
+        check("...and no row breaks into two", narrow["stacked"] == [], str(narrow["stacked"]))
+
         print("=== find-in-page: a thin bar over what is loaded ===")
         # A phone installed as a web app has no find-in-page. This is one, and it
         # filters the LOADED transcript — not a server search (there was one for about
-        # an hour; it went, because with 往前翻 → 只要提问 you can pull hundreds of
+        # an hour; it went, because with load more → reqs only you can pull hundreds of
         # requests down for a few hundred bytes and then look through them for free).
         fb = drv.js("""
           const bar = document.getElementById('find-bar');
@@ -994,7 +1181,7 @@ def main():
         # find late.
         row = drv.js("""
           const rows = [...document.querySelectorAll('#switch-menu .scr-cfg-row, .switch-menu .scr-cfg-row')];
-          const r = rows.find(x => (x.firstElementChild || {}).textContent === 'Task');
+          const r = rows.find(x => (x.firstElementChild || {}).textContent === 'task');
           if (!r) return { missing: true, labels: rows.map(x => (x.firstElementChild||{}).textContent) };
           return { btns: [...r.querySelectorAll('button')].map(b => b.id),
                    texts: [...r.querySelectorAll('button')].map(b => b.textContent.trim()),
@@ -1002,7 +1189,7 @@ def main():
                    viewRunGone: !document.getElementById('mm-check') };
         """)
         if row.get("missing"):
-            check("SKIP: Task row not in the ⚙ menu here", True, str(row.get("labels"))[:60])
+            check("SKIP: task row not in the ⚙ menu here", True, str(row.get("labels"))[:60])
         else:
             check("one row, two windows", row["btns"] == ["mm-memo", "mm-watch"], str(row["btns"]))
             check("...labelled set and watch",
@@ -1017,7 +1204,7 @@ def main():
         widest = drv.js("""
           const h = document.getElementById('mm-memo-hint');
           if (!h) return { missing: true };
-          h.textContent = ' \u2713 \u26a0\u81ea\u68c0\u5bf9\u4e0d\u4e0a\u4efb\u52a1';
+          h.textContent = ' \u2713';
           const row = h.closest('.scr-cfg-row');
           const btns = [...row.querySelectorAll('button')];
           const tops = new Set(btns.map(b => Math.round(b.getBoundingClientRect().top)));
@@ -1029,8 +1216,21 @@ def main():
             check("...and nothing is clipped", widest["clipped"] == [], str(widest["clipped"]))
         check("the verdict glyph is computed in one place",
               src_index.count("function memoCheckTag") == 1
-              and src_index.count("memoCheckTag()") >= 3
+              and src_index.count("memoCheckTag()") >= 2
               and "const memoCheckBadge = () => {" in src_index)
+        # It used to be on `set`'s face as well. Dropped on purpose: you press `set` to
+        # open the window, not to deal with a warning, so a verdict there was alarm on a
+        # row you were reading for another reason. It stays in the window, on the 自检
+        # button that produced it, and in this button's tooltip.
+        hint = drv.js("""
+          const h = document.getElementById('mm-memo-hint');
+          const b = document.getElementById('mm-memo');
+          return { hint: (h ? h.textContent : '(missing)'), title: b ? b.title : '' };
+        """)
+        check("the set hint says only whether anything is written",
+              "自检" not in hint["hint"] and "⚠" not in hint["hint"], repr(hint["hint"]))
+        check("...while the tooltip still explains where the verdict lives",
+              "自检结果也在里面" in hint["title"], hint["title"][:40])
         # `view run` is gone (one row, two windows), so what used to be the difference
         # between the two buttons is now a property of `set` alone: it opens with the
         # report FOLDED, every time. The fold is a class on the element, so without an
@@ -1088,6 +1288,151 @@ def main():
         check("Watch zooms too, hiding the cadence rows",
               set(wz["opts"]) == {"none"} and wz["after"] > wz["before"], str(wz))
         drv.js("document.getElementById('memo-modal').classList.remove('show')")
+
+        print("=== 🎤 on the Task boxes: a different bar, with the choice on it ===")
+        # The choice between the raw and the polished version was a full-screen window
+        # for a day. Wrong shape: the bar already echoes the text, so the panel covered
+        # the thing being chosen between. It lives on the bar now — 看润色/看原文 swaps
+        # which one is shown, 插入 takes the one on screen.
+        v = drv.js("""
+          const m = document.getElementById('memo-modal');
+          m.classList.add('show');
+          const mics = [...m.querySelectorAll('.memo-mic')].map(b => b.dataset.box);
+          const bar = document.getElementById('rec-bar');
+          const vis = (el) => el && getComputedStyle(el).display !== 'none';
+          bar.style.display = 'flex';
+          const ids = ['rec-swap', 'rec-use', 'rec-send', 'rec-edit', 'rec-stop'];
+          const g = () => { const o = {}; ids.forEach(i => o[i] = vis(document.getElementById(i))); return o; };
+          // Composer mode: the bar is exactly as it always was.
+          ['rec-send', 'rec-edit', 'rec-stop'].forEach(i => document.getElementById(i).style.display = '');
+          const composer = g();
+          bar.classList.add('rec-memo');
+          const memo = g();
+          bar.classList.add('rec-two');
+          const memoTwo = g();
+          bar.classList.add('rec-picked');
+          const memoPicked = g();
+          bar.classList.remove('rec-memo', 'rec-two', 'rec-picked');
+          bar.style.display = 'none';
+          m.classList.remove('show');
+          return { mics, composerMic: !!document.getElementById('mic-btn'),
+                   composer, memo, memoTwo, memoPicked,
+                   gone: !document.getElementById('vpick') };
+        """)
+        check("both Task boxes have a mic", v["mics"] == ["task", "notes"], str(v["mics"]))
+        check("...and the composer keeps its own", v["composerMic"] is True)
+        check("the composer's bar is untouched: Polish / Edit / Send, no 插入",
+              v["composer"] == {"rec-swap": False, "rec-use": False, "rec-send": True,
+                                "rec-edit": True, "rec-stop": True}, str(v["composer"]))
+        # Two jobs, two button sets. A Task box submits nothing (no Send) and inserting
+        # into the box you are editing IS the edit (no Edit) — both collapse into 插入.
+        check("...and a Task box's bar drops Send and Edit for one 插入",
+              v["memo"]["rec-use"] and not v["memo"]["rec-send"] and not v["memo"]["rec-edit"]
+              and v["memo"]["rec-stop"], str(v["memo"]))
+        check("...with no swap until there are two versions to swap between",
+              v["memo"]["rec-swap"] is False and v["memoTwo"]["rec-swap"] is True)
+        check("...and Polish gone once it has run", v["memoPicked"]["rec-stop"] is False)
+        check("the full-screen chooser is gone", v["gone"] is True)
+        # Shipped looking like two different kinds of control in one row: 插入 and 看润色
+        # were never added to the bar's shared button rule, so they fell back to the
+        # browser's default button next to Polish's pill. Measured, not eyeballed.
+        btn = drv.js("""
+          const bar = document.getElementById('rec-bar');
+          bar.style.display = 'flex'; bar.classList.add('rec-memo', 'rec-two');
+          const box = (id) => { const e = document.getElementById(id), c = getComputedStyle(e);
+            return { r: c.borderTopLeftRadius, px: c.paddingLeft, py: c.paddingTop,
+                     fs: c.fontSize, bw: c.borderTopWidth,
+                     h: Math.round(e.getBoundingClientRect().height),
+                     bg: c.backgroundColor, fw: c.fontWeight }; };
+          const r = { stop: box('rec-stop'), use: box('rec-use'), swap: box('rec-swap'),
+                      send: box('rec-send') };
+          bar.classList.remove('rec-memo', 'rec-two'); bar.style.display = 'none';
+          return r;
+        """)
+        same = lambda a, b: all(a[k] == b[k] for k in ("r", "px", "py", "fs", "bw", "h"))
+        check("插入 is the same shape of button as Polish", same(btn["use"], btn["stop"]),
+              f'{btn["use"]} vs {btn["stop"]}')
+        check("...and so is 看润色", same(btn["swap"], btn["stop"]), f'{btn["swap"]} vs {btn["stop"]}')
+        # Same shape, different weight: 插入 is the one that commits, exactly as Send is
+        # in the composer — so it wears the composer's Send fill, not one of its own.
+        check("...with 插入 filled like the composer's Send, since both commit",
+              btn["use"]["bg"] == btn["send"]["bg"] and btn["use"]["bg"] != btn["stop"]["bg"]
+              and btn["use"]["fw"] == btn["send"]["fw"], f'{btn["use"]["bg"]} vs {btn["send"]["bg"]}')
+        check("...and 看润色 staying quiet, like Polish", btn["swap"]["bg"] == btn["stop"]["bg"])
+        # One recorder, two destinations. A second copy would have been a second copy of
+        # the bar-first opening, the 12s cap and the permission hint.
+        check("both entry points share one recording path",
+              src_index.count("async function micTap") == 1
+              and src_index.count("micTap();") == 2, "micTap")
+        check("...and the composer's path is unchanged (target null)",
+              'micBtn.addEventListener("click", () => { voiceTarget = null; micTap(); });' in src_index)
+        # The bar carries the timer, the wave and every button that ends a recording,
+        # so it has to be where you are looking. Dictating into a Task box, that is a
+        # full-screen window with the footer behind it — the bar was running, correctly,
+        # completely out of sight.
+        moved = drv.js("""
+          const bar = document.getElementById('rec-bar');
+          const home = bar.parentNode.id || bar.parentNode.className;
+          document.getElementById('memo-modal').classList.add('show');
+          const sec = document.getElementById('memo-task').closest('.memo-sec');
+          bar.classList.add('rec-inline');
+          sec.insertBefore(bar, document.getElementById('memo-task'));
+          bar.style.display = 'flex';
+          const cs = getComputedStyle(bar);
+          const br = bar.getBoundingClientRect(), tr = document.getElementById('memo-task').getBoundingClientRect();
+          const r = { home, inSec: bar.parentNode === sec,
+                      nextIsBox: bar.nextElementSibling && bar.nextElementSibling.id === 'memo-task',
+                      pos: cs.position, radius: cs.borderTopLeftRadius,
+                      border: cs.borderTopWidth,
+                      // Does it sit ABOVE the box, or on top of it?
+                      overlaps: br.bottom > tr.top + 2, gap: Math.round(tr.top - br.bottom) };
+          bar.style.display = 'none';
+          bar.classList.remove('rec-inline');
+          document.querySelector('footer .input-row').appendChild(bar);
+          document.getElementById('memo-modal').classList.remove('show');
+          return r;
+        """)
+        check("the bar can live next to a Task box", moved["inSec"] is True)
+        check("...directly above the box being dictated into", moved["nextIsBox"] is True)
+        # Its styles were scoped `footer .rec-bar` — 29 rules that all stopped applying
+        # the moment it moved, which is how it went invisible rather than misplaced.
+        # Checked on a property the bar has in EVERY state: align-items varies with
+        # .rec-live-on, so asserting on it was asserting on which state the previous
+        # test left behind.
+        check("...and keeps its styling there",
+              moved["radius"] == "10px" and moved["border"] != "0px",
+              f'radius={moved["radius"]} border={moved["border"]}')
+        # In the footer it is absolutely positioned to COVER the composer row. Dropped
+        # into a Task section unchanged it would cover the textarea instead of sitting
+        # above it — the bar would be visible and the box would not.
+        check("...in normal flow, not covering the box", moved["pos"] == "static", moved["pos"])
+        check("...so the box is still there under it",
+              moved["overlaps"] is False, f'gap={moved["gap"]}px')
+        # Looked for as a SELECTOR: the comment explaining why they were de-scoped
+        # mentions the old form, and a check that trips over its own rationale is a
+        # check nobody keeps.
+        import re as _re
+        check("the rules are not scoped to the footer any more",
+              not _re.search(r"(?m)^\s*footer\s+(\.rec-bar|#rec-bar)", src_index)
+              and "footer .rec-bar ." not in src_index)
+        check("...and it is MOVED, not duplicated",
+              src_index.count('id="rec-bar"') == 1 and "recBarHome()" in src_index)
+
+        check("a Task recording asks before it writes",
+              'voiceTarget && voiceTarget.pick' in src_index and "voicePickShow(" in src_index)
+        # Same bar, said differently: the dashed frame is there to mean "nothing has gone
+        # into your box yet", which is exactly what separates this mode from the other one.
+        dashed = drv.js("""
+          const bar = document.getElementById('rec-bar');
+          bar.style.display = 'flex';
+          const plain = getComputedStyle(bar).borderTopStyle;
+          bar.classList.add('rec-memo');
+          const memo = getComputedStyle(bar).borderTopStyle;
+          bar.classList.remove('rec-memo'); bar.style.display = 'none';
+          return { plain, memo };
+        """)
+        check("...and looks different while it does",
+              dashed["memo"] == "dashed" and dashed["plain"] != "dashed", str(dashed))
 
         print("=== A- / A+ resize the boxes, and only the boxes ===")
         sizes = drv.js("""
@@ -1246,10 +1591,15 @@ def main():
         """)
         check("the ⚙ menu is all label+controls rows", rowinfo[0] >= 6, str(rowinfo[0]))
         check("...and none of them wraps onto a second line", rowinfo[1] == [], str(rowinfo[1]))
-        check("...and the ▁▄█ icons are gone from the labels",
-              drv.js("return [...document.querySelectorAll('.mode-opt')].map(b=>b.textContent)")
-              == ["brief", "medium", "all"],
-              str(drv.js("return [...document.querySelectorAll('.mode-opt')].map(b=>b.textContent)")))
+        # The faces are min/mid/max — three equal-length words that read as a scale —
+        # while data-mode keeps the server's own names, so only the face changed. And NOT
+        # S/M/L: the font size sits one row below, where S/M/L would read as its own.
+        faces = drv.js("""
+          return [...document.querySelectorAll('.mode-opt')]
+            .map(b => b.textContent.trim() + ':' + b.dataset.mode);
+        """)
+        check("...and the labels are the short scale, over the protocol names",
+              faces == ["min:brief", "mid:medium", "max:all"], str(faces))
 
         print("=== the >_ tab list uses the same line as the others ===")
         drv.js("document.getElementById('tabs-btn').click()")

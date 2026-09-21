@@ -30,6 +30,14 @@ def check(name, cond, detail=""):
         _fails.append(name)
 
 
+def _txt(b):
+    """Text of a transcript item, whichever shape the mode returned."""
+    c = ((b.get("message") or {}).get("content")) if b.get("message") else b.get("text")
+    if isinstance(c, list):
+        return "\n".join(p.get("text", "") for p in c if isinstance(p, dict))
+    return c or ""
+
+
 def main():
     home = tempfile.mkdtemp(prefix="ccweb-earlier-")
     os.makedirs(os.path.join(home, ".claude"))
@@ -59,6 +67,58 @@ def main():
                                 "uuid": f"a-{r}",
                                 "message": {"role": "assistant", "content": [
                                     {"type": "text", "text": f"回复 {r} 独角兽 " + "x" * 3000}]}},
+                               ensure_ascii=False) + "\n")
+
+    # A pasted request, in claude's own shape: every multi-line message cc-web delivers
+    # arrives as a bracketed paste, and claude wraps pastes in these tags before sending
+    # them on — including the id on the CLOSING tag, which is not valid XML but is what
+    # it writes. Its system prompt says "the user never sees the id"; in cc-web they did.
+    with open(path, "a", encoding="utf-8") as f:
+        ts = (t0 + datetime.timedelta(minutes=60)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        f.write(json.dumps({"type": "user", "cwd": "/tmp/p", "timestamp": ts, "uuid": "pasted-u",
+                            "message": {"role": "user", "content":
+                                        '\n\n<pasted_content id="b465">\n粘进来的那段话\n'
+                                        '</pasted_content id="b465">\n\n\n不懂啥意思.'}},
+                           ensure_ascii=False) + "\n")
+        f.write(json.dumps({"type": "assistant", "cwd": "/tmp/p", "timestamp": ts, "uuid": "pasted-a",
+                            "message": {"role": "assistant", "content": [
+                                {"type": "text", "text": "回答粘贴的那条"}]}},
+                           ensure_ascii=False) + "\n")
+
+    # The SAME message twice, the way a queued send lands in the log: claude writes a
+    # queue-operation/enqueue the moment you hit send (the "QUEUED" placeholder), then the
+    # real user turn when it is delivered. Two different builders, and the first one was
+    # missed — so the placeholder still showed the tags while the turn under it was clean.
+    # The client hides the placeholder by matching CONTENT, so they have to agree.
+    with open(path, "a", encoding="utf-8") as f:
+        ts = (t0 + datetime.timedelta(minutes=61)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        wrapped = ('<pasted_content id="b465">\nrule 2 写「another similar connector」\n'
+                   '</pasted_content id="b465">\n他这是在质疑啥?!')
+        f.write(json.dumps({"type": "queue-operation", "operation": "enqueue",
+                            "cwd": "/tmp/p", "timestamp": ts, "uuid": "q-u",
+                            "content": wrapped}, ensure_ascii=False) + "\n")
+        f.write(json.dumps({"type": "user", "cwd": "/tmp/p", "timestamp": ts, "uuid": "q-delivered",
+                            "message": {"role": "user", "content": wrapped}},
+                           ensure_ascii=False) + "\n")
+        f.write(json.dumps({"type": "assistant", "cwd": "/tmp/p", "timestamp": ts, "uuid": "q-a",
+                            "message": {"role": "assistant", "content": [
+                                {"type": "text", "text": "回答排队那条"}]}},
+                           ensure_ascii=False) + "\n")
+
+    # Two relayed turns, tagged the way ask-peer tags them (one with each marker), plus
+    # an answer each — so "the whole round goes" has something to go wrong with.
+    with open(path, "a", encoding="utf-8") as f:
+        for n, tag in ((0, "[⇄ from peer claude abcd1234 (air)]\n帮我看下这个"),
+                       (1, "看完了\n[⇄ end of peer message]")):
+            ts = (t0 + datetime.timedelta(minutes=50 + n)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            f.write(json.dumps({"type": "user", "cwd": "/tmp/p", "timestamp": ts,
+                                "uuid": f"peer-u{n}",
+                                "message": {"role": "user", "content": tag}},
+                               ensure_ascii=False) + "\n")
+            f.write(json.dumps({"type": "assistant", "cwd": "/tmp/p", "timestamp": ts,
+                                "uuid": f"peer-a{n}",
+                                "message": {"role": "assistant", "content": [
+                                    {"type": "text", "text": "回给 peer 的话"}]}},
                                ensure_ascii=False) + "\n")
 
     # A line written the OTHER way (\uXXXX-escaped). It was here for the server-side
@@ -106,20 +166,30 @@ def main():
         fb, ob = nbytes(full["transcript"]), nbytes(only["transcript"])
 
         print("=== load-earlier can leave the answers on the server ===")
+        rounds_in = lambda t: len({b["_round"] for b in t})
         check("the same four rounds come back either way",
-              sum(1 for b in only["transcript"] if b["type"] == "user") == 4,
-              str(len(only["transcript"])))
+              rounds_in(only["transcript"]) == 4,
+              str(sorted({b["_round"] for b in only["transcript"]})))
         check("...with nothing but requests in the light one",
               {b["type"] for b in only["transcript"]} == {"user"},
               str(sorted({b["type"] for b in only["transcript"]})))
         # The whole reason this is not a browser-side filter.
         check("...and it is DRAMATICALLY smaller on the wire",
               ob < fb / 5, f"{fb} → {ob} bytes ({100 - ob * 100 // fb}% less)")
+        # Counted in ROUNDS, which is what the page size means. Counting user-type
+        # blocks was a proxy that breaks honestly: a queued send puts a QUEUED
+        # placeholder AND the delivered turn in the same round, both type "user".
         check("...paging back at the same pace, not a smaller step",
-              len([b for b in full["transcript"] if b["type"] == "user"]) == 4)
+              rounds_in(full["transcript"]) == 4,
+              str(sorted({b["_round"] for b in full["transcript"]})))
 
         print("=== ...and then one round's answer, on demand ===")
-        idxs = sorted(b["_idx"] for b in only["transcript"])
+        # Deliberately one of the human's own rounds: the fixture also contains relayed
+        # ones (tagged 「⇄ from peer claude」) whose answer is addressed to another
+        # session, and picking "the last request on the page" silently landed on one.
+        mine = [b for b in only["transcript"]
+                if "请求" in json.dumps(b["message"], ensure_ascii=False)]
+        idxs = sorted(b["_idx"] for b in mine)
         one = await st(claude_session_id=sid, mode="medium", round_at=idxs[-1])
         check("the answer to that request comes back",
               len(one["transcript"]) == 1 and one["transcript"][0]["type"] == "assistant",
@@ -138,6 +208,35 @@ def main():
               len(oldest["transcript"]) == 1, str(len(oldest["transcript"])))
         # One round, not "everything after it".
         check("...and stops at the next request", len(oldest["transcript"]) == 1)
+
+        print("=== another session's turns are not your requests ===")
+        # ask-peer tags every message it relays, in both directions — the tag exists so
+        # an untagged message can be trusted to be the human's. Here it is used to keep
+        # them out of the one view whose job is finding a request the human made.
+        newest = await st(claude_session_id=sid, mode="medium", rounds=2)
+        top = max(b["_idx"] for b in newest["transcript"]) + 1
+        withp = await st(claude_session_id=sid, mode="medium", rounds=4, before_idx=top,
+                         users_only=True)
+        nop = await st(claude_session_id=sid, mode="medium", rounds=4, before_idx=top,
+                       users_only=True, skip_peer=True)
+        txt = lambda r: json.dumps(r["transcript"], ensure_ascii=False)
+        check("without the flag, relayed turns come back", "from peer claude" in txt(withp))
+        check("with it, they do not", "from peer claude" not in txt(nop)
+              and "end of peer message" not in txt(nop), txt(nop)[:60])
+        # Four rounds asked for, four real ones served: the filtering happens BEFORE the
+        # window is taken, or a page comes back as one request and three gaps.
+        check("...and the page is still four requests you made",
+              sum(1 for b in nop["transcript"] if b["type"] == "user") == 4,
+              str(len(nop["transcript"])))
+        # The answer goes with the question: an answer with no question above it reads
+        # as a non-sequitur, and the reason for hiding it was that the exchange was not
+        # yours.
+        rounds_kept = await st(claude_session_id=sid, mode="medium", rounds=6,
+                               before_idx=top, skip_peer=True)
+        check("the whole relayed ROUND is dropped, answer included",
+              "回给 peer 的话" not in txt(rounds_kept), txt(rounds_kept)[:60])
+        check("...while your own answers are untouched",
+              "回复" in txt(rounds_kept))
 
         print("=== finding is NOT a server call ===")
         # There was a /api/search here for about an hour: it streamed the whole jsonl
@@ -168,6 +267,90 @@ def main():
             cf = set(_re.findall(r"(?m)^(?:async def |def )(\w+)", src))
             check("no function went missing against the last commit",
                   not (hf - cf), str(sorted(hf - cf)[:8]))
+
+        print("=== the ASR vocabulary knows what this session is about ===")
+        # Dictating into the Task box is exactly when the recogniser needs the session's
+        # own words — file names, module names, the thing being built. Those come from
+        # the recent conversation AND from the Task / 注意事项 text itself, which is the
+        # densest source of them and the likeliest vocabulary of what you are about to
+        # say into that very box.
+        cc_web.post_session_memo(cc_web.MemoPayload(
+            claude_session_id=sid, task="把 news-reader 的 backfill 收口",
+            notes="别重构 index.html"))
+        terms = cc_web._asr_terms(sid)
+        check("the task's own words are in the vocabulary",
+              {"news-reader", "backfill"} <= set(terms), str(terms[:8]))
+        check("...and the standing notes' too", "index.html" in terms, str(terms[:8]))
+        check("...alongside the conversation's", any("请求" in t or "回复" in t for t in terms)
+              or len(terms) > 2, str(len(terms)))
+        # Eight exchanges rather than four: the term ASR fumbles is often one you used
+        # several turns ago.
+        src_cc = open(os.path.join(ROOT, "cc_web.py"), encoding="utf-8").read()
+        check("...over a window of 8 exchanges", "n_exchanges=8" in src_cc)
+        # The extractor's own truncation marker was leaking into the list: every long
+        # turn contributed "chars" and "skipped", so every session was biased toward two
+        # English words nobody had said.
+        check("the truncation marker is not a term",
+              not ({"chars", "skipped"} & set(t.lower() for t in terms)), str(terms[:6]))
+        check("...and neither is an unsayable 200-character run",
+              all(len(t) <= 32 for t in terms), str(max((len(t) for t in terms), default=0)))
+        # The vocabulary is built from the WHOLE of each recent turn, not a 200-char
+        # head+tail of it. That cap is right for the polish prompt (it wants a sense of
+        # the conversation) and wrong here: most file names and identifiers are in the
+        # middle of a long message, which is exactly what a head+tail throws away.
+        long_mid = "开头。" * 40 + " kubectl_regrade_canary " + "结尾。" * 40
+        cc_web.post_session_memo(cc_web.MemoPayload(claude_session_id=sid, task=long_mid))
+        mid_terms = cc_web._asr_terms(sid)
+        check("a term buried in the middle of a long turn is still collected",
+              "kubectl_regrade_canary" in mid_terms, str(mid_terms[:5]))
+        check("...and the list stays a list of terms, not prose",
+              all(len(t) <= 32 for t in mid_terms) and len(mid_terms) <= 48,
+              str(len(mid_terms)))
+        check("a session with no memo still works",
+              isinstance(cc_web._asr_terms("00000000-0000-0000-0000-000000000000"), list))
+
+        print("=== a pasted block shows as the text, not as packaging ===")
+        # Both display modes: brief is what the session view asks for, medium what the
+        # brief list and the peer history use — and they are separate builders, neither of
+        # which goes through _entry_text. The first fix only cleaned _entry_text, so the
+        # page itself still showed the tags.
+        for mode in ("brief", "medium"):
+            full = await st(claude_session_id=sid, mode=mode, rounds=6)
+            pasted = [b for b in full["transcript"]
+                      if b.get("type") == "user"
+                      and "粘进来的那段话" in _txt(b)]
+            check(f"[{mode}] the pasted request is there", len(pasted) == 1,
+                  str(full["transcript"][-1])[:300])
+            if not pasted:
+                continue
+            txt = _txt(pasted[0])
+            check(f"[{mode}] ...with the tags gone", "pasted_content" not in txt, txt[:80])
+            check(f"[{mode}] ...and the id claude says you are never meant to see",
+                  "b465" not in txt, txt[:80])
+            # Losing the words would be far worse than showing the tags.
+            check(f"[{mode}] ...but every word kept, on both sides of the block",
+                  txt.strip().startswith("粘进来的那段话") and txt.strip().endswith("不懂啥意思."),
+                  repr(txt))
+
+        print("=== the QUEUED placeholder is stripped too, and still matches ===")
+        q = await st(claude_session_id=sid, mode="brief", rounds=6)
+        ph = [b for b in q["transcript"] if b.get("_queued")]
+        if not ph:
+            print("    (transcript tail: "
+                  + str([(b.get("type"), b.get("_queued"), _txt(b)[:16]) for b in q["transcript"][-6:]])
+                  + ")")
+        turn = [b for b in q["transcript"]
+                if b.get("type") == "user" and not b.get("_queued")
+                and "质疑啥" in _txt(b)]
+        check("the placeholder is there", len(ph) == 1, str(len(ph)))
+        if ph:
+            check("...with no tags on it either", "pasted_content" not in _txt(ph[0]),
+                  _txt(ph[0])[:70])
+            # If only one of the two were stripped, the client would stop recognising the
+            # pair and you would see the message twice — once queued, once delivered.
+            check("...and it still reads the same as the delivered turn, so the pair matches",
+                  bool(turn) and _txt(ph[0]).strip() == _txt(turn[0]).strip(),
+                  (_txt(ph[0])[:40] + " vs " + (_txt(turn[0])[:40] if turn else "(no turn)")))
 
         print("=== the default is unchanged ===")
         plain = await st(claude_session_id=sid, mode="medium", rounds=4, before_idx=first)

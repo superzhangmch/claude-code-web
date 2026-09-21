@@ -2628,7 +2628,7 @@ def _trim_brief(e: dict) -> Optional[dict]:
     new_content = None
     if isinstance(content, str):
         if content.strip():
-            new_content = content
+            new_content = _strip_pasted(content)          # see _PASTED_TAG
     elif isinstance(content, list):
         # brief keeps text; also keeps tool_use as NAME ONLY (drop args) so the
         # UI can show a compact "Tool calls: a · b · c" stack. tool_result is
@@ -2639,7 +2639,7 @@ def _trim_brief(e: dict) -> Optional[dict]:
                 continue
             t = p.get("type")
             if t == "text" and (p.get("text") or "").strip():
-                parts.append({"type": "text", "text": p["text"]})
+                parts.append({"type": "text", "text": _strip_pasted(p["text"])})
             elif t == "tool_use":
                 tu = {"type": "tool_use", "id": p.get("id"),
                       "name": p.get("name"), "input": {}}
@@ -2902,7 +2902,7 @@ def _trim_all(e: dict) -> Optional[dict]:
     new_content = None
     if isinstance(content, str):
         if content.strip():
-            new_content = content
+            new_content = _strip_pasted(content)          # see _PASTED_TAG
     elif isinstance(content, list):
         kept = []
         for p in content:
@@ -2910,7 +2910,7 @@ def _trim_all(e: dict) -> Optional[dict]:
                 continue
             t = p.get("type")
             if t == "text" and p.get("text"):
-                kept.append({"type": "text", "text": p["text"]})
+                kept.append({"type": "text", "text": _strip_pasted(p["text"])})
             elif t == "tool_use":
                 kept.append({
                     "type": "tool_use",
@@ -2952,7 +2952,9 @@ def _queued_render_item(e: dict) -> dict:
     human input — mark it _system so it renders as a compact System stack
     (summary-extracted), not a human "Queued" box. Untagged (human) content is
     shown in full — it's a real message, not a preview."""
-    cs = (e.get("content") or "").strip()
+    # claude writes the enqueue with the paste ALREADY expanded, so the placeholder had
+    # the tags even though the delivered turn below it did not. Same strip, see _PASTED_TAG.
+    cs = _strip_pasted(e.get("content") or "").strip()
     has_tag = bool(_LEADTAG_RE.match(cs))
     item = {
         "uuid": e.get("uuid"),
@@ -2979,7 +2981,7 @@ def _queued_command_item(e: dict, a: dict) -> dict:
     order-independent key that disambiguates repeated content (many "继续"). `_qcmd`
     flags it as a delivered-queued msg; a delivery that arrives instead as a plain
     user turn (no shared ts) is matched client-side by content + strict position."""
-    cs = _prompt_text(a.get("prompt"))
+    cs = _strip_pasted(_prompt_text(a.get("prompt")))
     return {
         "uuid": e.get("uuid"),
         "type": "user",
@@ -3096,7 +3098,13 @@ def _filter_entries(entries: list[dict], mode: str) -> list[dict]:
         t = e.get("type")
         if t == "queue-operation":
             if e.get("operation") == "enqueue":
-                cs = (e.get("content") or "").strip()
+                # Stripped BEFORE the tag test, not after: _LEADTAG_RE matches any
+                # leading "<tag", and a queued message that happens to START with a
+                # pasted block ("<pasted_content id=…>rule 2 写…") was therefore read as
+                # a system event — dropped from the transcript here, and rendered as a
+                # compact System stack in _queued_render_item. The packaging around your
+                # own words must not decide what KIND of message it is.
+                cs = _strip_pasted(e.get("content") or "").strip()
                 if cs and not _LEADTAG_RE.match(cs):
                     out.append(_queued_render_item(e))
             continue
@@ -3191,6 +3199,37 @@ def _snippet_around(text: str, q: str, width: int = 70) -> str:
     start = max(0, i - width)
     end = min(len(t), i + len(q) + width)
     return ("…" if start > 0 else "") + t[start:end] + ("…" if end < len(t) else "")
+
+
+# ask-peer stamps every message it relays, in both directions, so a forwarded turn is
+# recognisable without guessing. See skills/ask-peer-claude-code: the tag is there
+# precisely so that an untagged message can be trusted to be the human's.
+_PEER_TAGS = ("[⇄ from peer claude", "[⇄ end of peer message]")
+
+
+def _is_peer_relay(e: dict) -> bool:
+    if not _is_user_msg(e):
+        return False
+    t = _entry_text(e) or ""
+    return any(tag in t for tag in _PEER_TAGS)
+
+
+def _drop_peer_rounds(entries: list[dict]) -> list[dict]:
+    """Remove relayed requests AND what they were answered with.
+
+    The whole round goes, not just the request: an answer with no question above it
+    reads as a non-sequitur, and the reason for hiding these is that the exchange was
+    not yours. Applied BEFORE the "last N rounds" window, so a page still comes back
+    with N requests you actually made rather than one plus three gaps.
+    """
+    out: list[dict] = []
+    dropping = False
+    for e in entries:
+        if _is_user_msg(e):
+            dropping = _is_peer_relay(e)
+        if not dropping:
+            out.append(e)
+    return out
 
 
 def _is_user_msg(e: dict) -> bool:
@@ -4494,6 +4533,14 @@ async def lifespan(app: FastAPI):
       reaper_task = asyncio.create_task(_binding_reaper(30.0))
       cpu_task = asyncio.create_task(_cpu_sampler_loop())
       apierr_task = asyncio.create_task(_api_error_watcher(180.0))
+      # jieba loads a 1.2-second prefix dictionary the first time anything asks it for
+      # keywords — measured, and after that every call is ~10ms. Left alone, that
+      # second is paid by whoever records first after a restart, while they are already
+      # waiting for a transcription. Warmed off the event loop instead, so it costs
+      # nobody anything: a thread, because the load is CPU-bound and would otherwise
+      # block every request for the duration.
+      threading.Thread(target=lambda: _vocab_terms("预热 warmup"),
+                       name="jieba-warm", daemon=True).start()
       snap_task = (asyncio.create_task(_snapshot_autosave(SNAPSHOT_AUTO_MIN * 60.0))
                    if SNAPSHOT_AUTO_MIN > 0 else None)
       if snap_task:
@@ -6258,6 +6305,11 @@ async def get_state(
     # ...and the other half: once you have found the request, the answer to THAT one.
     # `_idx` of the user entry; serves what follows it up to the next request.
     round_at: Optional[int] = None,
+    # load-earlier only: drop the rounds that came from ANOTHER session. The ask-peer
+    # relay tags every message it forwards, so these are recognisable — and they are not
+    # requests you made, which makes them noise in the one view whose job is finding a
+    # request you made.
+    skip_peer: bool = False,
     mode: str = "brief",
     epoch: Optional[str] = None,
 ):
@@ -6333,12 +6385,16 @@ async def get_state(
         # and (b) rewound branches in that older region are dropped too.
         want = rounds or 5
         older = [e for e in all_entries if e.get("_idx", 0) < before_idx]
+        if skip_peer:
+            older = _drop_peer_rounds(older)
         guard = 0
         while (sum(1 for e in older if _is_user_msg(e)) < want
                and jsonl_cache.has_earlier(b.jsonl_path) and guard < 100):
             jsonl_cache.earlier(b.jsonl_path)
             all_entries = _prune_rewound(jsonl_cache.entries(b.jsonl_path))
             older = [e for e in all_entries if e.get("_idx", 0) < before_idx]
+            if skip_peer:
+                older = _drop_peer_rounds(older)
             guard += 1
         sliced = _last_n_rounds(older, want)
         if users_only:
@@ -7644,17 +7700,38 @@ def _norm_match(s: str) -> str:
     return _LIVE_NORM_RE.sub("", (s or "").lower())
 
 
+# claude wraps anything PASTED into its input box — which is how cc-web delivers every
+# multi-line message — in a tagged block before sending it to the model:
+#
+#     \n\n<pasted_content id="b465">\n…the pasted text…\n</pasted_content id="b465">\n\n
+#
+# (the closing tag carries the id too, which is not valid XML but is what it writes).
+# The id is random per session and claude's own system prompt says of it: "the user never
+# sees the id" — true in the TUI, which shows a collapsed "[Pasted text +N lines]" chip.
+# It was not true here: cc-web reads the transcript, so the tags showed up in the middle
+# of your own request, twice, with an id that means nothing to you. Stripped at the one
+# place every reader goes through, so the display, search, folding, the ASR vocabulary
+# and the whip's head+tail all see the message rather than the packaging.
+_PASTED_TAG = re.compile(r'</?pasted_content id="[^"]*">\n?')
+
+
+def _strip_pasted(s):
+    """Drop the wrapper, keep every word inside it."""
+    return _PASTED_TAG.sub("", s) if isinstance(s, str) else s
+
+
 def _entry_text(e: dict) -> str:
     """Plain text of a conversation entry (user/assistant), or "" for a
     tool-call / tool-result / non-text turn."""
     c = (e.get("message") or {}).get("content")
     if isinstance(c, str):
-        return c.strip()
+        return _strip_pasted(c).strip()
     if isinstance(c, list):
         if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
             return ""
-        return "\n".join(b.get("text", "") for b in c
-                         if isinstance(b, dict) and b.get("type") == "text").strip()
+        return _strip_pasted("\n".join(
+            b.get("text", "") for b in c
+            if isinstance(b, dict) and b.get("type") == "text")).strip()
     return ""
 
 
@@ -8738,15 +8815,37 @@ def _asr_terms(sid: str) -> list:
     back as speech. Used as-is for Soniox `context.terms`; joined for OpenAI `prompt`."""
     if not sid:
         return []
+    parts: list[str] = []
+    # The session's Task and 注意事项 first. They are the densest source of the words
+    # this session is ABOUT — file names, module names, the thing being built — and
+    # when you are dictating INTO those boxes they are also the most likely vocabulary
+    # of what you are about to say.
+    try:
+        memo = _memo_flat(_memo_read(sid))
+        for f in _MEMO_FIELDS:
+            t = ((memo.get(f) or {}).get("text") or "").strip()
+            if t:
+                parts.append(t)
+    except Exception:
+        pass
     jsonl = find_jsonl_for_session(sid)
     if not jsonl:
-        return []
+        return _vocab_terms(" ".join(parts))
     try:
-        ctx = extract_recent_context_ht(jsonl, n_exchanges=4,
-                                        max_user_chars=200, max_response_chars=200)
+        # Eight exchanges, not four: a term you used six turns ago is exactly the one
+        # ASR gets wrong, and the extractor keeps only distinctive words so a wider
+        # window costs a longer list rather than a noisier one.
+        #
+        # And the turns come through WHOLE. The 200-character caps these used to carry
+        # are right for the polish prompt — it wants a sense of the conversation — and
+        # wrong here: a vocabulary wants every distinctive word, and a head+tail of 200
+        # characters throws away the middle of every long message, which is where most
+        # of the file names and identifiers are. The list is capped at 48 terms anyway,
+        # so more source text costs a better-chosen list, not a longer one.
+        ctx = extract_recent_context_ht(jsonl, n_exchanges=8,
+                                        max_user_chars=6000, max_response_chars=6000)
     except Exception:
-        return []
-    parts: list[str] = []
+        return _vocab_terms(" ".join(parts))
     for ex in ctx.get("exchanges", []):
         u = ((ex.get("user") or {}).get("text") or "").strip()
         a = ((ex.get("response") or {}).get("text") or "").strip()
@@ -8783,10 +8882,17 @@ def _vocab_terms(text: str, cap: int = 48) -> list:
     English words, CJK keywords) → a LIST for ASR biasing. Drops plain prose /
     common words / pure numbers so it can't be echoed back as a sentence."""
     text = text or ""
+    # The context extractor truncates long turns with "... [N chars skipped] ...", so
+    # `chars` and `skipped` were being biased into EVERY session's vocabulary — two
+    # English words the recogniser is now slightly more likely to hear, from a marker
+    # nobody said out loud. Found by reading the term list, not by anything failing.
+    text = re.sub(r"\[\s*\d+\s*chars? skipped\s*\]", " ", text)
     seen, terms = set(), []
     def _add(t):
         k = t.lower()
-        if len(t) >= 2 and k not in seen:
+        # A 200-character run of one letter is not a term anyone will say. Bias lists
+        # are matched against speech; an unsayable token only takes up room.
+        if 2 <= len(t) <= 32 and k not in seen:
             seen.add(k); terms.append(t)
     # ASCII terms: identifiers / file names / acronyms / uncommon words (jargon).
     # Keep short acronyms (PCM, RST, AI) and uncommon words (vad, asr, soniox);

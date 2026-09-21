@@ -87,14 +87,14 @@ realtimeEngines = [{id: "s", display: "Soniox"}, {id: "o", display: "OpenAI real
 renderAsrMenu();
 let r = rows();
 check("exactly two rows, not one per option", r.length === 2, JSON.stringify(r.map(x => x[0])));
-check("the first is the mode", r[0][0] === "语音输入" && r[0][1].length === 2, JSON.stringify(r[0]));
-check("the second is the model", r[1][0] === "模型", JSON.stringify(r[1][0]));
+check("the first is the mode", r[0][0] === "voice" && r[0][1].length === 2, JSON.stringify(r[0]));
+check("the second is the model", r[1][0] === "model", JSON.stringify(r[1][0]));
 check("the shared vendor prefix is dropped",
       JSON.stringify(r[1][1]) === JSON.stringify(["4o-mini", "Whisper", "4o"]),
       JSON.stringify(r[1][1]));
 check("...and the full name survives in the tooltip",
       r[1][2][0] === "OpenAI 4o-mini", JSON.stringify(r[1][2]));
-check("no button carries a decorative mic any more (the row says 语音输入)",
+check("no button carries a decorative mic any more (the row says voice)",
       !r[1][1].some(t => /🎤|🎧/.test(t)), JSON.stringify(r[1][1]));
 
 console.log("=== realtime mode lists the streaming engines instead ===");
