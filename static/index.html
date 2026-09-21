@@ -910,8 +910,27 @@ body.pure #closetab-btn.active {
   color: var(--muted); font-size: 0.9em; line-height: 1.2;
 }
 .msg .grammar-hint .gh-hide:hover { color: var(--text); text-decoration: underline; }
+/* An attached file, shown as @1_png. Clickable, and visibly not prose. */
+.msg .up-chip {
+  cursor: pointer; color: var(--accent);
+  border-bottom: 1px dashed var(--accent);
+  font-family: var(--mono, monospace); font-size: 0.9em;
+}
+.msg .up-chip:hover { background: rgba(127, 127, 127, 0.15); }
 /* stacked compact rows (System msgs / brief tool-calls) — INLINE flow, wraps */
 .msg.system .sys-lines { font-size: 0.75em; line-height: 1.55; color: var(--muted); word-break: break-word; }
+/* A finished run of tool calls shows as its tally; the list is still there, folded. */
+.msg.system .sys-lines.stack-folded:not(.show) { display: none; }
+.msg.system .stack-sum {
+  font-size: 0.75em; line-height: 1.55; color: var(--muted);
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+.msg.system .stack-sum .stack-sum-txt { font-family: var(--mono, monospace); }
+.msg.system .stack-sum .stack-toggle {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--muted); font-size: 0.95em; line-height: 1.2;
+}
+.msg.system .stack-sum .stack-toggle:hover { color: var(--text); text-decoration: underline; }
 .msg.system .sys-item { }
 .msg.system .sys-item.tool { font-family: ui-monospace, Menlo, monospace; }
 .msg.system .sys-item .sys-tag {
@@ -1372,7 +1391,7 @@ footer .input-row > button { flex-shrink: 0; }
 footer .in-btn-col { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
 footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
 /* (mic no longer turns red while recording — the rec-bar popup is the state indicator) */
-/* long-press send → small menu (Clear / Copy / View ASR) */
+/* long-press send → small menu (set task · view asr · copy/clear) */
 .send-menu {
   /* absolute child of the input-row (position:relative) so it tracks the send
      button even when the iOS keyboard is up — position:fixed + getBoundingClientRect
@@ -1382,10 +1401,14 @@ footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
   background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
   box-shadow: 0 6px 20px rgba(0,0,0,0.4); overflow: hidden; padding: 4px;
 }
+/* One row per group; the items sit on it side by side, separated by a thin |. The
+   items stay full-size tap targets — this is a phone menu. */
+.send-menu-row { display: flex; align-items: center; gap: 2px; }
+.send-menu-lead { color: var(--muted); font-size: 13px; padding-left: 10px; white-space: nowrap; }
+.send-menu-sep { color: var(--border); font-size: 13px; }
 .send-menu-item {
-  display: block; width: 100%; text-align: left; box-sizing: border-box;
   background: none; border: 0; color: var(--text); font: inherit; font-size: 14px;
-  padding: 9px 12px; border-radius: 6px; cursor: pointer;
+  padding: 9px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap;
 }
 .send-menu-item:hover, .send-menu-item:active { background: var(--panel2); }
 .asr-raw-ov {
@@ -3156,7 +3179,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <input id="upload-input" type="file" accept="image/*" multiple style="display:none">
       <div class="in-btn-col">
         <button id="mic-btn" class="icon" title="语音输入(录音→识别→整理)">🎤</button>
-        <button id="upload-btn" class="icon" title="Attach image (long-press: any file ≤10MB)">📎</button>
+        <button id="upload-btn" class="icon" title="Attach a file ≤10MB (long-press: a picker that shows every type)">📎</button>
       </div>
       <textarea id="input" placeholder="Reply…" rows="1"></textarea>
       <button id="send" class="send" title="点击发送 · 长按更多" aria-label="Send">➤</button>
@@ -10126,6 +10149,85 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     box.appendChild(buildStackItem(kind, b));
   }
 
+  // A finished run of tool calls collapses to its tally: "Bash ×16 · Read ×3", with a
+  // button to open it again. The run that is still going keeps the full list — that one
+  // you are watching. Closing is what tells them apart: a stack is closed by the block
+  // that follows it, and for a tool run the block that follows is the answer, so
+  // "closed" IS "the turn moved on".
+  //
+  // Folded, not rebuilt: the items stay in the DOM (each one opens its detail on click),
+  // so expanding costs nothing and needs no re-render.
+  function closeStack() {
+    const st = _lastStack;
+    _lastStack = null;
+    if (!st || st.kind !== "tool" || !st.counts || !st.box.parentNode) return;
+    const total = [...st.counts.values()].reduce((a, c) => a + c, 0);
+    if (total <= 2) return;           // one or two: the tally is no shorter than the list
+    const div = st.box.parentNode;
+    if (div.querySelector(".stack-sum")) return;
+    const sum = document.createElement("div"); sum.className = "stack-sum";
+    const txt = document.createElement("span"); txt.className = "stack-sum-txt";
+    txt.textContent = [...st.counts].map(([n, c]) => (c > 1 ? n + " ×" + c : n)).join(" · ");
+    // Bracketed, and not in the monospace the tool names use: a bare lowercase word at
+    // the end of "Bash ×16 · Read ×3" reads as one more tool.
+    const btn = document.createElement("button"); btn.className = "stack-toggle";
+    btn.textContent = "[expand]"; btn.title = "展开这 " + total + " 次调用";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = st.box.classList.toggle("show");
+      btn.textContent = open ? "[collapse]" : "[expand]";
+    });
+    sum.appendChild(txt); sum.appendChild(btn);
+    div.insertBefore(sum, st.box);
+    st.box.classList.add("stack-folded");
+  }
+
+  // An attached file arrives in the message as its full path — "@/Users/me/.claude/
+  // cc_web_uploads/1789983721_5f955e92.png" — which on a phone is a paragraph of
+  // machinery for one picture. Shown as "@1_png" instead: numbered within the message,
+  // extension kept (it is the only part that says WHAT it is), full path on hover, and
+  // a click opens the image.
+  //
+  // Only paths under cc_web_uploads, which is ours: a path you typed yourself is a path
+  // you meant to see. And only the RENDERED text changes — copy, find and the 🔧
+  // correction all read the raw entry, so what you send and what you copy are untouched.
+  const UPLOAD_RE = /@(\/[^\s"'<>]*\/cc_web_uploads\/[^\s"'<>]+)/g;
+  function uploadChip(path, n) {
+    const ext = ((path.split(".").pop() || "").match(/^[A-Za-z0-9]{1,5}/) || [""])[0].toLowerCase();
+    const el = document.createElement("span");
+    el.className = "up-chip";
+    el.textContent = "@" + n + (ext ? "_" + ext : "");
+    el.title = path;
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (isImagePath(path)) openImagePreview(fsFileUrl(path), path);
+      else openPathInFiles(path);
+    });
+    return el;
+  }
+  function compactUploads(root) {
+    if (!root) return;
+    const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const hits = [];
+    for (let n = w.nextNode(); n; n = w.nextNode()) {
+      UPLOAD_RE.lastIndex = 0;
+      if (UPLOAD_RE.test(n.nodeValue || "")) hits.push(n);
+    }
+    let i = 0;
+    for (const node of hits) {
+      const s = node.nodeValue, frag = document.createDocumentFragment();
+      let last = 0, m;
+      UPLOAD_RE.lastIndex = 0;
+      while ((m = UPLOAD_RE.exec(s))) {
+        if (m.index > last) frag.appendChild(document.createTextNode(s.slice(last, m.index)));
+        frag.appendChild(uploadChip(m[1], ++i));
+        last = m.index + m[0].length;
+      }
+      if (last < s.length) frag.appendChild(document.createTextNode(s.slice(last)));
+      node.parentNode.replaceChild(frag, node);
+    }
+  }
+
   function renderBlock(b) {
     const div = document.createElement("div");
     // The entry this block came from. Two features look a message up by it — find, and
@@ -10165,20 +10267,28 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const stackKind = (b.kind === "text" && b.system) ? "sys"
       : (b.kind === "tool_use" && renderMode === "brief") ? "tool" : null;
     if (stackKind) {
+      const bump = (st) => {
+        if (st.kind !== "tool") return;
+        const n = b.name || "(tool)";
+        st.counts.set(n, (st.counts.get(n) || 0) + 1);
+      };
       if (_lastStack && _lastStack.kind === stackKind) {
         appendStackItem(_lastStack.box, stackKind, b);
+        bump(_lastStack);
         return null;                                   // merged (inline) into the open block
       }
+      closeStack();                                     // a different kind ends the last run
       div.className = "msg system stack-tool";           // both sys & tool: minimal, no header row
       const lines = document.createElement("div"); lines.className = "sys-lines";
       appendStackItem(lines, stackKind, b);
       div.appendChild(lines);
-      _lastStack = { kind: stackKind, box: lines };
+      _lastStack = { kind: stackKind, box: lines, counts: new Map() };
+      bump(_lastStack);
       _lastBottomToolUse = null;
       if (b.sid && attachedShort && String(b.sid).slice(0, 4) !== attachedShort) flagMismatch(b.sid);
       return div;
     }
-    _lastStack = null;   // any other block breaks a run of stacked rows
+    closeStack();        // any other block breaks a run of stacked rows (and folds it)
 
     // Per-kind buttons (wrap toggle, copy) get appended below — the wrap
     // button needs the content box to point at, so we build the box first
@@ -10199,6 +10309,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // says which request this was, the last is what you actually asked.
       if (b.role === "user") userFold(md, b.text);
       else md.innerHTML = renderMarkdown(b.text);
+      compactUploads(md);          // @/…/cc_web_uploads/x.png → @1_png (see UPLOAD_RE)
       // Tested against the SOURCE, not the rendered node: with the middle folded away,
       // md.textContent is missing whatever is hidden, so math in there would get no ∑
       // until you expanded — and then the button would not be in the row any more.
@@ -10367,7 +10478,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         if (el) container.appendChild(el);
       }
     }
-    if (atTop) { _lastBottomToolUse = saved; _lastStack = savedStack; }
+    // A prepended batch ends where the already-rendered part begins, so anything still
+    // open at the end of it is finished by definition — fold it before restoring.
+    if (atTop) { closeStack(); _lastBottomToolUse = saved; _lastStack = savedStack; }
   }
 
   // (Queued prompts are now rendered INLINE in the transcript by the server —
@@ -11771,17 +11884,32 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       memoMark(false);
       memoModal.classList.add("show");            // and show it, so "saved" is something you SEE
     };
-    const items = [
-      ["Clear", () => { inputEl.value = ""; inputEl.style.height = "auto"; inputEl.dispatchEvent(new Event("input")); inputEl.focus(); }],
-      ["Copy", () => _copyText(inputEl.value)],
-      ["set task desc", setBox("task")],
-      ["set task constrain", setBox("notes")],
-      ["View ASR", showAsrRaw],
+    // Three rows, not five: the two `set task` items said "set task" twice and the two
+    // one-word ones had a line each. Grouped by what they act on — the task, the ASR
+    // debug view, the box itself — with the shared word said once as the row's label.
+    const rows = [
+      ["set task:", [["desc", setBox("task")], ["constrain", setBox("notes")]]],
+      ["", [["view asr", showAsrRaw]]],
+      ["", [["copy", () => _copyText(inputEl.value)],
+            ["clear", () => { inputEl.value = ""; inputEl.style.height = "auto"; inputEl.dispatchEvent(new Event("input")); inputEl.focus(); }]]],
     ];
-    for (const [label, fn] of items) {
-      const b = document.createElement("button"); b.className = "send-menu-item"; b.textContent = label;
-      b.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); fn(); });
-      m.appendChild(b);
+    for (const [lead, items] of rows) {
+      const row = document.createElement("div"); row.className = "send-menu-row";
+      if (lead) {
+        const l = document.createElement("span"); l.className = "send-menu-lead"; l.textContent = lead;
+        row.appendChild(l);
+      }
+      items.forEach(([label, fn], i) => {
+        if (i) {
+          const sep = document.createElement("span");
+          sep.className = "send-menu-sep"; sep.textContent = "|";
+          row.appendChild(sep);
+        }
+        const b = document.createElement("button"); b.className = "send-menu-item"; b.textContent = label;
+        b.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); fn(); });
+        row.appendChild(b);
+      });
+      m.appendChild(row);
     }
     (sendBtn.closest(".input-row") || document.body).appendChild(m);   // absolute child → tracks send btn (keyboard-safe)
     setTimeout(() => document.addEventListener("click", function onDoc(ev) {
@@ -13118,11 +13246,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 
   async function uploadFiles(fileList, anyType) {
     let files = Array.from(fileList);
-    if (!anyType) files = files.filter(f => f.type && f.type.startsWith("image/"));
     if (!files.length) return;
+    // iOS shows 「选取文件」in its sheet even when the input says accept="image/*", so a
+    // plain tap can come back with a PDF. This used to filter those out silently — the
+    // option was offered, the pick succeeded, and nothing happened at all. Non-images
+    // are allowed either way (the server takes them under allow_any); what the
+    // long-press menu actually buys you is a picker that does not HIDE them. So: if
+    // something non-image arrives, treat the whole batch by the any-file rules.
+    const anyMode = !!anyType || files.some(f => !(f.type || "").startsWith("image/"));
     // Size gate CLIENT-SIDE, BEFORE reading any bytes → an oversized file never
     // hits the wire (no wasted traffic). >10MB rejected; 5–10MB asks first.
-    if (anyType) {
+    if (anyMode) {
       const MB = 1024 * 1024, kept = [];
       for (const f of files) {
         const mb = (f.size / MB).toFixed(1);
@@ -13133,10 +13267,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       files = kept;
       if (!files.length) return;
     }
-    const noun = anyType ? "file" : "image";
+    const noun = anyMode ? "file" : "image";
     showLoading("Uploading " + files.length + " " + noun + (files.length > 1 ? "s" : "") + "…");
     const previews = [];
-    const payload = { files: [], allow_any: !!anyType };
+    const payload = { files: [], allow_any: anyMode };
     for (const f of files) {
       const dataUrl = await fileToDataUrl(f);
       const i = dataUrl.indexOf(",");

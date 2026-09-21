@@ -777,6 +777,53 @@ def main():
         check("at phone width nothing is clipped", narrow["bad"] == [], str(narrow["bad"]))
         check("...and no row breaks into two", narrow["stacked"] == [], str(narrow["stacked"]))
 
+        print("=== long-press ➤ : three rows, and they fit ===")
+        # Five one-per-line items became three rows: "set task" was written twice and the
+        # single-word ones had a line each. Driven by opening the real menu — the rows are
+        # built in JS, so reading the source would only prove the source.
+        menu = drv.js("""
+          const btn = document.getElementById('send');
+          btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+          return 1;
+        """)
+        time.sleep(0.7)                       # the long-press timer is 500ms
+        sm = drv.js("""
+          const m = document.getElementById('send-menu');
+          if (!m) return { missing: true };
+          const rows = [...m.querySelectorAll('.send-menu-row')].map(r => ({
+            lead: (r.querySelector('.send-menu-lead') || {}).textContent || '',
+            items: [...r.querySelectorAll('.send-menu-item')].map(b => b.textContent),
+            seps: r.querySelectorAll('.send-menu-sep').length,
+            tops: new Set([...r.querySelectorAll('.send-menu-item')]
+                          .map(b => Math.round(b.getBoundingClientRect().top))).size,
+          }));
+          const r = m.getBoundingClientRect();
+          const over = [...m.querySelectorAll('.send-menu-item')]
+            .filter(b => b.scrollWidth > b.clientWidth + 1).map(b => b.textContent);
+          const small = [...m.querySelectorAll('.send-menu-item')]
+            .filter(b => b.getBoundingClientRect().height < 30).map(b => b.textContent);
+          m.remove();
+          return { rows, w: Math.round(r.width), vw: window.innerWidth, over, small };
+        """)
+        if sm.get("missing"):
+            check("SKIP: the long-press menu did not open here", True)
+        else:
+            check("three rows", len(sm["rows"]) == 3, str(sm["rows"]))
+            check("...set task says its noun once, then the two of them",
+                  sm["rows"][0]["lead"] == "set task:"
+                  and sm["rows"][0]["items"] == ["desc", "constrain"]
+                  and sm["rows"][0]["seps"] == 1, str(sm["rows"][0]))
+            check("...view asr on its own", sm["rows"][1]["items"] == ["view asr"], str(sm["rows"][1]))
+            check("...copy and clear together", sm["rows"][2]["items"] == ["copy", "clear"],
+                  str(sm["rows"][2]))
+            # Rows, not columns: if a row wrapped, the grouping has bought nothing.
+            check("...each row really is one line",
+                  all(r["tops"] == 1 for r in sm["rows"]), str([r["tops"] for r in sm["rows"]]))
+            check("...no label is clipped", sm["over"] == [], str(sm["over"]))
+            # It is a phone menu: a 14px row you can miss is worse than a taller one.
+            check("...and every item stays a real tap target", sm["small"] == [], str(sm["small"]))
+            check("...the menu still fits the screen", sm["w"] < sm["vw"], f'{sm["w"]}/{sm["vw"]}')
+
         print("=== find-in-page: a thin bar over what is loaded ===")
         # A phone installed as a web app has no find-in-page. This is one, and it
         # filters the LOADED transcript — not a server search (there was one for about

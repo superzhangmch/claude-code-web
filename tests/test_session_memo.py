@@ -411,7 +411,11 @@ def main():
     print("=== the composer can fill the boxes (long-press on send) ===")
     menu = re.search(r"const setBox = \(field\) => async \(\) => \{.*?\n    \};", src, re.S)
     mb = menu.group(0) if menu else ""
-    check("both items exist", '"set task desc"' in src and '"set task constrain"' in src)
+    # One row now — "set task:" said once, then the two of them — so the labels are the
+    # nouns alone. What matters is that both still reach setBox with their own field.
+    check("both items exist, on the one row",
+          '["set task:", [["desc", setBox("task")], ["constrain", setBox("notes")]]]' in src,
+          "the send-menu row for set task")
     # One field per request: the other box may not even be loaded in this view, and
     # posting both would write whatever stale value happens to be in the DOM.
     # Names ONE field: the other box may not even be loaded in this view, so sending

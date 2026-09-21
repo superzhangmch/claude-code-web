@@ -178,7 +178,11 @@ async function authedFetch(url, opts) {
 }
 const location = { protocol: "https:", host: "h:8443" };
 const sockets = [];
-class WebSocket { constructor(u) { this.url = u; this.readyState = 0; sockets.push(this); } send() {} close() { this.readyState = 3; } }
+class WebSocket {
+  constructor(u) { this.url = u; this.readyState = 0; this.sent = []; sockets.push(this); }
+  send(d) { this.sent.push(d); }        // counted: "nothing goes out while paused" is the claim
+  close() { this.readyState = 3; }
+}
 const recorders = [];
 class MediaRecorder {
   constructor(stream) { this.stream = stream; this.state = "inactive"; this.mimeType = "audio/webm";
@@ -365,6 +369,47 @@ check("⏸ in realtime does NOT cut a segment (the stream is the transcriber)",
       (Voice.togglePause(), asrCalls() === 0 && recorders[0].pauses === 1));
 Voice.togglePause();
 check("...it pauses and resumes the one recorder", recorders.length === 1 && recorders[0].resumes === 1);
+
+console.log("=== paused / stopped: the mic stays open, the wire goes quiet ===");
+// The mic device is released late (teardown, after the provider drains) — accepted.
+// What must NOT happen is audio leaving the browser while paused or after the finish
+// button: capture drops the frame entirely rather than buffering it, so there is
+// nothing to flush later either.
+reset();
+Voice.start(mkStream(), false);
+const ws0 = sockets[0];
+ws0.readyState = 1; ws0.onopen && ws0.onopen();      // connected → frames go straight out
+feedAudio(3);
+const beforePause = ws0.sent.length;
+check("while recording, frames go to the server", beforePause >= 3, String(beforePause));
+Voice.togglePause();
+const atPause = ws0.sent.length;
+feedAudio(5);
+check("⏸ and nothing more is sent", ws0.sent.length === atPause,
+      atPause + " → " + ws0.sent.length);
+check("...and nothing is buffered for a later flush either",
+      Voice.s.pending.length === 0 && Voice.s.pendBytes === 0,
+      Voice.s.pending.length + "/" + Voice.s.pendBytes);
+// A reconnect while paused must not become a back door for the frames dropped above.
+Voice.flushPending(ws0);
+check("...so even an explicit flush has nothing to send", ws0.sent.length === atPause);
+Voice.togglePause();                                  // ▶
+feedAudio(2);
+check("▶ starts sending again", ws0.sent.length > atPause, atPause + " → " + ws0.sent.length);
+
+const afterResume = ws0.sent.length;
+Voice.stop("polish");                                 // the finish button
+const atStop = ws0.sent.length;                       // stop() flushes + sends its finish frame
+feedAudio(5);
+check("after Polish, audio frames stop at once", ws0.sent.length === atStop,
+      atStop + " → " + ws0.sent.length);
+check("...the capture callback is detached, not just ignored",
+      Voice.s.sp.onaudioprocess === null);
+check("...and the local recorder is closed", recorders[recorders.length - 1].state === "inactive");
+check("...while the mic itself is still open until the transcription ends (accepted)",
+      Voice.s.stream.getTracks()[0].stopped !== true);
+check("...the only thing sent at the tap was the finish marker",
+      atStop - afterResume <= 1, String(atStop - afterResume));
 
 console.log("=== realtime that never connects, stopped by hand → batch, at once ===");
 asrQueue = ["recovered from the local clip"];
