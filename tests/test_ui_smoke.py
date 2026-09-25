@@ -182,7 +182,12 @@ class Driver:
             self.wd + path, method=method,
             data=(json.dumps(body).encode() if body is not None else None),
             headers={"content-type": "application/json"})
-        return json.loads(urllib.request.urlopen(req, timeout=120).read().decode())
+        try:
+            return json.loads(urllib.request.urlopen(req, timeout=120).read().decode())
+        except urllib.error.HTTPError as e:
+            # A JS error comes back as a 500 with the message in the body; printing the
+            # status alone turned every typo in a probe into a five-minute hunt.
+            raise RuntimeError("webdriver " + str(e.code) + ": " + e.read().decode()[:400]) from None
 
     def js(self, script):
         return self.call("POST", f"/session/{self.sid}/execute/sync",
@@ -400,6 +405,125 @@ def main():
                 i.focus();
                 return (document.activeElement || {}).id;
               """) == "input")
+        print("=== the control pages open OVER the session, not instead of it ===")
+        # Going to /remote/ unloaded this view: coming back re-fetched the transcript and
+        # lost the place you were reading. Driven through the real links, because the
+        # whole change is what a left-click does.
+        ctrl = drv.js("""
+          const modal = document.getElementById('ctrl-modal');
+          const frame = document.getElementById('ctrl-frame');
+          const a = document.getElementById('mm-ctrl-desk');
+          const transcriptBefore = !!document.getElementById('transcript');
+          a.click();
+          const opened = { show: modal.classList.contains('show'), src: frame.getAttribute('src'),
+                           state: (history.state || {}).ccCtrl,
+                           // the session view must still be there, untouched, behind it
+                           transcript: !!document.getElementById('transcript') && transcriptBefore,
+                           openA: document.getElementById('ctrl-open').getAttribute('href'),
+                           target: document.getElementById('ctrl-open').getAttribute('target'),
+                           // 100% of the viewport, nothing subtracted: no title bar, no
+                           // padding ring, no border. The float sits ON it.
+                           frame: (() => { const r = frame.getBoundingClientRect();
+                             return [Math.round(r.left), Math.round(r.top),
+                                     Math.round(r.width), Math.round(r.height)]; })(),
+                           viewport: [window.innerWidth, window.innerHeight],
+                           floatOver: (() => {
+                             const f = document.querySelector('.ctrl-float').getBoundingClientRect();
+                             const r = frame.getBoundingClientRect();
+                             return f.right <= r.right + 1 && f.bottom <= r.bottom + 1
+                                 && f.top > r.top + r.height / 2; })(),
+                           noBar: !document.getElementById('ctrl-title') };
+          document.getElementById('ctrl-close').click();
+          const closed = { show: modal.classList.contains('show'), src: frame.getAttribute('src'),
+                           transcript: !!document.getElementById('transcript') };
+          return { opened, closed };
+        """)
+        o, c = ctrl["opened"], ctrl["closed"]
+        check("a left-click opens the overlay instead of navigating",
+              o["show"] is True and o["src"].startswith("/remote_pc/"), str(o))
+        check("...telling the page it is embedded, so it hides its own ←",
+              "embed=1" in (o["src"] or ""), str(o["src"]))
+        check("...with the session view still loaded behind it", o["transcript"] is True)
+        check("...and a history entry, so back / edge-swipe closes it",
+              o["state"] == 1, str(o["state"]))
+        check("...plus a way to get the full page in a tab anyway",
+              o["openA"] == "/remote_pc/" and o["target"] == "_blank", str(o))
+        # "full screen" = all of the USABLE viewport. A title bar across the top cost a
+        # row of the thing you opened it to look at; `inset: 0` went one step too far the
+        # other way and put the control page's header under the iPhone's status bar,
+        # clock on top of the buttons, untappable. (This browser reports no insets, so
+        # here the two coincide — the insets themselves are checked below.)
+        check("the frame fills the viewport exactly",
+              o["frame"] == [0, 0, o["viewport"][0], o["viewport"][1]],
+              f'{o["frame"]} vs viewport {o["viewport"]}')
+        _cf = src_index[src_index.index(".ctrl-modal #ctrl-frame {"):]
+        _cf = _cf[:_cf.index("\n}")]
+        check("...minus the safe areas, so nothing sits under the status bar",
+              all(f"env(safe-area-inset-{k}" in _cf for k in ("top", "right", "bottom", "left")),
+              _cf[:160])
+        check("...with no chrome of its own, only ✕ / ↗ floating over the corner",
+              o["noBar"] is True and o["floatOver"] is True, str(o))
+        # And the browser's OWN chrome stays. "Full screen" here means all of the
+        # viewport; the OS kind (requestFullscreen) throws the window out of the browser,
+        # hiding the tabs and the address bar — it was tried, and it is not what a tap
+        # should do.
+        # Matched on the CALL, not on the word: the comment above the open() explains why
+        # requestFullscreen is not used, and a check that trips over its own rationale is
+        # a check that gets deleted rather than kept.
+        check("...and it does not go OS-fullscreen",
+              ".requestFullscreen &&" not in src_index
+              and "document.exitFullscreen()" not in src_index)
+        check("✕ closes it and the session is right there",
+              c["show"] is False and c["transcript"] is True, str(c))
+        # Hidden-but-alive would keep polling screenshots of the mac for as long as this
+        # tab lives, which is the sort of thing you only find out from a data bill.
+        check("...and the frame is torn down, not just hidden",
+              c["src"] == "about:blank", str(c["src"]))
+        esc = drv.js("""
+          document.getElementById('mm-ctrl-phone').click();
+          const on = document.getElementById('ctrl-modal').classList.contains('show');
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          return [on, document.getElementById('ctrl-modal').classList.contains('show'),
+                  document.getElementById('ctrl-frame').getAttribute('src')];
+        """)
+        check("Esc closes it too", esc[0] is True and esc[1] is False and esc[2] == "about:blank",
+              str(esc))
+
+        print("=== the tail window's three keys sit under the output, not over it ===")
+        # The box is small and the line you are watching is the LAST one. A control strip
+        # that covered it, or that pushed the box past the composer, would be worse than
+        # no strip. (What the keys send is driven in test_tail_keys.py.)
+        tk = drv.js("""
+          const box = document.getElementById('tail-box');
+          const pre = document.getElementById('tail-pre');
+          const was = box.style.display;
+          box.style.display = 'block';
+          pre.textContent = Array.from({length: 9}, (_, i) => 'line ' + i + ' of live output').join('\\n');
+          const keys = document.getElementById('tail-keys');
+          const R = (e) => e.getBoundingClientRect();
+          const br = R(box), pr = R(pre), kr = R(keys);
+          const bs = [...keys.querySelectorAll('button')];
+          const r = {
+            labels: bs.map(b => b.textContent.trim()),
+            inside: kr.top >= br.top - 1 && kr.bottom <= br.bottom + 1,
+            belowText: kr.top >= pr.bottom - 1,
+            rightAligned: br.right - kr.right < 14,
+            tall: Math.min(...bs.map(b => Math.round(R(b).height))),
+            fitsViewport: br.bottom <= window.innerHeight + 1,
+            titled: bs.every(b => (b.title || "").length > 3),
+          };
+          box.style.display = was; pre.textContent = '';
+          return r;
+        """)
+        check("Esc / ↑ / clear-line are all there",
+              tk["labels"] == ["Esc", "↑", "⌫ line"], str(tk["labels"]))
+        check("...inside the box and below the output",
+              tk["inside"] is True and tk["belowText"] is True, str(tk))
+        check("...right-aligned, and the box still fits above the composer",
+              tk["rightAligned"] is True and tk["fitsViewport"] is True, str(tk))
+        check("...each a real tap target, each saying what it does",
+              tk["tall"] >= 24 and tk["titled"] is True, f'{tk["tall"]}px')
+
         # Measured while chasing the focus: clearing the page selection does NOT blur a
         # focused textarea (afterFocus=input → afterRemoveRanges=input). The BODY reading
         # that started the hunt came from this view's hidden footer, not from the order
@@ -667,8 +791,21 @@ def main():
         # Everything that acts on the session itself goes LAST — the menu hangs from the
         # ⚙ at the top of the screen, so on a phone its bottom is what a thumb reaches.
         check("...the session's own controls last, where a thumb lands",
-              grp["groups"][2] == ["tree", "[mm-search mm-exit-close]", "task"],
+              grp["groups"][2] == ["tree", "ctrl", "[mm-search mm-star mm-exit-close]", "task"],
               str(grp["groups"][2]))
+        # The header's 🖥 is picker-only, so from inside a session this was the missing
+        # door. Links, not buttons — long-press / middle-click should behave.
+        ctrl = drv.js("""
+          const m = document.getElementById('mode-menu');
+          const prev = m.style.display; m.style.display = 'block';
+          const as = [...m.querySelectorAll('a.sw-item')].map(a => [a.id, a.getAttribute('href'),
+                                                                    getComputedStyle(a).textDecorationLine]);
+          m.style.display = prev;
+          return as;
+        """)
+        check("...ctrl offers both pages, as real links",
+              ctrl == [["mm-ctrl-phone", "/remote/", "none"],
+                       ["mm-ctrl-desk", "/remote_pc/", "none"]], str(ctrl))
         # Not one setting per row: one row carries font size, theme AND latex, because
         # none of them needs a line to itself. The latex button says its own state, which is
         # what let it leave its label behind.
@@ -695,7 +832,7 @@ def main():
         check("a bar separates the two settings sharing a row",
               sorted(bars["shape"]) == sorted(["brief medium all | mm-live",
                                                "mm-fontdown mm-fontup mm-theme | mm-latex",
-                                               "mm-search | mm-exit-close"]), str(bars["shape"]))
+                                               "mm-search mm-star | mm-exit-close"]), str(bars["shape"]))
         check("...and it is actually visible", bars["vis"] is True)
         live = drv.js("""
           const b = document.getElementById('mm-live');
@@ -744,8 +881,10 @@ def main():
         # Two self-naming buttons share a row, so neither needs a label. exit is at the
         # RIGHT end, behind the bar: it is the only irreversible thing in this menu, so it
         # must not be what a thumb meets on its way to find.
-        check("...find and the way out on one row, exit at the right end",
-              grp["groups"][2][1] == "[mm-search mm-exit-close]", str(grp["groups"][2]))
+        # find and ★ are both "get me to something in this session"; exit stays behind
+        # the bar, at the right end.
+        check("...find and ★ share the row, with the way out behind the bar",
+              grp["groups"][2][2] == "[mm-search mm-star mm-exit-close]", str(grp["groups"][2]))
         _x = src_index.index('getElementById("mm-exit-close")')
         check("...with exit still asking first",
               "if (!confirm(q)) return false;" in src_index
@@ -823,6 +962,139 @@ def main():
             # It is a phone menu: a 14px row you can miss is worse than a taller one.
             check("...and every item stays a real tap target", sm["small"] == [], str(sm["small"]))
             check("...the menu still fits the screen", sm["w"] < sm["vw"], f'{sm["w"]}/{sm["vw"]}')
+
+        print("=== ★ : the list, the heart in ☰, and the jump ===")
+        # Why this exists (said plainly, because it decides the design): in a long chat
+        # several things surface at once and only one can be dealt with; the rest are
+        # forgotten. So a bookmark is a TO-DO, which is why the list reads oldest-first
+        # (the order they came up) and why un-starring is the way to close one.
+        bm = drv.js("""
+          // Two user messages, one of them starred. The star/heart both read the same
+          // map, so the two views cannot disagree.
+          const m = document.getElementById('main');
+          m.innerHTML = '';
+          for (const [uuid, txt] of [['uu-1', '第一个问题'], ['uu-2', '第二个问题']]) {
+            const d = document.createElement('div');
+            d.className = 'msg user'; d.dataset.uuid = uuid;
+            const md = document.createElement('div'); md.className = 'markdown';
+            md.textContent = txt; d.appendChild(md);
+            m.appendChild(d);
+          }
+          const r = {};
+          document.getElementById('jump-asks').click();         // ☰ — no bookmarks yet
+          const menu = document.getElementById('asks-menu');
+          r.heartsBefore = menu.querySelectorAll('.ask-heart').length;
+          r.rows = menu.querySelectorAll('.ask-row:not(.ask-more)').length;
+          r.open = menu.style.display;
+          return r;
+        """)
+        check("the ☰ list shows both requests", bm["rows"] == 2, str(bm))
+        check("...with no hearts until something is starred", bm["heartsBefore"] == 0, str(bm))
+        # The heart itself cannot be driven from here: bmMap lives inside the page's
+        # IIFE, so an injected script has no way to put a bookmark into it. What IS
+        # checkable is that both views read the SAME map — the property that keeps them
+        # from disagreeing — while the storage is covered against the real endpoint by
+        # tests/test_bookmarks.py.
+        _sa = src_index[src_index.index("function showAsksMenu()"):]
+        _sa = _sa[:_sa.index("\n  }")]
+        check("the \u2630 list hearts come from the same map as the \u2605 buttons",
+              "bmHas(n.dataset.uuid)" in _sa and 'h.textContent = "\u2665"' in _sa)
+        check("...and the \u2605 buttons read it too",
+              'btn.textContent = bmHas(b.uuid) ? "\u2605" : "\u2606"' in src_index)
+        # A bookmark is a to-do: un-starring closes one, so the list has to offer that
+        # without making you find the message first.
+        check("the list can un-star a row without going to the message",
+              'del.textContent = "\u2715"' in src_index
+              and "await bmToggle({ uuid: it.uuid }" in src_index)
+        # Addressed by uuid, never by _idx (window-relative — see cc_web.py).
+        check("the jump looks the message up by uuid",
+              "[data-uuid=" in src_index and "bmJump" in src_index)
+        # With nothing saved it still opens. A disabled button and a broken button look
+        # the same from the outside — and this one is how you find out where the ☆ is.
+        empty = drv.js("""
+          const m = document.getElementById('bm-modal');
+          m.classList.remove('show');
+          const b = document.getElementById('mm-star');
+          const wasDisabled = b.disabled;
+          b.click();
+          const r = { shown: m.classList.contains('show'), disabled: wasDisabled,
+                      label: b.textContent.trim(),
+                      says: (document.getElementById('bm-list').textContent || '').trim() };
+          m.classList.remove('show');
+          return r;
+        """)
+        check("★ opens even with nothing saved", empty["shown"] is True and empty["disabled"] is False,
+              str(empty))
+        check("...and the window says where to add one", "☆" in empty["says"], empty["says"][:60])
+        check("...the label is just the star when the count is zero",
+              empty["label"] == "★", empty["label"])
+
+        # It looked wrong on first try because .link-row's layout is scoped to
+        # #links-modal: borrowing the class names inherited none of it, and the window
+        # rendered as unaligned text with stray ✕ buttons in the middle of it. The fix is
+        # to SHARE the ☰ list's selector rather than write a lookalike — so this measures
+        # that a row in the ★ window and a row in the ☰ popup lay out identically.
+        same = drv.js("""
+          const m = document.getElementById('bm-modal');
+          m.classList.add('show');
+          const list = document.getElementById('bm-list');
+          list.innerHTML = '';
+          const row = document.createElement('div'); row.className = 'ask-row';
+          const n = document.createElement('span'); n.className = 'ask-n'; n.textContent = '09-22 10:11';
+          const t = document.createElement('span'); t.className = 'ask-t';
+          t.textContent = '很长很长的一条请求'.repeat(20);
+          const x = document.createElement('button'); x.className = 'bm-x'; x.textContent = '✕';
+          row.appendChild(n); row.appendChild(t); row.appendChild(x);
+          list.appendChild(row);
+          const cs = getComputedStyle(row), ts = getComputedStyle(t);
+          const hdr = m.querySelector('.modal-row');
+          const h3 = hdr.querySelector('h3'), close = hdr.querySelector('button');
+          // Compared against a REAL ☰ row rather than against numbers typed here: the
+          // claim is "the same as the others", so the other one is the reference.
+          const am = document.getElementById('asks-menu');
+          const prevAm = am.style.display; am.style.display = 'block';
+          am.innerHTML = '';
+          const ref = document.createElement('div'); ref.className = 'ask-row';
+          const rn = document.createElement('span'); rn.className = 'ask-n'; rn.textContent = '#1';
+          const rt = document.createElement('span'); rt.className = 'ask-t'; rt.textContent = 'x'.repeat(200);
+          ref.appendChild(rn); ref.appendChild(rt); am.appendChild(ref);
+          const rs = getComputedStyle(ref);
+          const shape = (e) => { const c = getComputedStyle(e);
+            return [c.display, c.alignItems, c.gap, c.padding, c.borderTopLeftRadius, c.fontSize].join('|'); };
+          const r = {
+            mine: shape(row), ref: shape(ref),
+            rowH: Math.round(row.getBoundingClientRect().height),
+            refH: Math.round(ref.getBoundingClientRect().height),
+            clipped: ts.whiteSpace + '/' + ts.overflow,
+            wide: t.getBoundingClientRect().width > n.getBoundingClientRect().width * 2,
+            // Centres, not tops: the row centres its children, so a 15px title and a
+            // shorter button are level while their tops differ by design. And the row
+            // must be no taller than its tallest child, or they are stacked.
+            headLevel: Math.abs((h3.getBoundingClientRect().top + h3.getBoundingClientRect().bottom) / 2
+                              - (close.getBoundingClientRect().top + close.getBoundingClientRect().bottom) / 2) <= 1,
+            headStacked: Math.round(hdr.getBoundingClientRect().height)
+                       > Math.round(Math.max(h3.getBoundingClientRect().height,
+                                             close.getBoundingClientRect().height)) + 1,
+            xRight: close.getBoundingClientRect().left > h3.getBoundingClientRect().left,
+            xLast: x.getBoundingClientRect().left > t.getBoundingClientRect().left,
+          };
+          am.innerHTML = ''; am.style.display = prevAm;
+          m.classList.remove('show'); list.innerHTML = '';
+          return r;
+        """)
+        check("a ★ row lays out exactly like a ☰ row",
+              same["mine"] == same["ref"], f'{same["mine"]} vs {same["ref"]}')
+        check("...one line tall, the same as that row",
+              same["rowH"] == same["refH"] and same["xLast"] is True,
+              f'{same["rowH"]} vs {same["refH"]}')
+        check("...the text is clipped, not wrapped (a bookmark can be a paragraph)",
+              same["clipped"] == "nowrap/hidden" and same["wide"] is True, str(same))
+        check("...and the title and its ✕ share one line, ✕ on the right",
+              same["headLevel"] is True and same["headStacked"] is False
+              and same["xRight"] is True, str(same))
+        check("...and pages back, bounded and narrated, when it is not loaded",
+              "BM_PAGES" in src_index and "await loadEarlierRounds(8)" in src_index
+              and "\u5f80\u524d\u627e\u6536\u85cf\u7684\u90a3\u4e00\u6761" in src_index)
 
         print("=== find-in-page: a thin bar over what is loaded ===")
         # A phone installed as a web app has no find-in-page. This is one, and it
@@ -1456,8 +1728,134 @@ def main():
         check("both entry points share one recording path",
               src_index.count("async function micTap") == 1
               and src_index.count("micTap();") == 2, "micTap")
-        check("...and the composer's path is unchanged (target null)",
-              'micBtn.addEventListener("click", () => { voiceTarget = null; micTap(); });' in src_index)
+        # The composer aims at the caret now too, and marks it — the bar covers the
+        # composer while you talk, so "where will this land" needs to be visible there
+        # as well. `pick: false` is what keeps the rest of the composer as it was: it
+        # still writes as you speak and still has Polish / Edit / Send.
+        _mb = src_index[src_index.index('micBtn.addEventListener("click"'):][:420]
+        check("...and the composer aims at the caret, with the same marker",
+              'voiceTarget = { el: inputEl, pick: false, after: "" }' in _mb
+              and "vtMarkIn();" in _mb, _mb[:120])
+        # A second tap means stop. Dropping another marker (and a fresh target) into a
+        # running session would be the opposite of that.
+        check("...but only when starting one, not when stopping it",
+              "if (!_recording && !_micArming)" in _mb)
+
+        print("=== the composer: one row while the text fits, stacked when it does not ===")
+        # 🎤 and 📎 shared one 44px cell, stacked vertically — so the mic was ~20px tall,
+        # the hardest button in the app to hit, and a growing box squeezed it further.
+        # Now: 📎 left · text · 🎤 ➤ right, each the full height of the row, and past one
+        # line the row wraps (box across the top, buttons underneath). Measured, because
+        # every claim here is a claim about geometry.
+        lay = drv.js("""
+          const row = document.querySelector('footer .input-row');
+          const ta = document.getElementById('input');
+          const clip = document.getElementById('upload-btn');
+          const mic = document.getElementById('mic-btn');
+          const send = document.getElementById('send');
+          const R = (e) => e.getBoundingClientRect();
+          const mid = (e) => { const r = R(e); return (r.top + r.bottom) / 2; };
+          const set = (v) => { ta.value = v; ta.dispatchEvent(new Event('input')); };
+          // No ASR is configured against the stub, so the mic hides itself — and a
+          // display:none button measures 0×0 and would make every claim below vacuous.
+          const micWas = mic.style.display; mic.style.display = '';
+          const shot = () => ({
+            stacked: row.classList.contains('stack'),
+            rowH: Math.round(R(row).height), taH: Math.round(R(ta).height),
+            micH: Math.round(R(mic).height), sendH: Math.round(R(send).height),
+            clipH: Math.round(R(clip).height),
+            clipW: Math.round(R(clip).width), micW: Math.round(R(mic).width),
+            // one row = everything level; stacked = buttons BELOW the box
+            level: Math.abs(mid(clip) - mid(ta)) <= 1 && Math.abs(mid(mic) - mid(ta)) <= 1,
+            below: R(mic).top >= R(ta).bottom - 1 && R(clip).top >= R(ta).bottom - 1,
+            clipLeft: R(clip).right <= R(ta).left + 1 || R(clip).left < R(mic).left,
+            micBeforeSend: R(mic).right <= R(send).left + 1,
+            taWide: R(ta).width / R(row).width,
+          });
+          const before = ta.value;
+          set('');            const empty = shot();
+          set('短');          const one = shot();
+          set('很长的一行文字'.repeat(14));   const many = shot();
+          set('a\\nb\\nc');   const nl = shot();
+          set('短');          const back = shot();
+          set(before); ta.dispatchEvent(new Event('input'));
+          mic.style.display = micWas;
+          return { empty, one, many, nl, back, micHidden: micWas === 'none' };
+        """)
+        one, many = lay["one"], lay["many"]
+        check("an empty box is one row", lay["empty"]["stacked"] is False, str(lay["empty"]))
+        check("...and so is a short line, with everything on it",
+              one["stacked"] is False and one["level"] is True, str(one))
+        check("...📎 on the left, 🎤 then ➤ on the right",
+              one["clipLeft"] is True and one["micBeforeSend"] is True, str(one))
+        # The complaint, in numbers: half of a 44px cell. A tap target wants ~36px+, and
+        # the mic is now exactly as tall as the box it sits beside.
+        check("...and the two buttons you press every turn are the full height",
+              one["micH"] >= 36 and one["micH"] == one["taH"] and one["sendH"] == one["taH"],
+              f'mic={one["micH"]} send={one["sendH"]} box={one["taH"]}')
+        # 📎 is the exception, and asked for: a thin strip, narrow but as TALL as the mic.
+        # It gives width back to the text without giving up the height that makes it
+        # hittable — half-height was tried first and was wrong.
+        check("...and 📎 is narrow but just as tall as the mic",
+              one["clipH"] == one["micH"] and one["clipW"] <= one["micW"] * 0.65,
+              f'clip={one["clipW"]}×{one["clipH"]} vs mic={one["micW"]}×{one["micH"]}')
+        check("...including on the stacked button row",
+              lay["many"]["clipH"] == lay["many"]["micH"]
+              and lay["many"]["clipW"] <= lay["many"]["micW"] * 0.65,
+              f'clip={lay["many"]["clipW"]}×{lay["many"]["clipH"]} '
+              f'vs mic={lay["many"]["micW"]}×{lay["many"]["micH"]}')
+        check("text past one line stacks the row", many["stacked"] is True, str(many))
+        check("...with the box across the full width",
+              many["taWide"] > 0.9, f'{many["taWide"]:.2f} of the row')
+        check("...and the buttons on their own row under it, not squeezed beside it",
+              many["below"] is True and many["micH"] >= 36, str(many))
+        check("...📎 still left, 🎤 ➤ still right",
+              many["clipLeft"] is True and many["micBeforeSend"] is True, str(many))
+        check("a typed newline stacks it too", lay["nl"]["stacked"] is True, str(lay["nl"]))
+        # The live transcript is a row INSIDE the bar, and the bar is absolute over the
+        # composer row. Pinning it to 38px in the stacked layout outranked
+        # .rec-live-on's own `height: auto` — the words you were dictating disappeared
+        # and what overflowed landed on top of the status line.
+        live = drv.js("""
+          const row = document.querySelector('footer .input-row');
+          const ta = document.getElementById('input'), before = ta.value;
+          ta.value = '很长的一句话'.repeat(20); ta.dispatchEvent(new Event('input'));
+          const bar = document.getElementById('rec-bar');
+          const liveEl = document.getElementById('rec-live');
+          bar.style.display = 'flex'; bar.classList.add('rec-live-on');
+          const prevLive = liveEl.style.display;
+          liveEl.style.display = ''; liveEl.textContent = '实时识别出来的一段文字'.repeat(8);
+          const br = bar.getBoundingClientRect(), lr = liveEl.getBoundingClientRect();
+          const rr = row.getBoundingClientRect();
+          const r = { stacked: row.classList.contains('stack'),
+                      barH: Math.round(br.height), liveH: Math.round(lr.height),
+                      inside: lr.bottom <= br.bottom + 1 && lr.top >= br.top - 1,
+                      insideRow: br.bottom <= rr.bottom + 1,
+                      liveVisible: lr.height > 10 && getComputedStyle(liveEl).display !== 'none' };
+          liveEl.textContent = ''; liveEl.style.display = prevLive;
+          bar.classList.remove('rec-live-on'); bar.style.display = 'none';
+          ta.value = before; ta.dispatchEvent(new Event('input'));
+          return r;
+        """)
+        check("the live transcript still fits inside the bar when the row is stacked",
+              live["inside"] is True and live["liveVisible"] is True, str(live))
+        check("...so the bar grows past one button row to hold it",
+              live["barH"] > 40 and live["barH"] >= live["liveH"], str(live))
+        check("...without spilling past the composer onto the status line",
+              live["insideRow"] is True, str(live))
+        # The one that bites: the stacked box is WIDER, so text that needed two lines
+        # beside the buttons can fit on one across the full width — decide from the
+        # current geometry and the layout flips on every keystroke. fitInput() always
+        # measures at the one-row width, so going back down is the exact inverse.
+        check("...and deleting it goes back to one row (no flip-flop)",
+              lay["back"]["stacked"] is False and lay["back"]["level"] is True, str(lay["back"]))
+        check("...through one shared fit, so a programmatic edit resizes the same way",
+              src_index.count("function fitInput()") == 1
+              and 'inputEl.addEventListener("input", fitInput)' in src_index)
+        # After a send the box is emptied directly (no input event) — miss that and the
+        # row keeps the shape the long message gave it.
+        check("...and a send un-stacks the row it grew into",
+              'inputEl.value = ""; fitInput();' in src_index)
         # The bar carries the timer, the wave and every button that ends a recording,
         # so it has to be where you are looking. Dictating into a Task box, that is a
         # full-screen window with the footer behind it — the bar was running, correctly,

@@ -130,7 +130,8 @@ let _recTimer = null;
 const inputEl = { value: "", focus() {}, dispatchEvent() {} };
 let _recStatusHtml = "", _recording = false, inputFromVoice = false, _voiceParkReason = "";
 let _batchResult = null, _polAbort = null, _polCtx = null, _polSuperseded = false;
-let lastAsrRaw = "", lastPolished = "", lastAsrSec = null, lastPolishSec = null, lastAsrBefore = "";
+let lastAsrRaw = "", lastPolished = "", lastAsrSec = null, lastPolishSec = null,
+    lastAsrBefore = "", lastAsrAfter = "";
 // The dictation target. Null = the composer (unchanged); a textarea = insert at its
 // caret. Extracted from the page so the real slot/write logic is what runs here.
 let voiceTarget = null;
@@ -147,6 +148,7 @@ __JOIN__
 __PICK__
 __MEMOMODE__
 let asrRtEngine = "soniox", sonioxAvail = true, asrWhich = "whisper-big", attachedSid = "sid1", authToken = "t";
+let asrLang = "zh,en";   // the voice menu's language row; both call sites read it
 const isPhone = () => false;
 const micStates = [], parked = [], sent = [], fetches = [], spins = [];
 function _recLiveStatus(msg) { _recStatusHtml = "STATUS:" + msg; recLiveEl.innerHTML = _recStatusHtml; }
@@ -514,9 +516,12 @@ console.log("=== dictating into a Task box lands at the caret ===");
         ta.value === "把新的掉吧", JSON.stringify(ta.value));
 }
 {
-  // The composer is untouched by all of this: same appending behaviour as before.
-  voiceTarget = null;
+  // The composer inserts at the caret now, like the Task boxes. With the caret at the
+  // end — which is where typing and a restored draft both leave it — that is the same
+  // appending behaviour it always had, space included.
+  voiceTarget = { el: inputEl, pick: false, after: "" };
   inputEl.value = "已经写了半句";
+  inputEl.selectionStart = inputEl.selectionEnd = inputEl.value.length;
   const slots = vtSlots(inputEl);
   check("the composer still appends, with its space", slots.before === "已经写了半句 " && slots.after === "",
         JSON.stringify(slots));
@@ -526,6 +531,9 @@ console.log("=== dictating into a Task box lands at the caret ===");
   check("...and writes straight in, Chinese seam closed",
         inputEl.value === "已经写了半句接着说", JSON.stringify(inputEl.value));
   inputEl.value = "half a sentence";
+  // A real textarea moves the caret to the end when .value is assigned; this stub does
+  // not, so say it here rather than inherit the previous case's caret.
+  inputEl.selectionStart = inputEl.selectionEnd = inputEl.value.length;
   const en = vtSlots(inputEl);
   vtWrite(en.before, "and the rest");
   check("...while an English seam keeps its space",
@@ -749,14 +757,61 @@ check("✕ during the opening gap cleans the box up",
 check("...and hands the target back, so the next dictation is not aimed at this box",
       voiceTarget === null);
 
-console.log("=== the composer never gets one ===");
+console.log("=== the composer gets the marker too, and the caret ===");
+// Same insertion point as a Task box, for the same reason: the bar covers the composer
+// while you talk, so where the words will land has to be visible. What does NOT change
+// is the rest of the composer — it still writes as you speak, and still has Polish /
+// Edit / Send. Only the destination moved from "the end" to "the caret".
 reset();
+inputEl.value = "开头。结尾。";
+inputEl.selectionStart = inputEl.selectionEnd = 3;   // between the two
+voiceTarget = { el: inputEl, pick: false, after: "" };   // what the 🎤 button does
+vtMarkIn();
+check("a marker goes in at the caret", inputEl.value === "开头。[🎤]结尾。", JSON.stringify(inputEl.value));
+Voice.start(mkStream(), true); feedAudio(1);
+asrQueue = ["插在中间"];
+Voice.stop("send"); await tick(120);
+check("...the words replace it, in place", sent[0] === "开头。插在中间结尾。", sent.join("|"));
+check("...so the text after the caret survives", /结尾。$/.test(sent[0] || ""), sent.join("|"));
+
+reset();
+inputEl.value = "";
+voiceTarget = { el: inputEl, pick: false, after: "" };
+vtMarkIn();
 Voice.start(mkStream(), true); feedAudio(1);
 asrQueue = ["普通的一条消息"];
-check("no marker while dictating into the composer", !inputEl.value.includes("🎤"), inputEl.value);
 Voice.stop("send"); await tick(100);
-check("...and the message is what was sent, unchanged",
+check("an empty composer behaves exactly as before",
       sent.length === 1 && sent[0] === "普通的一条消息", sent.join("|"));
+
+reset();
+inputEl.value = "写了一半";
+inputEl.selectionStart = inputEl.selectionEnd = 4;
+voiceTarget = { el: inputEl, pick: false, after: "" };
+vtMarkIn();
+Voice.start(mkStream(), true); feedAudio(1);
+await _voiceCancel();
+check("✕ leaves the composer exactly as it was",
+      inputEl.value === "写了一半" && !inputEl.value.includes("🎤"), JSON.stringify(inputEl.value));
+
+console.log("=== ✕ means 'as it was', not 'before + nothing' ===");
+// `before` is not the original text: for the composer it carries the seam space the
+// dictated words were going to sit after, so rebuilding the box from it left a stray
+// space behind. Cancel remembers the actual value instead.
+{
+  reset();
+  inputEl.value = "写了一半";
+  inputEl.selectionStart = inputEl.selectionEnd = 4;      // caret at the end
+  voiceTarget = { el: inputEl, pick: false, after: "" };
+  vtMarkIn();
+  check("the marker sits after the seam space", inputEl.value === "写了一半 [🎤]",
+        JSON.stringify(inputEl.value));
+  Voice.start(mkStream(), true); feedAudio(1);
+  await _voiceCancel();
+  check("...and ✕ gives back the exact original", inputEl.value === "写了一半",
+        JSON.stringify(inputEl.value));
+  check("...with the target handed back too", voiceTarget === null);
+}
 
 console.log(_fails.length ? "\nFAILED: " + _fails.join(", ") : "\nall pass");
 process.exit(_fails.length ? 1 : 0);

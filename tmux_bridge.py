@@ -25,7 +25,8 @@ import shlex
 import subprocess
 from typing import Optional
 
-from iterm_bridge import (        # pure, iterm2-free helpers — reused as-is
+from iterm_bridge import (
+    trust_prompt_keys,        # pure, iterm2-free helpers — reused as-is
     ClaudeSessionRef,
     _is_claude_cmd,
     _resume_sid_from_cmd,
@@ -369,8 +370,14 @@ class TmuxBridge:
             if ("trust this folder" in low                       # claude
                     or "yes, i trust this folder" in low
                     or "do you trust the contents of this directory" in low):  # codex
-                # Option 1 is the default in both; "1" then Enter is explicit.
-                await self.send_text_to(pane, "1\r")
+                # Which keys, decided from THIS screen — imported from iterm_bridge, the
+                # same single-source-of-truth rule the pure helpers follow. The old
+                # "1\r" assumed option 1 was the yes; claude now puts "No, exit" first,
+                # so it was answering NO and killing the session it had just opened.
+                keys = trust_prompt_keys(screen)
+                if not keys:
+                    return False
+                await self.send_text_to(pane, keys)
                 await asyncio.sleep(1.2)
                 return True
             # Already past it: either agent's ready banner.

@@ -154,6 +154,44 @@ class ClaudeSessionRef:
     title: str = ""              # user-assigned label from ~/.claude/session_index.json
 
 
+def trust_prompt_keys(screen: str) -> str:
+    """The keystrokes that answer "do you trust this folder?" with YES — or "" when the
+    screen does not say enough to answer, which must mean *press nothing*.
+
+    Pressing blindly is what this exists to stop. Both bridges used to send `"1\r"` on
+    the belief that option 1 was "Yes, I trust this folder". claude now lists
+
+        ❯ No, exit
+          Yes, I trust this folder
+
+    so that keystroke answered NO, and claude exited — on every folder it had not been
+    trusted for. Found 2026-09-23 after a reboot: a resumed session died on this prompt,
+    its tab fell back to a shell, and the resume still reported "resumed".
+
+    Two prompt shapes, two ways in:
+      * a NUMBERED list ("1. Yes, proceed" — codex) → type the number of the yes line;
+      * a cursor list (claude's ❯) → walk the cursor to the yes line, then Enter.
+    Both locate the option by its TEXT, so neither breaks when the order changes again.
+    """
+    lines = [l.rstrip() for l in (screen or "").splitlines()]
+    low = [l.lower() for l in lines]
+    is_yes = lambda l: ("yes" in l and ("trust" in l or "proceed" in l))
+    yes = next((i for i, l in enumerate(low) if is_yes(l)), -1)
+    if yes < 0:
+        return ""
+    m = re.match(r"\s*\(?([1-9])[.)]", lines[yes])          # "1. Yes…" / "1) Yes…"
+    if m:
+        return m.group(1) + "\r"
+    cur = next((i for i, l in enumerate(lines)
+                if l.lstrip()[:1] in ("\u276f", "\u203a", ">")), -1)
+    if cur < 0:
+        return ""
+    step = yes - cur
+    if step == 0:
+        return "\r"
+    return ("\x1b[B" if step > 0 else "\x1b[A") * abs(step) + "\r"
+
+
 class ItermBridge:
     def __init__(self) -> None:
         self.connection: Optional[iterm2.Connection] = None
@@ -617,7 +655,7 @@ class ItermBridge:
                 return False
         return True
 
-    async def open_resume_claude_tab(self, cwd: str, session_id: str, label: str) -> Optional[str]:
+    async def open_resume_claude_tab(self, cwd: str, session_id: str, label: str) -> Optional[str]:   # noqa: E301
         """Open a new iTerm2 tab and run `claude --resume <session_id>` in it."""
         return await self._open_claude_tab(cwd, label, resume_id=session_id)
 
@@ -655,6 +693,17 @@ class ItermBridge:
             await session.async_set_name(label)
         except Exception:
             pass
+        # …and again as the TAB title, which is the one that lasts. The session name is
+        # exactly what claude's OSC title overwrites a minute later — `teams` became
+        # `✳ gen-teams`, `slide_eval` became `◑ slides_eval` — so after a resume the tab
+        # no longer answers to the name the snapshot saved it under, which is the only
+        # name you have to look for it by. async_set_title is a manual override (iTerm's
+        # "Edit Tab Title"); OSC cannot beat it, and it is the value list_all_tabs reads
+        # back, so the tab keeps the saved name everywhere it is shown.
+        try:
+            await asyncio.wait_for(tab.async_set_title(label), _RPC_TIMEOUT)
+        except Exception:
+            pass
         await asyncio.sleep(0.4)
         import shlex
         cd_part = f"cd {shlex.quote(cwd)} && " if cwd else ""
@@ -684,11 +733,14 @@ class ItermBridge:
             # - "1. yes, i trust this folder" is the active option
             if ("trust this folder" in low
                     or "yes, i trust this folder" in low):
-                # Send "1" to highlight option 1, then Enter to confirm.
-                # The dialog uses arrow keys + Enter, but option 1 is the
-                # default selection so a bare Enter would also work — we
-                # send "1\r" defensively to be explicit.
-                await self.send_text_to(iterm_session_id, "1\r")
+                # Which keys, decided from THIS screen (see trust_prompt_keys). The old
+                # hardcoded "1\r" answered "No, exit" once claude reordered the options.
+                keys = trust_prompt_keys(screen)
+                if not keys:
+                    log.warning("trust prompt is up but the yes option could not be "
+                                "located — pressing nothing, answer it by hand")
+                    return False
+                await self.send_text_to(iterm_session_id, keys)
                 # Brief grace for claude to process and continue past the
                 # dialog into the welcome banner.
                 await asyncio.sleep(1.5)

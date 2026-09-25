@@ -94,6 +94,21 @@ def resolve_display(target: str = "main") -> tuple[int, float, float, float, flo
     return did, float(b.origin.x), float(b.origin.y), float(b.size.width), float(b.size.height)
 
 
+def active_display_count() -> int:
+    """How many displays the Mac currently has.
+
+    The UI needs it because `resolve_display("external")` FALLS BACK to main when
+    nothing is plugged in — a kindness that reads as a bug from the other end: you pick
+    external, you get the main screen, and nothing says so. With the count, the client
+    can say "没有外接屏" instead of quietly showing the wrong one.
+    """
+    try:
+        err, ids, _ = Quartz.CGGetActiveDisplayList(8, None, None)
+        return len(ids or ()) or 1
+    except Exception:
+        return 1
+
+
 def logical_screen_size(target: str = "main") -> tuple[int, int]:
     _, _, _, w, h = resolve_display(target)
     return int(w), int(h)
@@ -347,6 +362,10 @@ def screenshot(q: int = 50, w: int = 1280, display: str = "main"):
             "X-Screen-W": str(int(dw)),
             "X-Screen-H": str(int(dh)),
             "X-Display-Id": str(did),
+            # So the client can tell "you are looking at the external screen" from
+            # "there is no external screen and this is main again".
+            "X-Display-Count": str(active_display_count()),
+            "X-Display-Is-Main": "1" if did == Quartz.CGMainDisplayID() else "0",
             "X-Display-Origin-X": str(int(ox)),
             "X-Display-Origin-Y": str(int(oy)),
             "Cache-Control": "no-store",

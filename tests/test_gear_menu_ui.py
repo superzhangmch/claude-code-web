@@ -45,12 +45,21 @@ function check(name, cond, detail) {
   if (!cond) _fails.push(name);
 }
 function mkEl(tag) {
-  const e = { tagName: tag, className: "", textContent: "", title: "", innerHTML: "",
+  const e = { tagName: tag, className: "", textContent: "", title: "",
               children: [], dataset: {}, style: {},
+              handlers: {},
               appendChild(c) { this.children.push(c); return c; },
-              addEventListener() {} };
+              addEventListener(ev, fn) { this.handlers[ev] = fn; },
+              click() { if (this.handlers.click) this.handlers.click({ stopPropagation() {} }); } };
   e.classList = { add(c) { e.className = (e.className + " " + c).trim(); },
                   toggle() {}, remove() {} };
+  // renderAsrMenu() starts with `sec.innerHTML = ""`. A plain property swallowed that,
+  // so a re-render APPENDED a second set of rows and every "after the click" reading
+  // was of the stale first set.
+  Object.defineProperty(e, "innerHTML", {
+    get() { return e._html || ""; },
+    set(v) { e._html = v; if (!v) e.children = []; },
+  });
   return e;
 }
 let SEC = null;
@@ -60,7 +69,9 @@ const document = {
 };
 const localStorage = { getItem: () => null, setItem: () => {} };
 let asrConfigs = [], asrWhich = "", asrRtAvail = false, realtimeEngines = [],
-    asrRtEngine = "", asrRt = false;
+    asrRtEngine = "", asrRt = false,
+    asrLangs = ["zh", "en", "zh+en"], asrLangDefault = "zh+en", asrLang = "zh+en",
+    asrPane = "model";
 
 __RENDER__
 __CLAMP__
@@ -86,8 +97,13 @@ asrConfigs = [{label: "a", display: "OpenAI 4o-mini"},
 realtimeEngines = [{id: "s", display: "Soniox"}, {id: "o", display: "OpenAI realtime"}];
 renderAsrMenu();
 let r = rows();
+// TWO rows, always: the mode row, and one row whose contents depend on it. A third row
+// for the languages was the obvious thing and the wrong one — rows are what runs out in
+// a menu you operate with a thumb, and the two-level shape was already here.
 check("exactly two rows, not one per option", r.length === 2, JSON.stringify(r.map(x => x[0])));
-check("the first is the mode", r[0][0] === "voice" && r[0][1].length === 2, JSON.stringify(r[0]));
+check("the first is the mode, plus a `lang` chip",
+      r[0][0] === "voice" && JSON.stringify(r[0][1]) === JSON.stringify(["⚡ live", "🎤 batch", "lang"]),
+      JSON.stringify(r[0]));
 check("the second is the model", r[1][0] === "model", JSON.stringify(r[1][0]));
 check("the shared vendor prefix is dropped",
       JSON.stringify(r[1][1]) === JSON.stringify(["4o-mini", "Whisper", "4o"]),
@@ -96,6 +112,60 @@ check("...and the full name survives in the tooltip",
       r[1][2][0] === "OpenAI 4o-mini", JSON.stringify(r[1][2]));
 check("no button carries a decorative mic any more (the row says voice)",
       !r[1][1].some(t => /🎤|🎧/.test(t)), JSON.stringify(r[1][1]));
+
+console.log("=== the lang chip swaps what the second row lists ===");
+{
+  reset(); asrPane = "lang"; renderAsrMenu();
+  const rr = rows();
+  check("still two rows", rr.length === 2, JSON.stringify(rr.map(x => x[0])));
+  // One button per option the CONF offers (asr_langs=zh|en|zh+en) — the page has no
+  // opinion about which languages exist.
+  check("the second one now lists the configured languages",
+        rr[1][0] === "lang" && JSON.stringify(rr[1][1]) === JSON.stringify(["zh", "en", "zh+en"]),
+        JSON.stringify(rr[1]));
+  check("...and the chip that got you there is marked",
+        rr[0][1][2] === "lang", JSON.stringify(rr[0][1]));
+  asrPane = "model";
+}
+
+console.log("=== the three chips are tabs: press one, see ITS options ===");
+{
+  // Pressed for real, through the rendered buttons — the claim is about what a finger
+  // does. Picking a mode used to leave the row on the language list: you pressed
+  // `⚡ live` and the engines did not come back.
+  const chips = () => rows() && SEC.children[0].children[1].children;
+  reset(); asrPane = "model"; asrRt = false; renderAsrMenu();
+  chips()[2].click();                                  // lang
+  check("lang → the languages", rows()[1][0] === "lang", JSON.stringify(rows()[1][0]));
+  chips()[0].click();                                  // ⚡ live
+  check("⚡ live → the streaming engines",
+        rows()[1][0] === "model"
+        && JSON.stringify(rows()[1][1]) === JSON.stringify(["Soniox", "OpenAI realtime"]),
+        JSON.stringify(rows()[1]));
+  chips()[2].click();                                  // lang again
+  chips()[1].click();                                  // 🎤 batch
+  check("🎤 batch → the batch engines",
+        rows()[1][0] === "model"
+        && JSON.stringify(rows()[1][1]) === JSON.stringify(["4o-mini", "Whisper", "4o"]),
+        JSON.stringify(rows()[1]));
+  check("...and pressing lang twice keeps you on the languages",
+        (chips()[2].click(), chips()[2].click(), rows()[1][0]) === "lang",
+        JSON.stringify(rows()[1][0]));
+  asrPane = "model"; asrRt = false;
+}
+
+console.log("=== no configured languages, no chip and no list ===");
+{
+  const keep = asrLangs;
+  reset(); asrLangs = []; renderAsrMenu();
+  const rr = rows();
+  check("the chip disappears rather than offering a guess",
+        JSON.stringify(rr[0][1]) === JSON.stringify(["⚡ live", "🎤 batch"]),
+        JSON.stringify(rr[0][1]));
+  check("...and nothing lists languages", !rr.some(x => x[0] === "lang"),
+        JSON.stringify(rr.map(x => x[0])));
+  asrLangs = keep;
+}
 
 console.log("=== realtime mode lists the streaming engines instead ===");
 reset(); asrRt = true; renderAsrMenu();

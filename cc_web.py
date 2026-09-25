@@ -132,6 +132,13 @@ def _load_conf() -> dict:
         "model": "claude-haiku-4-5",
         "cwds": [],
         "asr": [],     # list of {label, api_base, key, model} — voice-input ASR backends
+        # Which languages the voice menu offers, and which one it starts on. From the
+        # conf because the right list is a property of the machine's user, not of the
+        # code: `asr_langs=zh|en|zh+en` (one option per `|`, `+` inside an option means
+        # several languages at once) and `asr_lang=zh+en` for the default. No asr_langs
+        # line → no language row and no language sent, i.e. exactly the old behaviour.
+        "asr_langs": [],
+        "asr_lang": "",
         "claude_config": "",   # path to claude's .claude.json (per-project trust); default ~/.claude.json
         "icon": "",                # override the per-host tab icon: pro|air|linux|win
         # A few letters naming THIS machine. Predates this use — the bundled skills
@@ -171,6 +178,8 @@ def _load_conf() -> dict:
             if k == "cwd":
                 if v:
                     cfg["cwds"].append(v)
+            elif k == "asr_langs":
+                cfg["asr_langs"] = [p.strip() for p in v.split("|") if p.strip()]
             elif k == "asr":
                 # asr=<label>|<api_base>|<key>|<model>  (multiple lines = switchable)
                 parts = [p.strip() for p in v.split("|")]
@@ -683,13 +692,18 @@ def _pids_for_session(sid: str) -> list[int]:
     the file existing is not evidence the process does. Check.
 
     The start time from the store is used when present, so a recycled pid now belonging to
-    something unrelated can't be mistaken for the session either.
+    something unrelated can't be mistaken for the session either — but only in the one
+    direction that can actually happen (see _pid_is_session_owner).
+
+    A live `claude --resume <sid>` counts even if the store says nothing about it: the
+    store is claude's, written on claude's schedule, and being wrong here costs a second
+    claude on the same conversation.
     """
     out: list[tuple[float, int]] = []
     try:
         files = list(CLAUDE_SESSIONS_DIR.glob("*.json"))
     except OSError:
-        return []
+        files = []
     for f in files:
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
@@ -701,8 +715,7 @@ def _pids_for_session(sid: str) -> list[int]:
         pid = d["pid"]
         started = d.get("startedAt")
         if isinstance(started, (int, float)) and started > 0:
-            # startedAt is ms since epoch; _pid_alive_with_start wants seconds.
-            if not _pid_alive_with_start(pid, started / 1000.0, tolerance=5.0):
+            if not _pid_is_session_owner(pid, started / 1000.0):   # ms → s
                 continue
         else:
             try:
@@ -710,8 +723,72 @@ def _pids_for_session(sid: str) -> list[int]:
             except OSError:
                 continue
         out.append((d.get("updatedAt", 0) or 0, pid))
+    known = {pid for _, pid in out}
+    for pid in _argv_resume_pids().get(sid, ()):
+        if pid not in known:
+            out.append((0.0, pid))            # no updatedAt for it; sorts last
     out.sort(reverse=True)
     return [pid for _, pid in out]
+
+
+def _pid_is_session_owner(pid: int, record_start: float, tolerance: float = 5.0) -> bool:
+    """Is `pid` still the process that wrote a store record stamped `record_start`?
+
+    The test is ONE-SIDED, and that is the whole point. `startedAt` is when claude
+    initialised the session, not when the process started, and the two are far apart
+    whenever claude asked something first — "do you trust this folder?" held one session
+    49s on mac-pro (2026-09-23). A symmetric `abs(...) <= 5` read that as pid reuse, said
+    the session was dead, and resume opened a SECOND claude on the same conversation.
+
+    A process older than the record is the normal case. A recycled pid is always the other
+    way round: the record was written by whoever held the pid at that moment, so a pid that
+    started AFTER the record cannot be the same process.
+    """
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    actual = _pid_start_cached(pid)
+    if actual <= 0:
+        return False
+    return actual - record_start <= tolerance
+
+
+_ARGV_PIDS: dict = {"at": 0.0, "map": {}}
+
+
+def _argv_resume_pids(ttl: float = 2.0) -> dict[str, list[int]]:
+    """sid -> live pids whose command line is `claude --resume <sid>`.
+
+    Second opinion on "is this session running", from the process table rather than from
+    claude's store. Cached briefly because callers ask per session in a loop.
+    """
+    now = _time.monotonic()
+    if now - _ARGV_PIDS["at"] < ttl:
+        return _ARGV_PIDS["map"]
+    m: dict[str, list[int]] = {}
+    try:
+        out = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True,
+                             text=True, timeout=5).stdout
+    except Exception:
+        out = ""
+    for line in out.splitlines():
+        line = line.strip()
+        if "--resume" not in line or "claude" not in line:
+            continue
+        parts = line.split()
+        try:
+            pid = int(parts[0])
+        except (ValueError, IndexError):
+            continue
+        try:
+            sid = parts[parts.index("--resume") + 1]
+        except (ValueError, IndexError):
+            continue
+        if re.fullmatch(r"[0-9a-fA-F-]{16,}", sid):
+            m.setdefault(sid, []).append(pid)
+    _ARGV_PIDS["at"], _ARGV_PIDS["map"] = now, m
+    return m
 
 
 # ---------- fingerprint scoring (the heart of attach verification) ----------
@@ -5752,7 +5829,7 @@ async def post_attach(payload: AttachPayload):
         b = await _try_autobind(sid)
         if b is not None:
             return {"result": "bound", "binding": _serialize_binding(b)}
-        raise HTTPException(status_code=404, detail="unknown session_id")
+        raise HTTPException(status_code=404, detail=await _attach_404_detail(sid))
 
     target_cwd = _project_path_from_jsonl(jsonl)
     target_cwds = _project_cwds_from_jsonl(jsonl)
@@ -6236,6 +6313,39 @@ async def _reresolve_handle(sid: str, old_handle: str, why: str):
     log.info("%s: handle %s was stale, re-resolved sid=%s to %s",
              why, old_handle[:8], sid[:8], b.iterm_session_id[:8])
     return b
+
+
+async def _attach_404_detail(sid: str) -> str:
+    """Why this id cannot be opened — including what the terminal actually says.
+
+    "unknown session_id" is true and useless. The case it hides is the one that
+    matters: a session that was just CREATED and whose agent never came up. The pane
+    exists, it is sitting at a shell prompt with the reason printed in it, and the only
+    way to see that was to ssh in. Found 2026-09-22 on the codex box: every new session
+    failed with `npm install -g @openai/codex` → EACCES (npm's global prefix was
+    /usr), codex exited, the pane fell back to bash, and the browser said
+    "unknown session_id".
+
+    So: for a synthetic `pending-pane-%N` id, read that pane and hand back its last
+    lines. Cheap, and it is the difference between "it is broken" and "here is what
+    broke".
+    """
+    base = "unknown session_id"
+    pane = ""
+    if sid.startswith("pending-pane-"):
+        pane = "%" + sid[len("pending-pane-"):].lstrip("%")
+    if not pane:
+        return base
+    try:
+        screen = await bridge.get_screen_for(pane, max_lines=40)
+    except Exception:
+        return base
+    lines = [ln.rstrip() for ln in (screen or "").splitlines() if ln.strip()]
+    if not lines:
+        return (base + f" — {AGENT} 没在 {pane} 里起来,而那个 pane 也没有任何输出。"
+                       f"(⚙ → >_ 可以直接看这个 tab)")
+    tail = "\n".join(lines[-14:])
+    return (base + f" — {AGENT} 没在 pane {pane} 里起来。那个 pane 现在显示:\n\n{tail}")
 
 
 async def _try_autobind(sid: str):
@@ -6819,6 +6929,108 @@ class MemoPayload(BaseModel):
     supervisor_enabled: Optional[bool] = None
     # Hours from now. 0 = no expiry (explicitly). Omitted while arming = the default.
     supervisor_hours: Optional[float] = None
+
+
+# ---------------------------------------------------------------------------
+# Bookmarked requests. A ★ on one of your own messages, so a long session has
+# somewhere to come back to.
+#
+# The durable address is the entry's UUID, not its _idx: _idx is numbered per WINDOW
+# (_JSONL_BASE for the first entry the cache read, counting down as earlier rounds are
+# prepended), so the same message answers to a different _idx depending on how much
+# history had been paged in — and the numbering restarts whenever the cache is rebuilt.
+# The byte offset is stored alongside it, found by one scan at save time: it is what a
+# future "open the window straight at this round" would need, and it costs nothing to
+# record now while we are already reading the file.
+def _bm_dir() -> Path:
+    d = _state_path("cc_web_bookmarks.d")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _bm_file(sid: str) -> Path:
+    if not sid or not _MEMO_SID_RE.fullmatch(sid):
+        raise HTTPException(status_code=400, detail="bad session id")
+    return _bm_dir() / (sid + ".json")
+
+
+def _bm_read(sid: str) -> list[dict]:
+    try:
+        raw = json.loads(_bm_file(sid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = raw.get("items") if isinstance(raw, dict) else raw
+    return [x for x in (items or []) if isinstance(x, dict) and x.get("uuid")]
+
+
+def _bm_locate(sid: str, uuid: str) -> tuple[int, int]:
+    """(byte offset, ordinal) of the entry with this uuid, or (-1, -1).
+
+    Line-by-line rather than a regex over the whole file: the offset has to be the
+    START of that record's line, which is the one thing a match position cannot tell
+    you. ~2s on a 176MB transcript, and only on the click that saves a bookmark.
+    """
+    f = find_jsonl_for_session(sid)
+    if not f:
+        return -1, -1
+    needle = ('"uuid":"%s"' % uuid).encode()
+    needle_sp = ('"uuid": "%s"' % uuid).encode()
+    off = 0
+    try:
+        with open(f, "rb") as fh:
+            for n, line in enumerate(fh):
+                if needle in line or needle_sp in line:
+                    return off, n
+                off += len(line)
+    except OSError:
+        return -1, -1
+    return -1, -1
+
+
+@app.get("/api/bookmarks", dependencies=[Depends(require_token)])
+def get_bookmarks(claude_session_id: str):
+    return {"items": _bm_read(claude_session_id)}
+
+
+class BookmarkPayload(BaseModel):
+    claude_session_id: str
+    uuid: str
+    add: bool = True
+    # What the list shows. Sent by the client because it already has them; the server
+    # does not re-derive them (round numbers are window-relative anyway).
+    round: Optional[int] = None
+    ts: str = ""
+    text: str = ""
+
+
+@app.post("/api/bookmarks", dependencies=[Depends(require_token)])
+def post_bookmark(payload: BookmarkPayload):
+    sid, uuid = payload.claude_session_id, (payload.uuid or "").strip()
+    if not uuid:
+        raise HTTPException(status_code=400, detail="uuid required")
+    f = _bm_file(sid)
+    with _STATE_WRITE_LOCK:
+        items = [x for x in _bm_read(sid) if x.get("uuid") != uuid]
+        if payload.add:
+            off, ordinal = _bm_locate(sid, uuid)
+            items.append({
+                "uuid": uuid,
+                "off": off,              # -1 = not found (a session whose file moved)
+                "ordinal": ordinal,
+                "round": payload.round,
+                "ts": payload.ts or "",
+                # One line to recognise it by. The message itself stays in the
+                # transcript; this is a label, not a copy.
+                "text": re.sub(r"\s+", " ", payload.text or "").strip()[:160],
+                "at": _memo_now(),
+            })
+            # Oldest first, so the list reads in the order the session happened.
+            items.sort(key=lambda x: (x.get("ordinal") if x.get("ordinal", -1) >= 0 else 1 << 62))
+        if items:
+            _write_json_atomic(f, {"items": items})
+        else:
+            f.unlink(missing_ok=True)
+    return {"items": items}
 
 
 @app.get("/api/session-memo", dependencies=[Depends(require_token)])
@@ -8801,7 +9013,13 @@ async def get_asr_configs():
         rt_engines.append({"id": "soniox", "display": CONF["soniox"].get("display") or "Soniox"})
     if CONF.get("openai_realtime"):
         rt_engines.append({"id": "openai", "display": CONF["openai_realtime"].get("display") or "OpenAI"})
-    return {"configs": [{"label": c["label"], "display": c.get("display") or c["label"]} for c in _asr_configs()],
+    conf = _load_conf()
+    langs = conf.get("asr_langs") or []
+    # The default is the configured one when it is one of the options, else the first
+    # option: a typo in asr_lang must not leave the menu with nothing selected.
+    lang_default = conf.get("asr_lang") if conf.get("asr_lang") in langs else (langs[0] if langs else "")
+    return {"langs": langs, "lang_default": lang_default,
+            "configs": [{"label": c["label"], "display": c.get("display") or c["label"]} for c in _asr_configs()],
             "realtime": bool(CONF.get("openai_realtime")),   # OpenAI commit-then-text streaming
             "soniox": bool(CONF.get("soniox")),              # Soniox true per-token live streaming
             "realtime_engines": rt_engines}
@@ -8919,10 +9137,15 @@ def _vocab_terms(text: str, cap: int = 48) -> list:
 
 
 @app.post("/api/asr", dependencies=[Depends(require_token)])
-async def post_asr(request: Request, which: Optional[str] = None, sid: Optional[str] = None):
+async def post_asr(request: Request, which: Optional[str] = None, sid: Optional[str] = None,
+                   lang: Optional[str] = None):
     """Transcribe raw audio (request body = the recorded blob) via a configured
     ASR backend (OpenAI-style /v1/audio/transcriptions on a litellm proxy).
-    `which` selects a backend by label; default = first configured."""
+    `which` selects a backend by label; default = first configured.
+
+    `lang` is an ISO code (zh / en / …) passed straight through as `language`. Without it
+    the backend detects, and detection on a short clip is exactly where a Chinese
+    sentence comes back as English."""
     configs = _asr_configs()
     if not configs:
         raise HTTPException(status_code=503,
@@ -8946,6 +9169,8 @@ async def post_asr(request: Request, which: Optional[str] = None, sid: Optional[
                    "-F", "model=" + cfg["model"], "-F", "file=@" + p]
             if prompt:
                 cmd += ["-F", "prompt=" + prompt]
+            if lang and lang != "auto":
+                cmd += ["-F", "language=" + lang]
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=65)
             return r.stdout, r.stderr
         finally:
@@ -8989,8 +9214,10 @@ async def _soniox_bridge(ws: WebSocket, q):
     try: rate = int(q.get("rate") or 24000)
     except Exception: rate = 24000
     # language_hints → needed for zh+en code-switching (Soniox default biases one lang);
-    # gen-spark production defaults ["zh","en"]. Override via ?langs=zh,en,ja
-    langs = [s.strip() for s in (q.get("langs") or "zh,en").split(",") if s.strip()]
+    # gen-spark production defaults ["zh","en"]. Override via ?langs=zh,en,ja — and
+    # ?langs=auto sends NO hints, which is the only way to say "detect it yourself".
+    _lq = (q.get("langs") or "zh,en").strip()
+    langs = [] if _lq == "auto" else [s.strip() for s in _lq.split(",") if s.strip()]
     terms = _asr_terms(q.get("sid") or "")   # recent conversation → domain vocab (as Soniox context.terms)
     stat = {"in_bytes": 0, "in_frames": 0, "msgs": 0, "who": ""}
 
@@ -9092,7 +9319,9 @@ async def _soniox_bridge(ws: WebSocket, q):
         await ws.close(); return
 
     conf = {"api_key": sx["key"], "model": model, "audio_format": "pcm_s16le",
-            "sample_rate": rate, "num_channels": 1, "language_hints": langs}
+            "sample_rate": rate, "num_channels": 1}
+    if langs:                      # omitted entirely on ?langs=auto — see above
+        conf["language_hints"] = langs
     if terms:
         # Soniox context is a STRUCTURED object — terms[] is the domain-vocabulary slot
         # (soniox.com/docs/stt/concepts/context). A plain string would be ignored.
@@ -9694,6 +9923,8 @@ async def _run_resume(sessions: list[dict]) -> None:
         st["current"] = name or sid[:6]
         if _pids_for_session(sid):           # already running → don't duplicate
             st["results"].append({"sid": sid, "name": name, "status": "already running"})
+            log.info("resume %d/%d %s [%s] -> already running", st["done"] + 1,
+                     st["total"], (name or "")[:24], sid[:8])
             st["done"] += 1
             continue
         label = name or f"resume_{sid[:6]}"   # restore the real name (fallback if none saved)
@@ -9703,8 +9934,25 @@ async def _run_resume(sessions: list[dict]) -> None:
             if iterm_id:
                 st["resumed"] += 1
         except Exception as ex:
+            # The tab may well have opened before the iTerm websocket dropped under us
+            # ("sent 1000 (OK); no close frame received" — seen twice on mac-pro). Calling
+            # that "failed" invites a retry, and the retry is what produces two tabs and
+            # two claudes on one conversation. So ask the process table before reporting.
             status = f"failed: {ex}"
+            try:
+                await asyncio.sleep(3.0)
+                await bridge.ensure_connected()
+            except Exception:
+                pass
+            if _pids_for_session(sid):
+                status = "resumed (iterm dropped mid-open; the tab came up)"
+                st["resumed"] += 1
         st["results"].append({"sid": sid, "name": name, "status": status})
+        # Logged, not just kept in _resume_progress: that dict is overwritten by the
+        # next run and never written down, so "which ones did not come back, and why"
+        # was unanswerable an hour later — which is exactly when it gets asked.
+        log.info("resume %d/%d %s [%s] -> %s", st["done"] + 1, st["total"],
+                 (name or "")[:24], sid[:8], status)
         st["done"] += 1
         await asyncio.sleep(1.2)             # let each tab spin up before the next
     st["current"] = ""
@@ -10108,6 +10356,26 @@ async def _codex_panes() -> list[dict]:
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+class _NoStoreStatic(StaticFiles):
+    """StaticFiles + `Cache-Control: no-store`.
+
+    The app page at / has always sent no-store (see root()). These two mounts did not:
+    they went out with an ETag and no cache directive at all, which leaves a browser
+    free to reuse its copy WITHOUT asking — and an installed web app on a tablet does
+    exactly that. Found 2026-09-23 as "I deployed it, why doesn't mac-pro have it": the
+    files were in place and identical, the page on screen was days old.
+
+    These pages are one self-contained HTML file each, so there is nothing here worth
+    caching anyway. /static keeps its caching (marked.min.js and the icons are big and
+    never change), which is why this is a separate class rather than a global change.
+    """
+
+    async def get_response(self, path, scope):
+        r = await super().get_response(path, scope)
+        r.headers["Cache-Control"] = "no-store"
+        return r
+
+
 # Remote Mac control (phone-as-touchpad). API gated by cc_web's Bearer auth;
 # the HTML page itself is unauthenticated (the JS prompts for the token).
 try:
@@ -10115,13 +10383,13 @@ try:
     app.include_router(_remote_api, prefix="/remote/api",
                        dependencies=[Depends(require_token)])
     if _REMOTE_STATIC.exists():
-        app.mount("/remote", StaticFiles(directory=_REMOTE_STATIC, html=True),
+        app.mount("/remote", _NoStoreStatic(directory=_REMOTE_STATIC, html=True),
                   name="remote_mac_static")
     log.info("mounted remote_mac at /remote/")
     # Desktop counterpart — same backend endpoints, mouse-centric UI.
     _REMOTE_PC_STATIC = Path(__file__).parent / "remote_pc_static"
     if _REMOTE_PC_STATIC.exists():
-        app.mount("/remote_pc", StaticFiles(directory=_REMOTE_PC_STATIC, html=True),
+        app.mount("/remote_pc", _NoStoreStatic(directory=_REMOTE_PC_STATIC, html=True),
                   name="remote_pc_static")
         log.info("mounted remote_pc at /remote_pc/")
 except Exception as e:

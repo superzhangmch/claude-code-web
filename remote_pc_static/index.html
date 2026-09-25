@@ -40,7 +40,36 @@
       --warn: #ffb05a;
       --err: #ff6a6a;
       --ok: #6ee884;
+      /* The page's big surfaces used to be #000 / #0a0b0e / #1a1a1a straight in the
+         rule. Adding a light theme therefore changed almost nothing you could see —
+         header, the screenshot stage, the key bar and the footer all stayed black. They
+         read these now, so all three modes actually reach them. */
+      --chrome: #000;      /* header / footer / key bar */
+      --stage: #000;       /* what the screenshot sits on */
+      --guide: #ff8a8a;    /* the drag guide line */
     }
+    /* Follow cc-web's display mode. Same key and same class names as the session page
+       and the phone remote (cc_web_theme: light | pure), so the three agree without any
+       control of their own — this page had no light mode at all and stayed dark when
+       everything else went light. Only the variables are overridden: every rule below
+       reads them. */
+    body.light {
+      --bg: #fdf6e3; --panel: #f5edd6; --panel2: #ece3c8; --border: #d8cdb0;
+      --fg: #1d2021; --dim: #7c6f64; --accent: #af3a03;
+      --warn: #b57614; --err: #9d0006; --ok: #2f6b2e;
+      --chrome: #f5edd6; --stage: #efe6cd; --guide: #9d0006;
+    }
+    body.pure {
+      --bg: #fff; --panel: #fff; --panel2: #f2f2f2; --border: #000;
+      --fg: #000; --dim: #333; --accent: #000;
+      --warn: #000; --err: #000; --ok: #000;
+      --chrome: #fff; --stage: #fff; --guide: #000;
+    }
+    /* pure is a black-and-white mode for e-ink: colour carries nothing, so the accent
+       fill that marks the primary button has to become a border instead or it turns
+       into a black block with black text. */
+    body.pure header button.primary { background: #fff !important; color: #000 !important; }
+    body.pure header button, body.pure header select { border-color: #000 !important; }
     * { box-sizing: border-box; }
     html, body {
       margin: 0; padding: 0;
@@ -49,24 +78,42 @@
       height: 100%;
     }
     body { display: flex; flex-direction: column; }
+    /* Width of the key column: the groups are 147px (2×72 + gap) plus #keybar's 4px
+       padding either side and its border. Kept as tight as the labels allow — every px
+       here is a px the screenshot does not get. Everything else in that column — the
+       status line, the traffic readout — wraps inside it rather than widening it. */
+    :root { --keycol: 156px; }
 
     header {
       flex: 0 0 auto;
       display: flex; align-items: center; gap: 10px;
-      padding: 8px 12px; background: #000;
+      padding: 8px 12px; background: var(--chrome);
       border-bottom: 1px solid var(--border);
     }
-    header button {
+    /* Every control in the header is the same box: one height, one radius, one border,
+       one font. They were each their own shape before — the back link 4/9 padding at 75%
+       opacity, the buttons 5/12, the selects whatever the browser felt like — which in a
+       single row reads as three unrelated toolbars. Only the FILL marks the primary
+       action now. */
+    header button, header a.backlink, header select {
+      box-sizing: border-box; height: 30px;
+      display: inline-flex; align-items: center; justify-content: center;
       background: var(--panel2); color: var(--fg);
       border: 1px solid var(--border); border-radius: 6px;
-      padding: 5px 12px; font: inherit; cursor: pointer;
+      padding: 0 10px; font: inherit; line-height: 1;
+      white-space: nowrap; cursor: pointer;
     }
+    header select { padding: 0 4px; }
     header button.primary { background: var(--accent); color: white; border-color: var(--accent); }
-    header button:hover { border-color: var(--accent); }
+    header button:hover, header a.backlink:hover, header select:hover { border-color: var(--accent); }
     header label { color: var(--dim); }
     header label input[type="radio"] { margin: 0 4px 0 8px; }
     header .gap { margin-left: auto; }
     header .hint { color: var(--dim); font-size: 12px; }
+    /* Back to cc-web. A real link, and in the header where it costs no vertical space.
+       Shape comes from the shared rule above; all it needs is to stop looking like a
+       link. */
+    header a.backlink { text-decoration: none; }
     /* Visual grouping in the header: thin border around each cluster. */
     header .grp {
       display: inline-flex; align-items: center; gap: 4px;
@@ -74,12 +121,97 @@
       border-radius: 6px;
       padding: 2px 8px;
     }
+    /* Two characters are not worth wrapping: 内屏 broke into 内 / 屏 on two lines, which
+       makes the header taller than the shot can spare and reads as four labels. */
+    header .grp label { white-space: nowrap; }
 
+    /* keybar + stage + status. In a wide, short window the keys and the status line were
+       stealing the one thing the screenshot needs — height — while the space beside the
+       image sat empty. In `side` mode they move into a column there instead.
+       A grid, not flex: side mode needs the keys AND the status stacked in the left
+       column with the stage spanning both rows, which no single flex direction gives.
+       Which mode is right depends on the window's aspect against the SHOT's aspect, so
+       the switch lives in applyFit rather than in a media query — a 16:10 mac on a 21:9
+       monitor needs it; the same monitor showing a portrait screenshot does not. */
+    #stagewrap {
+      flex: 1 1 auto; min-height: 0; min-width: 0;
+      display: grid; grid-template-areas: "keys" "stage" "status";
+      grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+    #keybar { grid-area: keys; }
+    #stagewrap > main { grid-area: stage; }
+    #stagewrap > footer { grid-area: status; }
+    /* Column on the RIGHT, image on the left — the two halves of the same decision:
+       the shot is left-aligned, so the leftover space is one block on the right and the
+       controls belong in it. */
+    body.side #stagewrap {
+      grid-template-areas: "stage keys" "stage status";
+      /* A FIXED key column, not max-content. max-content asked the whole column what it
+         wanted, and the widest thing in it is the status line — "1470×956 pt · … · 145
+         KB" made the column 451px in a 1440px window while the keys themselves are
+         155px. 250px of empty column, and the shot lost that width for nothing: fitted
+         to the height it no longer fit across, so it turned into something you had to
+         scroll. The keys are 147px of groups + the bar's own padding. */
+      grid-template-columns: minmax(0, 1fr) var(--keycol);
+      grid-template-rows: minmax(0, 1fr) auto;
+    }
+    body.side #keybar {
+      /* nowrap: the groups are compact enough to fit one column, and wrapping split the
+         strip at whatever height the window happened to have — the traffic readout ended
+         up at the TOP of a second column, detached from everything. If it does not fit,
+         it scrolls (overflow: auto below), which keeps the order intact. */
+      flex-direction: column; flex-wrap: nowrap; align-content: flex-start;
+      min-width: 0; min-height: 0; overflow: auto; padding: 6px 4px;
+      border-top: 0; border-left: 1px solid var(--border);
+    }
+    body.side #keybar .sep { width: 100%; height: 1px; align-self: stretch; margin: 3px 0; }
+    /* the status group, stacked under the keys instead of across the bottom */
+    body.side #stagewrap > footer {
+      flex-direction: column; align-items: flex-start; gap: 2px;
+      min-width: 0; overflow-wrap: anywhere;
+      border-top: 1px solid var(--border); border-left: 1px solid var(--border);
+    }
+    body.side #stagewrap > footer .gap { display: none; }
+    /* A PHONE opening the desktop page. The shape is still right — header row on top,
+       shot on the left fitted to the HEIGHT, keys in a column on the right — it just does
+       not fit across, so the page scrolls sideways instead of rearranging itself into
+       something else. Both columns size to their content and #stagewrap is the scroller;
+       34vw caps would squeeze the key column to ~130px here, so they are lifted. */
+    body.narrow #stagewrap {
+      /* Keys FIRST on a phone — the opposite side from the desktop, on purpose. With the
+         column on the right there was nothing at scroll 0 to tell you a keyboard
+         existed: you had to think of panning sideways to find it. The shot is what runs
+         off to the right instead (panned inside the stage), and a screenshot with its
+         left edge showing is obviously a thing you can drag. */
+      grid-template-areas: "keys stage" "status stage";
+      grid-template-columns: var(--keycol) minmax(0, 1fr);
+    }
+    body.narrow #keybar,
+    body.narrow #stagewrap > footer {
+      border-left: 0; border-right: 1px solid var(--border);
+    }
+    /* Collapsed: the whole left column goes and the stage takes the width. Phone only —
+       the button is display:none elsewhere, so the class cannot be reached there. */
+    #keysToggle { display: none; }
+    body.narrow #keysToggle { display: inline-flex; }
+    body.narrow.keys-off #stagewrap {
+      grid-template-areas: "stage" "stage";
+      grid-template-columns: minmax(0, 1fr);
+    }
+    body.narrow.keys-off #keybar,
+    body.narrow.keys-off #stagewrap > footer { display: none; }
+    /* The header scrolls sideways too, for the same reason: wrapped onto four lines it
+       takes the height the screenshot needs. */
+    body.narrow header {
+      flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
+    }
+    body.narrow header .gap { display: none; }      /* nothing to push apart in one line */
     main {
       flex: 1 1 auto;
       overflow: auto;
       position: relative;
-      background: #000;
+      background: var(--stage);
+      min-width: 0; min-height: 0;
     }
     #screen-wrap {
       position: relative;
@@ -91,11 +223,30 @@
       max-width: none;                  /* render at natural pixel size */
       pointer-events: none;             /* let our overlay receive events */
     }
+    /* FIT: fill the window instead of showing the shot at 1:1. On a desktop 1:1 is
+       right — those are the mac's own pixels. On an iPad the shot is smaller than the
+       viewport and sat in a black frame with most of the screen unused.
+       The SIZE is computed in JS (applyFit) rather than left to object-fit, because the
+       <img> box has to stay exactly the painted image: every click is converted through
+       clientWidth/clientHeight, and with object-fit the box would include letterbox
+       margins and clicks in them would map onto the screen anyway. */
+    /* Left-aligned, not centred: with the image height-bound the leftover space is
+       horizontal, and splitting it into two margins puts the thing you are working on in
+       the middle of nowhere. All of it goes to the right instead. */
+    /* overflow auto, not hidden: the shot is fitted to the HEIGHT now, so a window
+       narrower than its aspect has more image than column — that gets panned here,
+       inside the stage, which leaves the key column pinned where it is instead of
+       scrolling it off the side of the page. */
+    body.fit main { overflow: auto; display: flex; align-items: flex-start; justify-content: flex-start; }
+    body.fit #screen-wrap { display: block; }
     /* Transparent capture layer covering the screenshot — catches all
        mouse events so the user can hover/click on the image normally. */
     #capture {
       position: absolute; inset: 0;
-      cursor: crosshair;
+      /* A hand, not a crosshair: this surface is a thing you CLICK (the click lands on
+         the mac at that spot), and a crosshair reads as "select a region" — which is
+         only what the drag does, and the drag says so with `grabbing`. */
+      cursor: pointer;
     }
     #capture.dragging { cursor: grabbing; }
 
@@ -105,7 +256,7 @@
     #drag-line {
       position: absolute; pointer-events: none;
       height: 0;
-      border-top: 2px dashed #ff8a8a;
+      border-top: 2px dashed var(--guide);
       transform-origin: 0 50%;        /* rotate around the start endpoint */
       display: none;
     }
@@ -126,7 +277,7 @@
        lives in viewport coords — no wrapEl / scrollLeft math needed. */
     .zoom-popup {
       position: fixed; pointer-events: none;
-      background: #1a1a1a; border: 1.5px solid var(--accent);
+      background: var(--panel); border: 1.5px solid var(--accent);
       border-radius: 6px; padding: 2px;
       box-shadow: 0 4px 24px rgba(0,0,0,0.6);
       z-index: 50;
@@ -144,7 +295,7 @@
       z-index: 100;
       border: 2px solid var(--accent);
       box-shadow: 0 4px 24px rgba(74,158,255,0.4);
-      background: #000;
+      background: var(--stage);
     }
     .type-overlay img.crop {
       display: block;
@@ -223,13 +374,20 @@
     #keybar {
       flex: 0 0 auto;
       display: flex; flex-wrap: wrap; gap: 4px;
-      padding: 6px 8px; background: #0a0b0e;
+      padding: 6px 8px; background: var(--chrome);
       border-bottom: 1px solid var(--border);
     }
+    #unlockForm { display: contents; }
+    #unlockUser {
+      width: 100%; box-sizing: border-box; margin-bottom: 6px;
+      background: transparent; border: 0; padding: 0;
+      color: var(--dim); font: inherit; font-size: 12px;
+    }
+    #unlockUser:focus { outline: none; }
     #keybar button {
       background: var(--panel2); color: var(--fg);
       border: 1px solid var(--border); border-radius: 5px;
-      padding: 4px 9px; min-height: 28px;
+      padding: 4px 5px; min-height: 28px;
       font: 12px ui-monospace, monospace; cursor: pointer;
       white-space: nowrap;
     }
@@ -239,10 +397,40 @@
       display: inline-block; width: 1px; align-self: stretch;
       background: var(--border); margin: 2px 4px;
     }
+    /* Keys grouped the way a keyboard groups them, instead of one flat list. In the side
+       column that list was 24 identical buttons running straight down — nothing to aim
+       at, and it ate the height the screenshot wants. Each family is its own small grid:
+       the arrows in their inverted-T, PgUp/PgDn above ⤒/⤓ in a 2×2, and the rest in
+       two columns. Grids, not more flex, because the ↑ has to sit above the ↓ in the
+       MIDDLE column with nothing beside it — no flex direction gives that. */
+    #keybar .kgrid { display: grid; gap: 3px; align-content: start; }
+    /* Fixed columns, the same in every group: the groups then have one width, so the
+       side column can WRAP them into two tidy columns when the window is short instead
+       of running one long strip down the edge. 84px fits the longest label
+       ("⌫ backSp") at 12px monospace plus its padding. */
+    #keybar .kgrid.k2 { grid-template-columns: repeat(2, 72px); }
+    /* 3 × 47 + two 3px gaps = 147px = 2 × 72 + one gap: the arrow cluster is exactly as
+       wide as the pair groups, so every group shares one left and one right edge. Ragged
+       edges were most of why the column still looked untidy. */
+    #keybar .kgrid.nav { grid-template-columns: repeat(3, 47px); }
+    /* An odd key out (⌨ type, Wake) takes the whole row instead of leaving a hole. */
+    #keybar .kgrid .k-wide { grid-column: 1 / -1; }
+    #keybar .kgrid.nav .k-pgup  { grid-area: 1 / 1; }
+    #keybar .kgrid.nav .k-up    { grid-area: 1 / 2; }
+    #keybar .kgrid.nav .k-pgdn  { grid-area: 1 / 3; }
+    #keybar .kgrid.nav .k-left  { grid-area: 2 / 1; }
+    #keybar .kgrid.nav .k-down  { grid-area: 2 / 2; }
+    #keybar .kgrid.nav .k-right { grid-area: 2 / 3; }
+    #keybar .kgrid.nav button { padding: 4px 0; text-align: center; }
+    body.side #keybar .sep { margin: 3px 0; }
+    /* Horizontal keybar: the groups sit side by side as blocks. Side column: they stack,
+       and wrap into a second column of groups if the window is too short — which is why
+       a group is never full-width there. */
+    body.side #keybar .sep { max-width: 174px; }
 
     footer {
       flex: 0 0 auto;
-      padding: 6px 12px; background: #000;
+      padding: 6px 12px; background: var(--chrome);
       border-top: 1px solid var(--border);
       font: 12px ui-monospace, monospace; color: var(--dim);
       display: flex; gap: 12px; align-items: center;
@@ -253,14 +441,24 @@
   </style>
 </head>
 <body>
+<script>/* match cc-web theme (same-origin localStorage) — before paint, so there is no
+  dark flash on a light device */(function(){try{var t=localStorage.getItem("cc_web_theme");
+  if(t==="light"||t==="pure")document.body.classList.add(t);}catch(e){}})();</script>
 
 <header>
-  <button id="btn-load" class="primary" title="Refresh screenshot">↻ Load</button>
-  <div class="grp">
-    <label>Display:
-      <label><input type="radio" name="disp" value="main" checked> main</label>
-      <label><input type="radio" name="disp" value="external"> external</label>
-    </label>
+  <a class="backlink" href="/" title="回 cc-web 的 session 列表">←</a>
+  <!-- Phone only: the key column costs ~40% of a phone's width, and most of the time you
+       are just looking at the mac. Collapsing it gives that width back to the shot. On a
+       desktop there is nothing to reclaim, so the button is not rendered at all. -->
+  <button id="keysToggle" title="收起/展开左边那列按键(手机上才有)">⌨ ◀</button>
+  <button id="btn-load" class="primary js-load" title="Refresh screenshot">↻ Load</button>
+  <!-- WHICH of the mac's screens. "main / external" was the API's vocabulary, not a
+       description of anything: it says nothing about what you are choosing between. -->
+  <!-- No label: 内屏/外屏 already say what the choice is, so "屏幕:" was three
+       characters that added nothing. Header width is the scarce thing on this page. -->
+  <div class="grp" id="dispGrp" title="截哪块屏幕(点击也落在这块屏上)。内屏 = mac 自己的主屏;外屏 = 插着的第二块显示器">
+    <label><input type="radio" name="disp" value="main" checked> 内屏</label>
+    <label id="dispExtLab"><input type="radio" name="disp" value="external"> 外屏</label>
   </div>
   <div class="grp">
     <label>Quality:
@@ -277,6 +475,9 @@
         <option value="1600">1600px</option>
         <option value="2560">2560px</option>
       </select>
+    </label>
+    <label title="把截图缩放到填满窗口(iPad/小窗口用);关掉则按 mac 自己的像素 1:1 显示">
+      <input type="checkbox" id="fitChk" checked> fit
     </label>
     <label>Auto:
       <select id="autoSel">
@@ -296,41 +497,74 @@
   <span class="gap"></span>
 </header>
 
+<div id="stagewrap">
 <div id="keybar">
+  <!-- Typing lives in ONE place: the type overlay (input + Send/Live + a sharp crop of
+       where the words are going). It used to be reachable only by clicking the
+       screenshot with the `type` mode selected — which is why it did not look like "a
+       place to type" at all, and why a second input box briefly got built here beside
+       it. This button opens that same overlay without the click. -->
+  <!-- Load is here as well as in the header: with the keys in a column beside the shot,
+       this is where your hand already is, and refreshing is the thing you do most. Same
+       handler as the header's (.js-load), never a second copy of it. -->
+  <div class="kgrid k2">
+    <button class="js-load" title="重新截图">↻ Load</button>
+    <button id="typeHere" title="打字: 打开输入浮层(和「⌨ type after click」是同一个东西,只是不用先点截图)">⌨ type</button>
+  </div>
+  <span class="sep"></span>
   <!-- editing / movement (mac action) -->
-  <button onclick="sendKeyPC('Return',     {reload:true})">⏎ Return</button>
-  <button onclick="sendKeyPC('Escape',     {reload:true})">Esc</button>
-  <button onclick="sendKeyPC('Backspace')">⌫ backSp</button>
-  <button onclick="sendKeyPC('Tab')">⇥ Tab</button>
+  <div class="kgrid k2">
+    <button onclick="sendKeyPC('Return',     {reload:true})">⏎ Return</button>
+    <button onclick="sendKeyPC('Escape',     {reload:true})">Esc</button>
+    <button onclick="sendKeyPC('Backspace')">⌫ backSp</button>
+    <button onclick="sendKeyPC('Tab')">⇥ Tab</button>
+  </div>
   <span class="sep"></span>
-  <!-- scroll & arrows -->
-  <button onclick="sendScrollPC(0,  400)">PgUp</button>
-  <button onclick="sendScrollPC(0, -400)">PgDn</button>
-  <button onclick="sendKeyPC('Up',    {reload:true})">↑</button>
-  <button onclick="sendKeyPC('Down',  {reload:true})">↓</button>
-  <button onclick="sendKeyPC('Left')">←</button>
-  <button onclick="sendKeyPC('Right')">→</button>
-  <button onclick="sendKeyPC('cmd+Up',   {reload:true})" title="Cmd+Up — scroll to top">⤒ top</button>
-  <button onclick="sendKeyPC('cmd+Down', {reload:true})" title="Cmd+Down — scroll to bottom">⤓ bot</button>
-  <button onclick="sendKeyPC('ctrl+Up',   {reload:true})" title="Ctrl+Up — Mission Control (all windows)">all win</button>
-  <button onclick="sendKeyPC('ctrl+Down', {reload:true})" title="Ctrl+Down — App windows (App Exposé)">app win</button>
+  <!-- The arrows in their inverted-T, with paging in the two cells beside ↑ — where a
+       compact keyboard puts them (fn+↑ / fn+↓ on this very mac), and the holes in the
+       top row were the only gaps left in the strip:
+            PgUp  ↑  PgDn
+              ←   ↓   →                                                            -->
+  <div class="kgrid nav">
+    <button class="k-pgup"  onclick="sendScrollPC(0,  400)">PgUp</button>
+    <button class="k-up"    onclick="sendKeyPC('Up',    {reload:true})">↑</button>
+    <button class="k-pgdn"  onclick="sendScrollPC(0, -400)">PgDn</button>
+    <button class="k-left"  onclick="sendKeyPC('Left')">←</button>
+    <button class="k-down"  onclick="sendKeyPC('Down',  {reload:true})">↓</button>
+    <button class="k-right" onclick="sendKeyPC('Right')">→</button>
+  </div>
+  <!-- Directly under the arrows, because it is the same family: home/end used to sit
+       among the delete keys, three groups away, because they are sent as Ctrl+A /
+       Ctrl+E — that is how they work, not what they are for. -->
+  <div class="kgrid k2">
+    <button onclick="sendKeyPC('ctrl+a')" title="Ctrl+A — line start">⌃A home</button>
+    <button onclick="sendKeyPC('ctrl+e')" title="Ctrl+E — line end">⌃E end</button>
+    <button onclick="sendKeyPC('cmd+Up',   {reload:true})" title="Cmd+Up — scroll to top">⤒ top</button>
+    <button onclick="sendKeyPC('cmd+Down', {reload:true})" title="Cmd+Down — scroll to bottom">⤓ bot</button>
+  </div>
   <span class="sep"></span>
-  <!-- readline / clipboard -->
-  <button onclick="sendKeyPC('ctrl+a')" title="Ctrl+A — line start">⌃A home</button>
-  <button onclick="sendKeyPC('ctrl+e')" title="Ctrl+E — line end">⌃E end</button>
-  <button onclick="sendKeyPC('ctrl+w')" title="Ctrl+W — delete word backward">⌃W delW</button>
-  <button onclick="sendKeyPC('ctrl+u')" title="Ctrl+U — delete to line start">⌃U delL</button>
-  <button onclick="sendKeyPC('ctrl+c')" title="Ctrl+C — interrupt / SIGINT">⌃C int</button>
-  <button onclick="sendKeyPC('ctrl+l', {reload:true})" title="Ctrl+L — clear screen">⌃L clr</button>
-  <button onclick="sendKeyPC('cmd+c')" title="Cmd+C — copy">⌘C copy</button>
-  <button onclick="sendKeyPC('cmd+v')" title="Cmd+V — paste">⌘V paste</button>
+  <!-- what is left really is one family: delete things, and the clipboard -->
+  <div class="kgrid k2">
+    <button onclick="sendKeyPC('ctrl+w')" title="Ctrl+W — delete word backward">⌃W delW</button>
+    <button onclick="sendKeyPC('ctrl+u')" title="Ctrl+U — delete to line start">⌃U delL</button>
+    <button onclick="sendKeyPC('ctrl+c')" title="Ctrl+C — interrupt / SIGINT">⌃C int</button>
+    <button onclick="sendKeyPC('ctrl+l', {reload:true})" title="Ctrl+L — clear screen">⌃L clr</button>
+    <button onclick="sendKeyPC('cmd+c')" title="Cmd+C — copy">⌘C copy</button>
+    <button onclick="sendKeyPC('cmd+v')" title="Cmd+V — paste">⌘V paste</button>
+  </div>
   <span class="sep"></span>
   <!-- system / window -->
-  <button onclick="sendKeyPC('ctrl+cmd+f', {reload:true})" title="toggle fullscreen">fullScr</button>
-  <button onclick="sendKeyPC('ctrl+cmd+q', {reload:true})" title="lock screen">Lock</button>
-  <button onclick="openUnlockModal()" title="Wake + type password + Return">🔓 Unlock</button>
-  <button onclick="runActionPC({label:'Dock', type:'show_dock'})">Dock</button>
-  <button onclick="runActionPC({label:'Wake', type:'wake', reload:false})">Wake</button>
+  <div class="kgrid k2">
+    <button onclick="sendKeyPC('ctrl+cmd+f', {reload:true})" title="toggle fullscreen">fullScr</button>
+    <button onclick="sendKeyPC('ctrl+cmd+q', {reload:true})" title="lock screen">Lock</button>
+    <button onclick="openUnlockModal()" title="Wake + type password + Return">🔓 Unlock</button>
+    <button onclick="runActionPC({label:'Dock', type:'show_dock'})">Dock</button>
+    <!-- Mission Control / App Exposé: window management, which is what this group is —
+         they were sitting with the scroll keys because they are Ctrl+arrows. -->
+    <button onclick="sendKeyPC('ctrl+Up',   {reload:true})" title="Ctrl+Up — Mission Control (all windows)">all win</button>
+    <button onclick="sendKeyPC('ctrl+Down', {reload:true})" title="Ctrl+Down — App windows (App Exposé)">app win</button>
+    <button class="k-wide" onclick="runActionPC({label:'Wake', type:'wake', reload:false})">Wake</button>
+  </div>
   <span class="sep"></span>
   <span id="traffic" style="font: 11px ui-monospace, monospace; color: var(--dim); align-self: center;" title="last screenshot · last crop image">📷 — · 🔍 —</span>
 </div>
@@ -342,28 +576,51 @@
     <div id="drag-line" class="drag-line"></div>
   </div>
 </main>
-
-<!-- Unlock modal — password input is injected lazily so Chrome's password
-     manager doesn't see a permanent type=password on the page. -->
-<div class="modal-bg" id="unlockModal">
-  <div class="modal-card">
-    <h3>🔓 Wake &amp; Unlock Mac</h3>
-    <p class="hint">Always locks the screen first (Ctrl+Cmd+Q) — no-op if already locked — so the password can never land in a focused app. Then wakes the display, types the password at HID level, presses Return.</p>
-    <div id="unlockPwdSlot"></div>
-    <label class="opt"><input type="checkbox" id="unlockWake" checked> wake display first</label>
-    <div class="row">
-      <button onclick="closeUnlockModal()">Cancel</button>
-      <button class="primary" id="unlockSendBtn" onclick="submitUnlock()">Wake &amp; Send</button>
-    </div>
-  </div>
-</div>
-
 <footer>
   <span class="status" id="status">ready — click Load to fetch screenshot</span>
   <span class="gap"></span>
   <span id="screen-meta"></span>
 </footer>
+</div>
 
+</div>
+
+
+<!-- Unlock modal. The password field used to be INJECTED on open, with the stated
+     reason "so Chrome's password manager doesn't see a permanent type=password" — i.e.
+     it was hiding from the manager on purpose. That policy is reversed: retyping a Mac
+     login password on every unlock is the cost, and the manager (or the iOS keychain)
+     is a better place for it than anywhere this app could put it. So: a real form, a
+     username field to file it under, and current-password on the field. -->
+<div class="modal-bg" id="unlockModal">
+  <div class="modal-card">
+    <h3>🔓 Wake &amp; Unlock Mac</h3>
+    <p class="hint">Always locks the screen first (Ctrl+Cmd+Q) — no-op if already locked — so the password can never land in a focused app. Then wakes the display, types the password at HID level, presses Return.</p>
+    <form id="unlockForm" autocomplete="on" onsubmit="return false">
+      <input type="text" id="unlockUser" name="username" autocomplete="username"
+             readonly tabindex="-1" aria-label="host" />
+      <input type="password" id="unlockPwd" name="password" placeholder="Mac password"
+             autocomplete="current-password" />
+      <label class="opt"><input type="checkbox" id="unlockWake" checked> wake display first</label>
+      <div class="row">
+        <button type="button" onclick="closeUnlockModal()">Cancel</button>
+        <button type="submit" class="primary" id="unlockSendBtn">Wake &amp; Send</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+// Shown inside cc-web's own full-screen overlay (an iframe), the ← would navigate THIS
+// frame to the session list — a session list inside the control window, which reads as
+// the app breaking. The overlay's ✕ is the way out there. `embed=1` is what the parent
+// passes; the frame check is the belt to its braces.
+const EMBEDDED = /[?&]embed=1/.test(location.search) || window.parent !== window;
+if (EMBEDDED) {
+  const back = document.querySelector('.backlink');
+  if (back) back.style.display = 'none';
+}
+</script>
 <script>
 'use strict';
 
@@ -384,6 +641,23 @@ const statusEl   = document.getElementById('status');
 const metaEl     = document.getElementById('screen-meta');
 const btnLoad    = document.getElementById('btn-load');
 const dragLineEl = document.getElementById('drag-line');
+
+// Grey out 外接 when there is only one screen, and say so — rather than letting the
+// backend's polite fallback look like a broken button.
+function applyDisplayCount(count, isMain) {
+  const lab = document.getElementById('dispExtLab');
+  const ext = lab.querySelector('input');
+  const only = count < 2;
+  ext.disabled = only;
+  lab.style.opacity = only ? '.45' : '';
+  lab.title = only ? '没有外屏 — 这台 mac 现在只有一块屏'
+                   : '插着的那块外接显示器';
+  if (only && ext.checked) {              // picked before it was unplugged
+    document.querySelector('input[name="disp"][value="main"]').checked = true;
+  } else if (!only && ext.checked && isMain) {
+    setStatus('外屏没截到,显示的是内屏', 'err');
+  }
+}
 
 function currentDisplay() {
   const r = document.querySelector('input[name="disp"]:checked');
@@ -481,6 +755,10 @@ async function loadScreenshot() {
                           { headers: authHeaders() });
     if (r.status === 401) { localStorage.removeItem('cc_web_token'); setStatus('unauthorized — reload', 'err'); return; }
     if (!r.ok) { setStatus('HTTP ' + r.status, 'err'); return; }
+    // "external" falls back to main when nothing is plugged in, which from here looks
+    // like the radio not working. The count says which it was, so the label can.
+    applyDisplayCount(parseInt(r.headers.get('X-Display-Count') || '1', 10),
+                      r.headers.get('X-Display-Is-Main') === '1');
     screenW = parseInt(r.headers.get('X-Screen-W') || '0', 10);
     screenH = parseInt(r.headers.get('X-Screen-H') || '0', 10);
     displayOriginX = parseInt(r.headers.get('X-Display-Origin-X') || '0', 10);
@@ -490,6 +768,7 @@ async function loadScreenshot() {
     screenImg._lastUrl = URL.createObjectURL(blob);
     screenImg.src = screenImg._lastUrl;
     await new Promise(res => screenImg.onload = res);
+    applyFit();                     // a new shot can have a new natural size
     metaEl.textContent = `${screenW}×${screenH} pt · ${screenImg.naturalWidth}×${screenImg.naturalHeight} px · ${(blob.size/1024).toFixed(0)} KB`;
     lastScreenKB = (blob.size/1024).toFixed(0);
     updateTraffic();
@@ -499,7 +778,94 @@ async function loadScreenshot() {
     setStatus('load error: ' + e.message, 'err');
   }
 }
-btnLoad.addEventListener('click', () => { resetAutoCount(); loadScreenshot(); });
+// ── fit: use the whole window ────────────────────────────────────────────────
+// On by default — the common case here is a tablet or a half-screen window, where 1:1
+// leaves most of the area black. Remembered, so a desktop that wants real pixels turns
+// it off once. Only the aspect-ratio remainder is ever left over.
+const fitChk = document.getElementById('fitChk');
+const FIT_KEY = 'cc_remote_pc_fit';
+fitChk.checked = (localStorage.getItem(FIT_KEY) ?? '1') === '1';
+function applyFit() {
+  document.body.classList.toggle('fit', fitChk.checked);
+  const nw = screenImg.naturalWidth, nh = screenImg.naturalHeight;
+  // The column is where the keys live in every state — before the first screenshot has
+  // arrived and with fit turned off (1:1 pixels) too. This used to strip `side` here,
+  // which is why the page opened with the keys across the top and only moved them once
+  // an image had loaded.
+  document.body.classList.add('side');
+  if (!fitChk.checked || !nw || !nh) {
+    document.body.classList.remove('narrow');
+    screenImg.style.width = ''; screenImg.style.height = '';
+    return;
+  }
+  // The keys are ALWAYS the column on the right. They used to move there only when the
+  // window was wider than the shot's own aspect (× 1.1 slack), on the theory that the
+  // leftover space had to exist first — but a window that is merely a bit wider than
+  // tall failed that test and got the old horizontal strip: six groups in a ragged row
+  // across the top, eating the height. The column costs 200px of width and gives back
+  // ~150px of height, so there is nothing left to decide.
+  // Phone = the window is taller than it is wide (or simply too narrow to hold both).
+  // There the shot is fitted to the HEIGHT and the page scrolls sideways to the keys,
+  // instead of the shot shrinking into the sliver left beside them.
+  const narrow = window.innerWidth < window.innerHeight || window.innerWidth < 700;
+  document.body.classList.toggle('narrow', narrow);
+  // Measured AFTER the class is set: it changes the area the stage gets, and scaling to
+  // the old area was the whole bug this function exists to avoid.
+  const main = screenImg.closest('main');
+  // HEIGHT, always — flush top to bottom, with no band of empty stage above and below
+  // it. min(width, height) is what left that band: once the keys took a column, the
+  // width became the binding constraint in an ordinary window and the shot shrank to
+  // fit it. What does not fit across is panned instead (main scrolls sideways), so the
+  // pixels are all still reachable and the keys never scroll away.
+  const fitTo = (h) => {
+    const k = h / nh;
+    if (!(k > 0)) return;
+    screenImg.style.width = Math.max(1, Math.floor(nw * k)) + 'px';
+    screenImg.style.height = Math.max(1, Math.floor(h)) + 'px';
+  };
+  fitTo(main.getBoundingClientRect().height);
+  // A horizontal scrollbar, if this browser gives them space, eats a few px of height —
+  // which would then need a vertical scrollbar to reach. clientHeight knows the real
+  // answer once the bar exists, so re-fit to it.
+  if (main.scrollHeight > main.clientHeight + 1) fitTo(main.clientHeight);
+}
+fitChk.addEventListener('change', () => {
+  localStorage.setItem(FIT_KEY, fitChk.checked ? '1' : '0');
+  applyFit();
+});
+window.addEventListener('resize', applyFit);
+
+// ── phone: collapse the key column ──────────────────────────────────────────
+// Remembered, because whichever way you like it is how you like it every time. The arrow
+// says which way it goes: ◀ collapses, ▶ brings it back.
+const keysToggle = document.getElementById('keysToggle');
+const KEYS_KEY = 'cc_remote_pc_keys';
+let keysOn = (localStorage.getItem(KEYS_KEY) ?? '1') === '1';
+function applyKeys() {
+  document.body.classList.toggle('keys-off', !keysOn);
+  keysToggle.textContent = keysOn ? '⌨ ◀' : '⌨ ▶';
+  applyFit();            // the stage just changed width — re-fit the shot to it
+}
+keysToggle.addEventListener('click', () => {
+  keysOn = !keysOn;
+  localStorage.setItem(KEYS_KEY, keysOn ? '1' : '0');
+  applyKeys();
+});
+applyKeys();             // also performs the first applyFit()
+
+// Same overlay the `type` click-mode opens, summoned without the click: at the last
+// place you clicked if there is one, else the middle of the shot.
+document.getElementById('typeHere').addEventListener('click', () => {
+  if (!screenImg.naturalWidth) { setStatus('load a screenshot first', 'err'); return; }
+  const x = (lastTypeAt ? lastTypeAt.x : screenImg.clientWidth / 2);
+  const y = (lastTypeAt ? lastTypeAt.y : screenImg.clientHeight / 2);
+  const frac = wrapToFractions(x, y);
+  if (frac) enterTypeMode(x, y, frac);
+});
+
+// Both Loads — the header's and the one in the key column — through one handler.
+document.querySelectorAll('.js-load').forEach(b =>
+  b.addEventListener('click', () => { resetAutoCount(); loadScreenshot(); }));
 window.addEventListener('load', loadScreenshot);
 
 // ── point conversion: screenshot CSS pixels → mac display points ───────────
@@ -513,8 +879,13 @@ function clientToWrap(clientX, clientY) {
   return { x: clientX - rect.left, y: clientY - rect.top };
 }
 function wrapToFractions(x, y) {
-  if (!screenImg.naturalWidth) return null;
-  return { xf: x / screenImg.naturalWidth, yf: y / screenImg.naturalHeight };
+  // The DISPLAYED size, not the natural one. Identical while the shot is 1:1, and the
+  // only correct reading once `fit` scales it — dividing by naturalWidth there put
+  // every click at a fraction of where you aimed.
+  const w = screenImg.clientWidth || screenImg.naturalWidth;
+  const h = screenImg.clientHeight || screenImg.naturalHeight;
+  if (!w || !h) return null;
+  return { xf: x / w, yf: y / h };
 }
 
 // ── click/drag pipeline ────────────────────────────────────────────────────
@@ -563,28 +934,28 @@ async function sendScrollPC(dx, dy) {
   } catch (e) { setStatus('scroll ✗ ' + e.message, 'err'); }
 }
 // ── Unlock modal ───────────────────────────────────────────────────
-// Password input is created on demand so the DOM doesn't carry a
-// permanent type=password (which would prompt Chrome's saved-password UI).
+// The field is permanent now, and marked up for a password manager on purpose (see the
+// comment on the modal). Filed under the host, so one browser can hold one per machine.
 const unlockModal      = document.getElementById('unlockModal');
-const unlockPwdSlot    = document.getElementById('unlockPwdSlot');
 const unlockWake       = document.getElementById('unlockWake');
-let unlockPwdEl = null;
+const unlockFormEl     = document.getElementById('unlockForm');
+const unlockPwdEl      = document.getElementById('unlockPwd');
+const unlockId         = (location.hostname || 'mac').split('.')[0];
+document.getElementById('unlockUser').value = unlockId;
+unlockPwdEl.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') { ev.preventDefault(); closeUnlockModal(); }
+});
+// Through the form: a manager offers to save on submit, never on a click handler.
+unlockFormEl.addEventListener('submit', (ev) => { ev.preventDefault(); submitUnlock(); });
 
 function openUnlockModal() {
-  unlockPwdSlot.innerHTML =
-    '<input type="password" id="unlockPwd" placeholder="Mac password" autocomplete="off" />';
-  unlockPwdEl = document.getElementById('unlockPwd');
-  unlockPwdEl.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Enter')  { ev.preventDefault(); submitUnlock(); }
-    if (ev.key === 'Escape') { ev.preventDefault(); closeUnlockModal(); }
-  });
+  // Not cleared here — that would undo an autofill, which is the whole point.
   unlockModal.classList.add('show');
   setTimeout(() => unlockPwdEl && unlockPwdEl.focus(), 50);
 }
 function closeUnlockModal() {
   unlockModal.classList.remove('show');
-  unlockPwdSlot.innerHTML = '';
-  unlockPwdEl = null;
+  unlockPwdEl.value = '';        // cleared on the way OUT, so it never lingers
 }
 // Guard against a second submit. CRITICAL: a double-click / double-Enter
 // used to send the password TWICE — the first unlocked the Mac, the second
@@ -611,6 +982,14 @@ async function submitUnlock() {
       }),
     });
     setStatus('unlock sent ✓', 'ok');
+    // Only now that it is known to work. Chrome/Edge get a deterministic prompt; Safari
+    // has no such API and relies on the form markup above.
+    try {
+      if (window.PasswordCredential && navigator.credentials) {
+        await navigator.credentials.store(
+          new window.PasswordCredential({ id: unlockId, password: pwd, name: unlockId }));
+      }
+    } catch (e) { /* declined or unsupported */ }
     closeUnlockModal();
     scheduleReload();
   } catch (e) {
@@ -757,7 +1136,11 @@ async function showZoomPopup(clientX, clientY, frac) {
 const TYPE_W_PT = 400;   // points wide on mac
 const TYPE_H_PT = 80;    // points tall on mac
 
+// Where the overlay should open when it is summoned from the key bar rather than by a
+// click: wherever you last put it.
+let lastTypeAt = null;
 function enterTypeMode(wrapX, wrapY, frac) {
+  lastTypeAt = { x: wrapX, y: wrapY };
   // The overlay sits in wrapEl coords (image-content pixels). We position
   // it from the X-Strip-* headers returned by /api/cursor_strip — those
   // reflect the actual capture rect AFTER any edge-clamp. Using the click
@@ -992,7 +1375,7 @@ captureEl.addEventListener('mouseup', (ev) => {
       pendingClick = null;
       postClick(startFrac.xf, startFrac.yf, 'left', false);
       const m = currentMode();
-      if      (m === 'type') enterTypeMode(start.x, start.y, startFrac);
+      if      (m === 'type') { lastTypeAt = { x: start.x, y: start.y }; enterTypeMode(start.x, start.y, startFrac); }
       else if (m === 'zoom') showZoomPopup(start.clientX, start.clientY, startFrac);
     }, DBLCLICK_DELAY);
   }

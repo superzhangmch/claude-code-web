@@ -150,6 +150,42 @@ button, .btn, .icon, label.tab-radio, label.scr-delta {
    often land a beat off the button (on the card), which iOS reads as a double-
    tap → zoom. manipulation still allows pinch-zoom + scroll. */
 .modal-card { touch-action: manipulation; }
+/* 100% of the viewport, and nothing subtracted from it: the control page IS the window
+   while it is open. No padding (the .modal default ring of dimmed session buys nothing
+   here), no title bar, no border. */
+.ctrl-modal { padding: 0; background: var(--bg); display: none; }
+.ctrl-modal.show { display: block; }
+.ctrl-modal #ctrl-frame {
+  /* All of the USABLE viewport — inset by the safe areas, not by nothing. `inset: 0`
+     put the control page's own header under the iPhone's status bar: the clock and the
+     signal icons sat on top of ⌨ / Load / 内屏 and you could not tap them. The app's
+     own header pads for this too (calc(10px + env(safe-area-inset-top))). */
+  position: absolute;
+  top: env(safe-area-inset-top, 0px);
+  left: env(safe-area-inset-left, 0px);
+  /* Sized with calc, not by top+bottom+auto: an <iframe> is a REPLACED element, so
+     `width: auto` there means its intrinsic 300×150 and the right/bottom offsets are
+     simply dropped. Measured: the frame collapsed to 300×150 in an 680×814 window. */
+  width: calc(100% - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+  height: calc(100% - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  border: 0; display: block; background: var(--bg);
+}
+/* The two controls float over the frame's bottom-right corner — out of the way of the
+   control page's own header (top) and its key column (left), and clear of the iOS home
+   bar. Quiet until touched: they sit on top of a live screenshot. */
+.ctrl-modal .ctrl-float {
+  position: absolute; z-index: 2; display: flex; gap: 6px;
+  right: calc(8px + env(safe-area-inset-right, 0px));
+  bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+}
+.ctrl-modal .ctrl-float > * {
+  width: 30px; height: 30px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--panel2); color: var(--text); text-decoration: none;
+  border: 1px solid var(--border); font-size: 14px; line-height: 1;
+  cursor: pointer; opacity: .72; box-shadow: 0 1px 6px rgba(0,0,0,.25);
+}
+.ctrl-modal .ctrl-float > *:hover, .ctrl-modal .ctrl-float > *:active { opacity: 1; border-color: var(--accent); }
 
 header {
   padding: 10px 14px;
@@ -187,6 +223,8 @@ header #picker-cfg-group { display: inline-flex; align-items: center; }
 }
 .switch-menu .sw-item:hover { border-color: var(--accent); }
 .switch-menu .sw-item.current { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+/* the two ctrl entries are <a>, not <button> — same chip, no underline */
+.switch-menu a.sw-item { text-decoration: none; display: inline-flex; align-items: center; }
 .switch-menu .sw-item .sw-sess { color: var(--muted); }   /* dimmer inside the popup */
 .switch-menu .menu-sec { font-size: 10px; color: var(--muted); margin: 6px 2px 3px; text-transform: uppercase; letter-spacing: .05em; }
 .switch-menu .menu-sec:first-child { margin-top: 0; }
@@ -917,6 +955,14 @@ body.pure #closetab-btn.active {
   font-family: var(--mono, monospace); font-size: 0.9em;
 }
 .msg .up-chip:hover { background: rgba(127, 127, 127, 0.15); }
+/* ☆ / ★ on your own requests. Dim until it is on, like every other control in that row. */
+.msg .star-btn { font-size: 13px; line-height: 1; padding: 0 2px 0 6px; }
+.msg .star-btn.on { color: var(--accent); }
+.msg .star-btn:hover { color: var(--text); }
+.bm-row { align-items: baseline; }
+.bm-row .bm-when { color: var(--muted); font-size: 11px; white-space: nowrap; min-width: 0; }
+.bm-row .bm-txt { cursor: pointer; }
+.bm-row .bm-txt:hover { text-decoration: underline; }
 /* stacked compact rows (System msgs / brief tool-calls) — INLINE flow, wraps */
 .msg.system .sys-lines { font-size: 0.75em; line-height: 1.55; color: var(--muted); word-break: break-word; }
 /* A finished run of tool calls shows as its tally; the list is still there, folded. */
@@ -1218,6 +1264,21 @@ footer #float-controls button:active {
 #tail-box #tail-close { right: -10px; }
 #tail-box #tail-refresh { left: -10px; }
 #tail-box #tail-refresh:hover, #tail-box #tail-close:hover { border-color: var(--accent); }
+/* The key strip: bottom-right, inside the box, so it never covers the last line of
+   output — which is the line you are watching. */
+#tail-box #tail-keys {
+  display: flex; gap: 5px; justify-content: flex-end;
+  margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border);
+}
+#tail-box #tail-keys button {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px;
+  padding: 3px 9px; min-height: 26px;
+  font: calc(11px * var(--cs, 1)) ui-monospace, Menlo, monospace;
+  cursor: pointer; white-space: nowrap;
+}
+#tail-box #tail-keys button:hover { border-color: var(--accent); }
+#tail-box #tail-keys button:active { background: var(--code-bg); }
 #autoload.show { display: flex; }
 #autoload .indicator {
   display: inline-flex; gap: 4px;
@@ -1386,10 +1447,41 @@ footer .input-row > button { flex-shrink: 0; }
 .rec-bar .rec-send, .rec-bar .rec-use { background: var(--accent); color: var(--bg); font-weight: 700; border-color: var(--accent); }
 .rec-bar .rec-send:hover, .rec-bar .rec-use:hover { opacity: .85; }
 /* mic stays static (🎤) in all states — recording/processing state shows in the rec-bar popup, not on the button */
-/* 🎤 + 📎 stacked in a column beside the input (frees width for the textarea);
-   the column stretches to the input height, each button = half. */
-footer .in-btn-col { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
-footer .in-btn-col > button { flex: 1; min-height: 0; padding: 0 8px; }
+/* 🎤 + ➤ ride together on the right; 📎 is on the left. align-items:stretch on the row
+   makes each of them exactly as tall as the input box, so they are real tap targets —
+   they used to be half of one, side by side vertically. */
+footer .in-right { display: flex; align-items: stretch; gap: 4px; flex-shrink: 0; }
+footer .input-row > button.icon, footer .input-row .in-right > button.icon {
+  min-width: 38px; padding: 0 8px; font-size: 17px;
+}
+/* …except 📎, which is narrow: a thin strip the full height of 🎤. It is pressed once in
+   a while, so it gives its width back to the text — but not its height, which is what
+   makes it easy to hit. No height here on purpose: it stretches with the row (44px
+   beside the box, 38px on the stacked button line), exactly like the mic. */
+footer .input-row > button#upload-btn {
+  min-width: 22px; padding: 0; font-size: 13px;
+}
+/* More than one line of text → the row wraps: box across the full width on top, the
+   buttons on their own row under it (📎 left, 🎤 ➤ right — margin-right:auto does the
+   splitting). Without this a growing box squeezes the buttons instead, which is the
+   whole complaint. The class is put on by fitInput(), which decides at the ONE-ROW
+   width so the two layouts cannot oscillate. */
+footer .input-row.stack { flex-wrap: wrap; }
+footer .input-row.stack > textarea { flex: 1 0 100%; order: 1; }
+footer .input-row.stack > button.icon { order: 2; margin-right: auto; }
+footer .input-row.stack > .in-right { order: 3; }
+/* The wrapped line has no tall sibling to stretch against, so height comes from here. */
+footer .input-row.stack > button.icon,
+footer .input-row.stack .in-right > button { height: 38px; }
+/* The recording bar covers the row it belongs to (inset: 8px 5px). Stacked, that row is
+   tall — stretched over all of it the bar is a slab, and it would hide the text being
+   dictated into the box above. So it sits at the bottom, over the strip it actually
+   replaces: the buttons.
+   height AUTO, not 38px: the live transcript (.rec-live) is a row INSIDE the bar, and a
+   fixed height clipped it — this selector outranks .rec-live-on's own `height: auto`, so
+   the words vanished and the overflow landed on top of the status line. min-height keeps
+   the bar button-sized while there is nothing to show. */
+footer .input-row.stack > .rec-bar { top: auto; height: auto; min-height: 38px; }
 /* (mic no longer turns red while recording — the rec-bar popup is the state indicator) */
 /* long-press send → small menu (set task · view asr · copy/clear) */
 .send-menu {
@@ -1500,17 +1592,35 @@ mark.find-mark.at { background: var(--accent); color: var(--bg); }
   box-shadow: 0 6px 20px rgba(0,0,0,0.4); padding: 6px;
   width: min(560px, 94vw); max-height: 50vh; overflow-y: auto; overflow-x: hidden;   /* half the screen, then it scrolls */
 }
-.asks-menu .ask-row {
+/* ONE set of rules for both lists of your own requests: the ☰ popup and the ★ window.
+   The ★ window first borrowed .link-row's class names — whose layout is scoped to
+   #links-modal, so it inherited none of it and rendered as a stack of unaligned text
+   and stray ✕ buttons. Sharing the selector is the difference between "looks like the
+   others" and "is the others". */
+.asks-menu .ask-row, #bm-modal .ask-row {
   display: flex; gap: 8px; align-items: baseline; width: 100%; box-sizing: border-box;
   background: var(--panel2); color: var(--text); border: 1px solid transparent;
   border-radius: 6px; padding: 6px 8px; margin-bottom: 4px; cursor: pointer;
   text-align: left; font-size: 13px;
 }
-.asks-menu .ask-row:hover { border-color: var(--accent); }
+.asks-menu .ask-row:hover, #bm-modal .ask-row:hover { border-color: var(--accent); }
 .asks-menu .ask-row.current { border-color: var(--accent); color: var(--accent); font-weight: 700; }
-.asks-menu .ask-n { color: var(--muted); font-size: 11px; flex-shrink: 0;
+.asks-menu .ask-n, #bm-modal .ask-n { color: var(--muted); font-size: 11px; flex-shrink: 0;
                     font-variant-numeric: tabular-nums; }
-.asks-menu .ask-t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; }
+.asks-menu .ask-t, #bm-modal .ask-t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; }
+.asks-menu .ask-heart { color: var(--accent); font-size: 11px; flex-shrink: 0; margin-right: 2px; }
+/* The header row has no generic rule (only #cpu-modal / #screen-modal / .memo-head have
+   one), which is why the title and its ✕ sat on two lines here. */
+#bm-modal .modal-row { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+#bm-modal .modal-row h3 { margin: 0; font-size: 15px; flex: 1; min-width: 0; }
+#bm-modal .bm-list { display: flex; flex-direction: column; overflow-y: auto; min-height: 0; }
+/* Un-star: an action ON the row, so it is small and at the end, not another list item. */
+#bm-modal .bm-x {
+  flex-shrink: 0; background: none; border: 0; color: var(--muted);
+  font-size: 12px; line-height: 1; padding: 0 2px; cursor: pointer;
+}
+#bm-modal .bm-x:hover { color: #ff6a6a; }
+#bm-modal .ask-empty { color: var(--muted); font-size: 12px; padding: 8px; }
 .asks-menu .ask-empty { color: var(--muted); font-size: 12px; padding: 8px; }
 /* "load more" sits at the top, where earlier history belongs, and reads as an action
    rather than as another ask. */
@@ -1570,6 +1680,9 @@ footer textarea {
   border: 1px solid var(--border); border-radius: 6px;
   padding: 10px 12px; resize: none;
   font: calc(16px * var(--cs, 1)) -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  /* Explicit, so fitInput() can ask what one line costs instead of guessing: computed
+     `line-height: normal` comes back as the string "normal", not a number. */
+  line-height: 1.35;
   min-height: 44px; max-height: 40vh;
 }
 footer button {
@@ -2702,6 +2815,16 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <button class="sw-item" id="mm-set-parent" title="把当前 session 挂到另一个 session 下面">⤵ under…</button>
       <button class="sw-item" id="mm-detach-parent" title="脱离父级,成为顶层">⤴ detach</button>
     </div>
+    <!-- The remote control, reachable from inside a session. The header's 🖥 button is
+         picker-only (hidden in the session view to free header width), so from in here
+         there was no way to it without going back first. Real links: long-press and
+         middle-click behave like any link. -->
+    <div class="scr-cfg-row"><span>ctrl</span>
+      <a class="sw-item" id="mm-ctrl-phone" href="/remote/"
+         title="手机版遥控(触控板式)">🖥 phone</a>
+      <a class="sw-item" id="mm-ctrl-desk" href="/remote_pc/"
+         title="桌面版遥控(鼠标式;截图填满窗口)">🖥 desktop</a>
+    </div>
     <!-- Two buttons that name themselves, so neither needs a label: the two rows they
          used to have were one button each. ("结束这个 session  [⏏ exit & close]" was also
          the same sentence twice, on the one row where the words matter most.)
@@ -2711,6 +2834,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div class="scr-cfg-row row-solo">
       <button class="sw-item" id="mm-search"
               title="在整个 session 里搜(不只是已载入的部分)。装成 App 的时候浏览器没有页内查找,而页内查找本来也只看得到屏幕上的">🔍 find</button>
+      <button class="sw-item" id="mm-star" title="查看收藏 — 点某条就往前载入直到它出现,然后跳过去">★</button>
       <span class="row-bar">|</span>
       <button class="sw-item" id="mm-exit-close"
               title="退出 claude 并关闭它的终端 tab(有后台作业时不关)">⏏ session exit</button>
@@ -2852,6 +2976,16 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <button id="files-next" class="btn">next ›</button>
       </div>
       <div id="files-preview" class="files-preview"></div>
+    </div>
+  </div>
+
+  <!-- ★ list. Same shape as the links popup: a card, a title row with ✕, one row per
+       item. Rows are the request's own words, because that is what you remember it by —
+       not its round number. -->
+  <div id="bm-modal" class="modal">
+    <div class="modal-card">
+      <div class="modal-row"><h3>★ 收藏的请求</h3><button id="bm-close" class="btn" title="close">✕</button></div>
+      <div id="bm-list" class="bm-list"></div>
     </div>
   </div>
 
@@ -3010,6 +3144,23 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     </div>
   </div>
 
+  <!-- The control pages, in the page you were already on. They are still real pages at
+       /remote/ and /remote_pc/ (open them directly on a desktop if you like) — this just
+       stops a trip there from unloading the session view, which meant re-fetching the
+       transcript and losing the place you were reading. An iframe rather than a port of
+       their ~1000 lines: same origin, so the token and the theme in localStorage are
+       already shared, and there is one copy of the control UI, not two. -->
+  <div id="ctrl-modal" class="modal ctrl-modal">
+    <iframe id="ctrl-frame" title="remote control"></iframe>
+    <!-- The only chrome: two small controls FLOATING over the frame, bottom-right, so
+         the control page gets the whole viewport. A title bar across the top read as
+         "cc-web showing you a page" and cost a row of the thing you came to look at. -->
+    <div class="ctrl-float">
+      <a id="ctrl-open" target="_blank" rel="noopener" title="在新标签整页打开">↗</a>
+      <button id="ctrl-close" title="关闭,回到会话(Esc / 返回键)">✕</button>
+    </div>
+  </div>
+
   <div id="screen-modal" class="modal">
     <div class="modal-card screen-card">
       <div class="modal-row">
@@ -3135,6 +3286,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <button id="tail-refresh" title="refresh">↻</button>
       <button id="tail-close" title="close">✕</button>
       <pre id="tail-pre"></pre>
+      <!-- The three keys you reach for while WATCHING the terminal, on the window that
+           is already showing it. The screen window has them too; going there for an Esc
+           means opening a full-screen view over the transcript you are reading. Each one
+           refreshes this box afterwards, so you see what the key did. -->
+      <div id="tail-keys">
+        <button id="tail-esc" title="Esc — 取消正在执行的(claude 会停下当前这轮)">Esc</button>
+        <button id="tail-up" title="↑ — 把上一条请求调回输入框(可以改了再发)">↑</button>
+        <button id="tail-clear" title="清掉输入行里的字(Ctrl+E 到行尾,再 Ctrl+U 删到行首)">⌫ line</button>
+      </div>
     </div>
   </main>
 
@@ -3177,12 +3337,20 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     <div id="asks-menu" class="asks-menu" style="display:none"></div>
     <div class="input-row">
       <input id="upload-input" type="file" accept="image/*" multiple style="display:none">
-      <div class="in-btn-col">
-        <button id="mic-btn" class="icon" title="语音输入(录音→识别→整理)">🎤</button>
-        <button id="upload-btn" class="icon" title="Attach a file ≤10MB (long-press: a picker that shows every type)">📎</button>
-      </div>
+      <!-- 📎 left · text · 🎤 ➤ right, and every button the FULL height of the row. 🎤 and
+           📎 used to share one 44px cell stacked on top of each other, which saved width
+           and made the mic ~20px tall — the hardest button in the app to hit on a phone.
+           All three are direct children of the row so it can WRAP: one line of text keeps
+           everything on one row, and more than one line puts the box across the top with
+           the buttons on their own row underneath (.input-row.stack). That is the shape
+           a phone messenger uses, and it stops a growing box from squeezing the
+           buttons. -->
+      <button id="upload-btn" class="icon" title="Attach a file ≤10MB (long-press: a picker that shows every type)">📎</button>
       <textarea id="input" placeholder="Reply…" rows="1"></textarea>
-      <button id="send" class="send" title="点击发送 · 长按更多" aria-label="Send">➤</button>
+      <div class="in-right">
+        <button id="mic-btn" class="icon" title="语音输入(录音→识别→整理)">🎤</button>
+        <button id="send" class="send" title="点击发送 · 长按更多" aria-label="Send">➤</button>
+      </div>
       <div id="rec-bar" class="rec-bar" style="display:none" title="Tap to stop">
         <span class="rec-dot"></span>
         <span class="rec-spin rec-spin-time"></span>
@@ -4196,6 +4364,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const slots = vtSlots(el);
     voiceTarget.before = slots.before;
     voiceTarget.after = slots.after;
+    // What the box held before any of this. `before` is not that: for the composer it
+    // may carry the seam space that the dictated words were going to sit after, so
+    // rebuilding from it leaves a stray space behind when you cancel.
+    voiceTarget.orig = el.value;
     // Strip any stray marker first — one box must never end up with two insertion points.
     el.value = slots.before.split(VT_MARK).join("") + VT_MARK + slots.after.split(VT_MARK).join("");
     try {
@@ -4213,16 +4385,31 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     try { el.setSelectionRange(i, i); } catch {}
     el.dispatchEvent(new Event("input"));
   }
+  // Cancel means "as it was". Falls back to the marker removal when there is no
+  // remembered original (a path that never went through vtMarkIn).
+  function vtRestore(before) {
+    if (voiceTarget && voiceTarget.orig != null) {
+      const el = vtEl();
+      el.value = voiceTarget.orig;
+      try { el.setSelectionRange(el.value.length, el.value.length); } catch {}
+      el.dispatchEvent(new Event("input"));
+      return;
+    }
+    if (before != null) vtWrite(before, "");
+  }
   // Captured when recording STARTS: the caret can move while you talk (a phone
   // scrolling, a stray tap), and the text belongs where you put the cursor.
   function vtSlots(el) {
-    if (!voiceTarget) {
-      // Composer: unchanged — appended after whatever is there.
-      return { before: el.value ? (el.value.replace(/\s*$/, "") + " ") : "", after: "" };
-    }
     const a = el.selectionStart != null ? el.selectionStart : el.value.length;
     const b = el.selectionEnd != null ? el.selectionEnd : a;
-    return { before: el.value.slice(0, a), after: el.value.slice(b) };
+    let before = el.value.slice(0, a);
+    const after = el.value.slice(b);
+    // The composer used to append, always, with a space. It inserts at the caret now,
+    // like the Task boxes — which for the usual case is the SAME thing: assigning to
+    // .value (a restored draft) and typing both leave the caret at the end. The space
+    // is kept for that case only; _joinDict drops it again at a CJK seam.
+    if (el === inputEl && !after && before && !/\s$/.test(before)) before += " ";
+    return { before, after };
   }
   // The bar shows the time, the wave, and every button that ends a recording — so it
   // has to be where you are looking. Dictating into a Task box, that is inside a
@@ -4269,7 +4456,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       after = (voiceTarget && voiceTarget.after) || "";
     }
     el.value = head + after;
-    if (!voiceTarget) inputFromVoice = true;   // grammar-correction flag: composer only
+    if (el === inputEl) inputFromVoice = true;   // grammar-correction flag: composer only
     el.dispatchEvent(new Event("input"));
     if (voiceTarget) {
       // Caret after the inserted words, so you can keep typing where you left off.
@@ -4399,6 +4586,52 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     findHits = []; findAt = -1;
   }
   document.getElementById("mm-search").addEventListener("click", (e) => { e.stopPropagation(); findOpen(); });
+  const mmStar = document.getElementById("mm-star");
+  const bmModal = document.getElementById("bm-modal");
+  const bmListEl = document.getElementById("bm-list");
+  document.getElementById("bm-close").addEventListener("click", () => bmModal.classList.remove("show"));
+  if (mmStar) mmStar.addEventListener("click", (e) => {
+    e.stopPropagation();
+    modeMenu.style.display = "none";
+    bmShow();
+  });
+  function bmShow() {
+    bmListEl.textContent = "";
+    const items = [...bmMap.values()];
+    if (!items.length) {
+      bmListEl.innerHTML = '<div class="ask-empty">还没有收藏。请求那一行的 ☆ 可以加。</div>';
+      bmModal.classList.add("show");
+      return;
+    }
+    for (const it of items) {
+      // Same row as the ☰ list: a dim fixed column, then one clipped line of the
+      // request's own words. A bookmark can be a paragraph; wrapping it turned this
+      // window into a wall of text with the controls lost inside it.
+      const row = document.createElement("div"); row.className = "ask-row";
+      row.title = it.text || "";
+      const when = document.createElement("span"); when.className = "ask-n";
+      // The round number is window-relative, so it is a hint; the time is what actually
+      // identifies the moment.
+      when.textContent = (it.ts ? String(it.ts).slice(5, 16).replace("T", " ") : "")
+        || (it.round != null ? "r" + _dispIdx(it.round) : "");
+      const txt = document.createElement("span"); txt.className = "ask-t";
+      txt.textContent = it.text || "(无文字)";
+      row.addEventListener("click", async () => {
+        bmModal.classList.remove("show");
+        await bmJump(it.uuid);
+      });
+      const del = document.createElement("button");
+      del.className = "bm-x"; del.textContent = "✕"; del.title = "取消收藏(办完了)";
+      del.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        await bmToggle({ uuid: it.uuid }, del);
+        bmShow();
+      });
+      row.appendChild(when); row.appendChild(txt); row.appendChild(del);
+      bmListEl.appendChild(row);
+    }
+    bmModal.classList.add("show");
+  }
   document.getElementById("find-close").addEventListener("click", findCloseBar);
   document.getElementById("find-prev").addEventListener("click", () => findStep(-1));
   document.getElementById("find-next").addEventListener("click", () => findStep(1));
@@ -4624,6 +4857,100 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const v = (ver == null ? 0 : ver);
     if (attachedSid !== checkSid || v !== checkVerSeen) checkLoad(attachedSid, v);
   }
+  // ---------- ★ bookmarked requests ----------
+  // Somewhere to come back to in a long session. Addressed by the entry's uuid: _idx is
+  // numbered per window, so it points at a different message once you have paged in more
+  // history. The byte offset the server records alongside it is for a future "open the
+  // window right at this round"; today the jump scrolls to the message if it is loaded
+  // and pages back looking for it if it is not.
+  let bmMap = new Map(), bmSid = "";
+  const bmHas = (uuid) => !!uuid && bmMap.has(uuid);
+  async function bmLoad(sid) {
+    if (!sid) { bmMap = new Map(); bmSid = ""; bmPaint(); return; }
+    try {
+      const r = await authedFetch("/api/bookmarks?claude_session_id=" + encodeURIComponent(sid));
+      if (!r.ok || sid !== attachedSid) return;
+      const j = await r.json();
+      bmMap = new Map((j.items || []).map(x => [x.uuid, x]));
+      bmSid = sid;
+      bmPaint();
+    } catch {}
+  }
+  // The stars already on screen, plus the count in the ⚙ menu. Cheaper and less
+  // disruptive than a re-render — a rebuild would fight the scroll position.
+  function bmPaint() {
+    for (const b of transcriptEl.querySelectorAll(".star-btn")) {
+      const on = bmHas(b.dataset.uuid);
+      b.textContent = on ? "★" : "☆";
+      b.classList.toggle("on", on);
+      b.title = on ? "已收藏(点一下取消) · ⚙ → ★ 列表" : "收藏这条请求,方便以后跳回来";
+    }
+    const n = bmMap.size;
+    if (mmStar) {
+      mmStar.textContent = n ? "★" + n : "★";
+      // Never disabled. A disabled button and a broken button look identical, so with
+      // nothing saved this opens anyway and the window says where the ☆ lives.
+      mmStar.title = n ? "跳回收藏的请求(" + n + " 条)" : "查看收藏(还没有)";
+    }
+  }
+  async function bmToggle(b, btn) {
+    if (!attachedSid || !b.uuid) return;
+    const add = !bmHas(b.uuid);
+    if (btn) btn.disabled = true;
+    try {
+      const r = await authedFetch("/api/bookmarks", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ claude_session_id: attachedSid, uuid: b.uuid, add,
+                               round: b.round, ts: b.ts || "",
+                               text: (b.text || "").slice(0, 400) }),
+      });
+      if (!r.ok) { alert("收藏失败: HTTP " + r.status); return; }
+      const j = await r.json();
+      bmMap = new Map((j.items || []).map(x => [x.uuid, x]));
+      bmPaint();
+    } catch (e) { alert("收藏失败: " + (e && e.message)); }
+    finally { if (btn) btn.disabled = false; }
+  }
+  function makeStarBtn(b) {
+    const btn = document.createElement("button");
+    btn.className = "copy-btn star-btn";
+    btn.dataset.uuid = b.uuid || "";
+    btn.textContent = bmHas(b.uuid) ? "★" : "☆";
+    btn.classList.toggle("on", bmHas(b.uuid));
+    btn.title = bmHas(b.uuid) ? "已收藏(点一下取消) · ⚙ → ★ 列表"
+                              : "收藏这条请求,方便以后跳回来";
+    btn.addEventListener("click", (e) => { e.stopPropagation(); bmToggle(b, btn); });
+    return btn;
+  }
+  // Jump: it is usually already loaded, and when it is not, paging back is the only way
+  // in today. Capped and narrated — an unbounded loop over a 900-round session would
+  // look like a hang, and silently giving up would look like a broken bookmark.
+  const BM_PAGES = 12;
+  async function bmJump(uuid) {
+    const find = () => transcriptEl.querySelector('[data-uuid="' + uuid + '"]');
+    let el = find();
+    for (let i = 0; !el && i < BM_PAGES && hasMoreHistory; i++) {
+      showLoading("往前找收藏的那一条… " + (i + 1) + "/" + BM_PAGES);
+      await loadEarlierRounds(8);
+      el = find();
+    }
+    hideLoading();
+    if (!el) {
+      alert("这条在已载入的范围之外,往前翻 " + BM_PAGES + " 页还没找到。\n"
+            + "可以继续点「Load earlier rounds」再试。");
+      return false;
+    }
+    shouldAutoscroll = false;
+    // Your own long requests fold in the middle. Landing on one folded is landing on
+    // half of what you came back for, so open it.
+    const fb = el.querySelector(".fold-btn");
+    if (fb && /展开|expand|\.\.\./.test(fb.textContent || "")) fb.click();
+    el.scrollIntoView({ block: "center" });
+    el.classList.add("find-hit", "find-at");       // the same highlight find uses
+    setTimeout(() => el.classList.remove("find-hit", "find-at"), 2600);
+    return true;
+  }
+
   async function memoLoad(sid, ver) {
     if (!sid) { memoRec = null; memoSid = ""; memoVerSeen = -1; memoRender(); return; }
     try {
@@ -4642,6 +4969,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   function memoSync(ver) {
     const v = (ver == null ? 0 : ver);
     if (attachedSid !== memoSid || v !== memoVerSeen) memoLoad(attachedSid, v);
+    if (attachedSid !== bmSid) bmLoad(attachedSid);     // ★ list follows the session
   }
   const memoVerCur = document.getElementById("memo-vercur");
   const memoVersEl = document.getElementById("memo-vers");
@@ -5757,6 +6085,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       t.textContent = fitHT(full, availPx, font) || "(空)";
       b.title = full.slice(0, 2000);
       b.appendChild(num); b.appendChild(t);
+      // A ♥ on the ones you kept. Read off the same map the ★ buttons use, so the two
+      // views cannot disagree; after the number, before the text, where a column of
+      // them is scannable rather than hunting for it at the end of ragged lines.
+      if (bmHas(n.dataset.uuid)) {
+        const h = document.createElement("span");
+        h.className = "ask-heart"; h.textContent = "♥"; h.title = "已收藏";
+        b.insertBefore(h, t);
+        b.classList.add("has-bm");
+      }
       b.addEventListener("click", (e) => {
         e.stopPropagation();
         shouldAutoscroll = false;
@@ -6700,14 +7037,26 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
             if (st.done !== lastDone) { lastDone = st.done; loadItermTabs(); }   // refresh as each tab appears
             if (!st.running) {
               const stopped = !!st.cancelled;
-              snapStatus.textContent = (stopped ? "stopped " : "resumed ")
-                + `${st.resumed}/${st.total}`;
-              const rl = (st.results || []).map(x => `[${(x.sid || "").slice(0, 8)}] ${x.name || ""} — ${x.status}`).join("\n");
+              // A session that was ALREADY running is a success — it is up, which is all
+              // resume was asked for. Counting only the newly-opened ones made "resumed
+              // 1/19" the headline of a run where 18 were fine, which reads as 18
+              // failures: it is why a session that had been running for two hours got
+              // reported as "failed to resume".
+              const rows = st.results || [];
+              const bad = rows.filter(x => /^(failed|iterm error)/.test(x.status || ""));
+              const line = x => `[${(x.sid || "").slice(0, 8)}] ${x.name || ""} — ${x.status}`;
+              const okN = rows.length - bad.length;
+              snapStatus.textContent = (stopped ? "stopped " : "ok ")
+                + `${okN}/${st.total}` + (bad.length ? ` · ${bad.length} failed` : "");
+              // Failures first: they are the only part that wants anything from you.
+              const rl = (bad.length ? bad.map(line).join("\n") + "\n\n" : "")
+                + rows.filter(x => bad.indexOf(x) < 0).map(line).join("\n");
               alert((stopped
                       // Say plainly what a stop did and did NOT do: the tabs already
                       // opened are still there, and stopping never closes anything.
                       ? `已停止恢复:开了 ${st.resumed}/${st.total} 个就停下了。\n已经开出来的 tab 保留(不会替你关掉)。\n\n`
-                      : `恢复完成(resumed ${st.resumed}/${st.total}):\n\n`) + rl);
+                      : `${okN}/${st.total} 就绪(新开 ${st.resumed} · 本来就在跑 ${okN - st.resumed})`
+                        + (bad.length ? ` · ${bad.length} 个失败` : "") + ":\n\n") + rl);
               loadItermTabs();
               resolve(); return;
             }
@@ -8507,7 +8856,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (!resp.ok) {
       const t = await resp.text();
       hideLoading();
-      alert("Attach failed: " + t);
+      // The detail can now BE the terminal's own output (why the agent didn't start),
+      // and that is worth reading — so show the text, not the JSON it arrived in.
+      let msg = t;
+      try { const j = JSON.parse(t); if (j && j.detail) msg = String(j.detail); } catch {}
+      alert("Attach failed: " + msg);
       return;
     }
     const data = await resp.json();
@@ -9640,6 +9993,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const msg = entry.message || entry;
     const content = msg.content;
     const idx = entry._idx, round = entry._round, ts = entry.timestamp, sid = entry.sid;
+    // The entry's own uuid. _idx is window-relative (see /api/bookmarks in cc_web.py),
+    // so anything meant to survive a reload is addressed by this instead.
+    const uuid = entry.uuid || "";
 
     if (renderMode === "brief") {
       if (entry.isMeta || entry.toolUseResult) return;
@@ -9650,18 +10006,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         text = content.filter(p => p && p.type === "text" && p.text).map(p => p.text).join("\n\n");
         for (const p of content) if (p && p.type === "tool_use") tools.push(p);
       }
-      if (text.trim()) yield { kind: "text", role, text, idx, round, ts, sid, queued: !!entry._queued, system: !!entry._system };
+      if (text.trim()) yield { kind: "text", role, text, idx, round, ts, sid, uuid, queued: !!entry._queued, system: !!entry._system };
       // brief also shows tool-calls (name only) → stacked "Tool calls" block
       for (const p of tools) yield { kind: "tool_use", id: p.id, name: p.name || "?", input: p.input, desc: p.desc, idx, round, ts, sid };
       return;
     }
     // all mode
     if (typeof content === "string") {
-      if (content.trim()) yield { kind: "text", role, text: content, idx, round, ts, sid, system: !!entry._system, queued: !!entry._queued };
+      if (content.trim()) yield { kind: "text", role, text: content, idx, round, ts, sid, uuid, system: !!entry._system, queued: !!entry._queued };
       return;
     }
     if (!Array.isArray(content)) return;
-    const common = { idx, round, ts, sid };
+    const common = { idx, round, ts, sid, uuid };
     for (const p of content) {
       if (!p) continue;
       if (p.type === "text" && p.text && p.text.trim()) yield { kind: "text", role, text: p.text, ...common };
@@ -10235,6 +10591,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // thing carrying a dataset.idx was the stacked tool row, so every lookup missed and
     // the search sat at 0/0 with the words visible on screen.
     if (b.idx != null) div.dataset.idx = b.idx;
+    if (b.uuid) div.dataset.uuid = b.uuid;      // what a bookmark comes back to
     const role = document.createElement("div");
     role.className = "role";
     const label = document.createElement("span");
@@ -10250,7 +10607,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // (1e9) so "load earlier" can count down without going negative. That base
     // is an implementation detail — strip it for display so we show small
     // human-readable numbers (r42 · #1302), not r1000000042 · #1000001302.
-    const _disp = n => (typeof n === "number" && n >= 1000000000) ? n - 1000000000 : n;
+    // (_dispIdx, shared: this was a second copy of the same one-liner.)
+    const _disp = _dispIdx;
     // Round + time only. #idx and the short sid are addresses, not information you read
     // a message by — and on the row under every message they were two thirds of it. Both
     // stay on hover, and neither was load-bearing: the mismatch warning has its own
@@ -10319,6 +10677,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
       role.appendChild(makeLinksBtn(() => rawTextFor(b)));
       if (extractCommands(rawTextFor(b)).length) role.appendChild(makeCmdsBtn(() => rawTextFor(b)));
+      // ★ only on your own requests: they are what you come back to look for.
+      if (b.role === "user" && !b.system && b.uuid) role.appendChild(makeStarBtn(b));
       if (b.role === "user" && !b.system) role.appendChild(makeCorrectBtn(div, b.text));
       role.appendChild(makeCopyBtn(() => rawTextFor(b)));
       // The meta row goes UNDER the text. Experiment (2026-09-21): it carries who said
@@ -11032,10 +11392,72 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
     } catch (e) { tailPre.textContent = "Error: " + e; }
   }
+  // ---------- the control pages, as an overlay over this one ----------
+  // Leaving for /remote/ unloaded the session view: coming back re-fetched the
+  // transcript and lost the place you were reading. Same pages, shown here instead.
+  const ctrlModal = document.getElementById("ctrl-modal");
+  const ctrlFrame = document.getElementById("ctrl-frame");
+  const ctrlOpenA = document.getElementById("ctrl-open");
+  function ctrlOpen(url, label) {
+    ctrlOpenA.href = url;
+    // embed=1: the control page then hides its own ← (inside a frame that link would
+    // navigate the FRAME to the session list, which looks like the app breaking).
+    ctrlFrame.src = url + (url.includes("?") ? "&" : "?") + "embed=1";
+    ctrlModal.classList.add("show");
+    // Full screen means "all of the browser's viewport", NOT the OS kind:
+    // requestFullscreen() was tried here and taken straight out — it threw the window
+    // out of the browser, hiding the tabs and the address bar, which is not what was
+    // asked for and is a jarring thing to happen to a tap.
+    // A history entry, so Android's back button and iOS's edge-swipe close the overlay
+    // instead of leaving the app.
+    try { history.pushState({ ccCtrl: 1 }, "", location.href); } catch {}
+  }
+  function ctrlClose(fromPop) {
+    if (!ctrlModal.classList.contains("show")) return;
+    ctrlModal.classList.remove("show");
+    // Torn down, not hidden: the control page polls screenshots on a timer, and a
+    // hidden-but-alive frame would keep capturing the mac for as long as the tab lives.
+    ctrlFrame.src = "about:blank";
+    if (!fromPop) { try { history.back(); } catch {} }
+  }
+  ctrlModal.addEventListener("click", (e) => { if (e.target === ctrlModal) ctrlClose(); });
+  document.getElementById("ctrl-close").addEventListener("click", (e) => { e.stopPropagation(); ctrlClose(); });
+  window.addEventListener("popstate", () => ctrlClose(true));
+  // The three ways in. They stay real links — middle-click and long-press still open a
+  // tab, which is what you want on a desktop — so only a plain left-click is taken over.
+  for (const [id, label] of [["remote-btn", "remote"], ["mm-ctrl-phone", "phone"],
+                             ["mm-ctrl-desk", "desktop"]]) {
+    const a = document.getElementById(id);
+    if (!a) continue;
+    a.addEventListener("click", (e) => {
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button) return;
+      e.preventDefault(); e.stopPropagation();
+      hideModeMenu();                       // the ⚙ dropdown these two entries live in
+      ctrlOpen(a.getAttribute("href"), label);
+    });
+  }
   document.getElementById("float-controls").addEventListener("click", (e) => e.stopPropagation());
   tailBtn.addEventListener("click", (e) => { e.stopPropagation(); tailScreen(); });
   document.getElementById("tail-refresh").addEventListener("click", (e) => { e.stopPropagation(); tailScreen(); });
   tailClose.addEventListener("click", (e) => { e.stopPropagation(); tailBox.style.display = "none"; });
+  // Esc / ↑ / clear-line, through the same sendRaw() the screen window's buttons use —
+  // one key path, not a second copy of the escape sequences. Then re-read this box:
+  // pressing a key and seeing nothing change is indistinguishable from a dead button, so
+  // it refreshes twice — once for a quick repaint, once for claude taking a moment.
+  function tailKey(seq) {
+    return async (e) => {
+      e.stopPropagation();
+      await sendRaw(seq, false);
+      await tailScreen();
+      setTimeout(tailScreen, 450);
+    };
+  }
+  document.getElementById("tail-esc").addEventListener("click", tailKey("\x1b"));
+  document.getElementById("tail-up").addEventListener("click", tailKey(UP));
+  // Ctrl-E to the end of the line, then Ctrl-U to kill back to its start — the same pair
+  // the screen window's ⌫ line uses, because Ctrl-U alone leaves anything right of the
+  // caret behind.
+  document.getElementById("tail-clear").addEventListener("click", tailKey("\x05\x15"));
 
   // Two explicit controls (split from the old single tap-zone):
   //   ↻ fresh  → one-shot "get latest" now, regardless of paused/idle state
@@ -11139,6 +11561,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     return null;
   }
   document.addEventListener("keydown", (e) => {
+    // The control overlay is the topmost thing on screen when open, and its iframe has
+    // its own key handling — this only fires when focus is still on THIS document.
+    if (e.key === "Escape" && ctrlModal.classList.contains("show")) {
+      e.preventDefault(); ctrlClose(); return;
+    }
     // Esc closes the ask list first — it's the topmost thing on screen when open.
     if (e.key === "Escape" && asksMenu.style.display !== "none") {
       e.preventDefault(); hideAsksMenu(); return;
@@ -11735,7 +12162,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // and this way a reminder typed by hand counts too, since the tag is all it reads.
         const mtag = Object.keys(MEMO_TAG).find((k) => body.startsWith(MEMO_TAG[k]));
         if (mtag) memoPost({ mark_sent: mtag, version: memoEditing || undefined });
-        inputEl.value = ""; inputEl.style.height = "auto";
+        inputEl.value = ""; fitInput();   // …and un-stack the row the long text grew into
         pendingUploads = []; renderUploadRow();
         keepAlive(); schedulePoll(400);
       } else if (resp.status === 410) {
@@ -11797,7 +12224,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // NOT `inputEl.value = text`: if you dictated with something already in the box, the
     // dictation was appended to it, and replacing the whole box here would throw that
     // away. The variant being chosen is only ever the NEW part.
-    inputEl.value = _joinDict(lastAsrBefore, text); inputEl.style.height = "auto";
+    inputEl.value = _joinDict(lastAsrBefore, text) + (lastAsrAfter || "");
+    inputEl.style.height = "auto";
     inputFromVoice = true;   // ASR-originated → no grammar correction on send
     inputEl.dispatchEvent(new Event("input"));
     inputEl.focus();
@@ -11969,10 +12397,25 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (e.shiftKey) return;            // Shift+Enter → default newline
     e.preventDefault(); send();        // desktop Enter → send
   });
-  inputEl.addEventListener("input", () => {
+  // One place that decides the composer's HEIGHT and its SHAPE. The shape decision is
+  // made at the one-row width — always, even while stacked — because the stacked box is
+  // wider: text that needs two lines beside the buttons often fits on one across the
+  // full width, and deciding from the current geometry would flip the layout back and
+  // forth on a single keystroke. One line is computed from the font rather than
+  // remembered, so a/A (--cs) cannot leave a stale threshold behind.
+  function fitInput() {
+    const row = inputEl.closest(".input-row");
+    if (row) row.classList.remove("stack");
     inputEl.style.height = "auto";
+    const narrow = inputEl.scrollHeight;          // measured in the one-row geometry
+    const cs = getComputedStyle(inputEl);
+    // scrollHeight is content + padding (borders excluded), so one line is the same sum.
+    let one = parseFloat(cs.lineHeight) + parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+    if (!(one > 0)) one = 44;                     // line-height: normal → unparseable
+    if (row) row.classList.toggle("stack", narrow > one + 2);
     inputEl.style.height = Math.max(44, Math.min(inputEl.scrollHeight, window.innerHeight * 0.4)) + "px";
-  });
+  }
+  inputEl.addEventListener("input", fitInput);
   // Real user edits fire beforeinput (programmatic .value= / dispatched events do
   // NOT) → any manual typing/paste clears the voice-origin flag so an edited
   // voice draft gets grammar-checked like normal typing.
@@ -12030,9 +12473,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // both the re-polish call and the popup's "use this" need it: the dictation was
   // APPENDED to it, so anything that rebuilds the box from a chosen variant has to put
   // it back or it silently eats what you had already written.
-  let lastAsrBefore = "";
+  let lastAsrBefore = "", lastAsrAfter = "";   // the two sides of the caret it went in at
   let asrConfigs = [], asrWhich = localStorage.getItem("cc_asr_which") || "";
   let asrRtAvail = false, sonioxAvail = false, realtimeEngines = [], asrRtEngine = localStorage.getItem("cc_asr_rt_engine") || "", asrRt = localStorage.getItem("cc_asr_rt") === "1";   // realtime (streaming) ASR
+  // What language the recogniser should expect. Soniox was pinned to zh+en server-side
+  // and the other two engines were given nothing at all, i.e. detect-it-yourself —
+  // which on a short clip is how a Chinese sentence comes back as English.
+  // The OPTIONS come from the conf (asr_langs=zh|en|zh+en), not from here: which
+  // languages this machine's owner speaks is not something the code can know. An option
+  // is one or more codes joined by `+`. The choice is remembered per browser.
+  let asrLangs = [], asrLangDefault = "", asrLang = localStorage.getItem("cc_asr_lang") || "";
+  let asrPane = "model";   // "model" | "lang" — what the second row of the voice section lists
   // (realtime-voice session state lives in Voice.s — see the Voice module below)
 
   // Two-level Voice menu: first pick a mode (⚡实时 / 🎤非实时), then the model for that mode.
@@ -12068,11 +12519,26 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const mk = (on, title) => {
         const b = document.createElement("button"); b.className = "sw-item"; b.textContent = title;
         if (asrRt === on) b.classList.add("current");
-        b.addEventListener("click", (e) => { e.stopPropagation(); asrRt = on; localStorage.setItem("cc_asr_rt", on ? "1" : "0"); renderAsrMenu(); });
+        // Tab semantics: the row below shows the options of whichever chip you just
+        // pressed. Picking a mode without this left the row on the language list — you
+        // pressed `⚡ live` and the engines did not come back.
+        b.addEventListener("click", (e) => { e.stopPropagation(); asrRt = on; asrPane = "model"; localStorage.setItem("cc_asr_rt", on ? "1" : "0"); renderAsrMenu(); });
         return b;
       };
       box.appendChild(mk(true, "⚡ live"));
       box.appendChild(mk(false, "🎤 batch"));
+      // Three chips, one row below: whichever chip you press, the row shows ITS options
+      // — live → the streaming engines, batch → the batch engines, lang → the languages.
+      // Two levels were already here (mode → its models); the languages join them
+      // instead of taking a third row, and rows are the scarce thing in a menu you
+      // operate with a thumb.
+      if (asrLangs.length) {
+        const b = document.createElement("button"); b.className = "sw-item";
+        b.textContent = "lang"; b.title = "识别语言(点开在下面一行选)";
+        if (asrPane === "lang") b.classList.add("current");
+        b.addEventListener("click", (e) => { e.stopPropagation(); asrPane = "lang"; renderAsrMenu(); });
+        box.appendChild(b);
+      }
     }
     // 2) model for the chosen mode (display names only — real model names stay server-side)
     // Every option here is prefixed with the same vendor ("OpenAI 4o-mini", "OpenAI
@@ -12084,7 +12550,20 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
                      && names.every(n => n.split(" ")[0] === first && n.includes(" "));
       return (n) => common ? n.slice(first.length + 1) : n;
     };
-    if (asrRt && asrRtAvail) {   // realtime: pick the streaming engine (Soniox / OpenAI / …)
+    if (asrPane === "lang" && asrLangs.length) {
+      // One button per option the conf lists (asr_langs=zh|en|zh+en) — the page has no
+      // opinion about which languages exist. The label IS the setting.
+      const box = line("lang");
+      for (const v of asrLangs) {
+        const b = document.createElement("button"); b.className = "sw-item";
+        b.textContent = v;
+        b.title = v.includes("+") ? "同时按这几种语言识别: " + v.split("+").join(" + ")
+                                  : "只按 " + v + " 识别";
+        if (asrLang === v) b.classList.add("current");
+        b.addEventListener("click", (e) => { e.stopPropagation(); asrLang = v; localStorage.setItem("cc_asr_lang", v); renderAsrMenu(); });
+        box.appendChild(b);
+      }
+    } else if (asrRt && asrRtAvail) {   // realtime: pick the streaming engine (Soniox / OpenAI / …)
       const box = line("model");
       const cut = shorten(realtimeEngines.map(e => e.display || ""));
       for (const e of realtimeEngines) {
@@ -12112,6 +12591,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       if (!r.ok) return;
       const cfgJson = await r.json();
       asrConfigs = cfgJson.configs || [];
+      asrLangs = cfgJson.langs || [];
+      asrLangDefault = cfgJson.lang_default || "";
+      // A remembered choice that is no longer offered (conf edited) falls back to the
+      // configured default rather than silently sending something nobody listed.
+      if (!asrLangs.includes(asrLang)) asrLang = asrLangDefault;
       sonioxAvail = !!cfgJson.soniox;
       realtimeEngines = cfgJson.realtime_engines || [];
       asrRtAvail = realtimeEngines.length > 0;
@@ -12376,14 +12860,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // Restores the TARGET, which is not always the composer any more. These two
       // writes were missed when the target became configurable: dictate into a Task
       // box, press ✕, and the box's own text was written into the composer instead.
-      if (before != null) vtWrite(before, "");
+      vtRestore(before);
       _voiceDone();
       return;
     }
     if (Voice.s) { Voice.cancel(); return; }
     if (_batchResult) {
       const r = _batchResult; _batchResult = null;
-      vtWrite(r.before || "", "");
+      vtRestore(r.before || "");
       _voiceDone();
       return;
     }
@@ -12572,6 +13056,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         const qs = new URLSearchParams();
         if (asrWhich) qs.set("which", asrWhich);
         if (attachedSid) qs.set("sid", attachedSid);   // context → ASR prompt (bias domain vocab)
+        // One ISO code is all /v1/audio/transcriptions takes, so zh+en sends zh — the
+        // language of the sentence, with English words in it.
+        if (asrLang && asrLang !== "auto") qs.set("lang", asrLang.split("+")[0]);
         const ar = await authedFetch("/api/asr?" + qs.toString(), { method: "POST",
           headers: { "content-type": blob.type || "audio/webm" }, body: blob, timeoutMs: 60000 });
         if (!ar.ok) return { why: "batch transcription failed — HTTP " + ar.status };
@@ -12697,8 +13184,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // "discard" has to put the box back the way it was — the batch path already did
       // this, the realtime path silently kept the text.
       _recording = false; Voice.teardown(); Voice.s = null;
-      vtWrite(s.before, "");
-      _setMic("idle");
+      // As it was, not "before + nothing": `before` can carry the seam space the words
+      // were going to follow, and this used to leave it behind.
+      vtRestore(s.before);
+      // _voiceDone, not _setMic("idle"): the marker has to come out and the target has
+      // to be handed back, which is the same cleanup every other ending does.
+      _voiceDone();
     },
     // Abnormal end (stream dead, audio capture blew up, mic taken away by the OS).
     // Releases the hardware but does NOT hide the popup: it parks with the reason
@@ -12798,7 +13289,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       _setMic("busy");
       _recPolishStart();   // spinner + counting seconds in the time slot until this returns
       lastAsrRaw = raw; lastAsrSec = null; lastPolishSec = null; lastPolished = "";
-      lastAsrBefore = before || "";
+      lastAsrBefore = before || ""; lastAsrAfter = (voiceTarget && voiceTarget.after) || "";
       // Own the abort so the bar's buttons can cut the wait short. authedFetch only
       // applies its own timeoutMs when the caller passes no signal, so keep the 60s
       // ceiling here.
@@ -12842,7 +13333,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     },
     apply(raw, before, mode) {   // put text in the box, then act by mode (both ⚙ modes)
       lastAsrRaw = raw || ""; lastAsrSec = null;   // long-press debug view: what the ASR returned
-      lastAsrBefore = before || "";
+      lastAsrBefore = before || ""; lastAsrAfter = (voiceTarget && voiceTarget.after) || "";
       // "park": an auto-stop (5-min cap) — don't decide for the user. Text goes in
       // the box AND the popup stays open with the reason + Polish/Edit/Send/Cancel.
       if (mode === "park") {
@@ -12942,6 +13433,12 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const stream = s0.stream, provider = s0.provider;
       const qs = new URLSearchParams({ token: authToken, provider });
       if (attachedSid) qs.set("sid", attachedSid);   // both engines bias on conversation context; real model stays server-side
+      // Both spellings, because the two engines take different ones: Soniox wants every
+      // code as language_hints, OpenAI realtime a single `language`.
+      if (asrLang) {
+        qs.set("langs", asrLang.split("+").join(","));
+        if (asrLang !== "auto") qs.set("lang", asrLang.split("+")[0]);
+      }
       const proto = location.protocol === "https:" ? "wss" : "ws";
       const ws = new WebSocket(proto + "://" + location.host + "/api/asr-stream?" + qs.toString());
       ws.binaryType = "arraybuffer"; s0.ws = ws; s0.opened = false;
@@ -13169,7 +13666,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // clock — so the seconds count real captured audio, not the time spent opening.
     Voice.start(stream, !(asrRt && asrRtAvail));
   }
-  micBtn.addEventListener("click", () => { voiceTarget = null; micTap(); });
+  // The composer gets the same treatment as a Task box: the words go in at the CARET,
+  // and a [🎤] marks the spot while you talk. `pick` stays false — the composer keeps
+  // writing as you speak and keeps Polish / Edit / Send; only the destination changed.
+  // Guarded on _recording: a second tap means "stop", and dropping a second marker (and
+  // a fresh target) into a running session would be the opposite of that.
+  micBtn.addEventListener("click", () => {
+    if (!_recording && !_micArming) { voiceTarget = { el: inputEl, pick: false, after: "" }; vtMarkIn(); }
+    micTap();
+  });
 
   // The Task boxes. Same recorder, different destination — and `pick: true`, which is
   // what makes it show you both versions instead of writing as it goes.
