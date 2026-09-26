@@ -578,8 +578,91 @@ def main():
         # wrong (it read the correct fallback as a 64px error).
         check("...adjacent to the selection, and not over the words",
               placed["above"] or placed["below"], f'gapAbove={placed["over"]}')
-        # ...and when there IS room above, that is where it goes: over the text you just
-        # selected is where a thumb already is.
+        # …and for a selection of several lines, at the END of it: the point you just
+        # dragged to. Against the whole selection's bounding box the bar drifted to the
+        # top-centre of the paragraph — for a long pick that is the other end from your
+        # finger, and it sat over the message above.
+        multi = drv.js("""
+          document.getElementById('sel-bar').style.display = 'none';
+          const m = document.getElementById('main');
+          m.innerHTML = '';
+          const pad = document.createElement('div'); pad.style.height = '120px';
+          m.appendChild(pad);
+          const a = document.createElement('div');
+          a.className = 'msg assistant';
+          // Long enough to wrap several times at this width, and ending mid-line so the
+          // end point is nowhere near the box's centre.
+          a.textContent = 'FCM/APNs 的推送是一次性投递。'.repeat(6) + ' 到后台再弹。';
+          m.appendChild(a);
+          const r = document.createRange(); r.selectNodeContents(a);
+          const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+          document.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+          return null;
+        """)
+        drv.wait("getComputedStyle(document.getElementById('sel-bar')).display !== 'none' ? 1 : 0", tries=20)
+        me = drv.js("""
+          const b = document.getElementById('sel-bar').getBoundingClientRect();
+          const rg = window.getSelection().getRangeAt(0);
+          const all = rg.getBoundingClientRect();
+          const rects = [...rg.getClientRects()].filter(r => r.width > 0 || r.height > 0);
+          const end = rects[rects.length - 1];
+          return { lines: rects.length,
+                   dyEnd: Math.round(Math.min(Math.abs(b.top - end.bottom), Math.abs(end.top - b.bottom))),
+                   dyStart: Math.round(Math.min(Math.abs(b.top - all.top), Math.abs(all.top - b.bottom))),
+                   dxEnd: Math.round(Math.abs((b.left + b.right) / 2 - end.right)),
+                   dxMid: Math.round(Math.abs((b.left + b.right) / 2 - (all.left + all.right) / 2)),
+                   onScreen: b.left >= 0 && b.top >= 0
+                          && b.right <= window.innerWidth && b.bottom <= window.innerHeight };
+        """)
+        check("a multi-line selection puts the bar at its END",
+              me["lines"] >= 3 and me["dyEnd"] <= 12, str(me))
+        check("...not at the start, and not centred on the whole block",
+              me["dyEnd"] < me["dyStart"] and me["dxEnd"] <= me["dxMid"], str(me))
+        check("...still fully on screen", me["onScreen"] is True, str(me))
+        # A scroll used to hide it — backwards, since you scroll to see more of what you
+        # just selected. It follows the text now, and only a press OUTSIDE dismisses it.
+        # (The follow is rAF-throttled, hence the wait for a frame.)
+        scrolled = drv.js("""
+          const bar = document.getElementById('sel-bar');
+          const m = document.getElementById('main');
+          // The fixture is shorter than the viewport, so scrollTop would not budge and
+          // the probe would "pass" by measuring nothing moving. Give it something to
+          // scroll (appended AFTER the selection, which it leaves alone).
+          const tall = document.createElement('div');
+          tall.style.height = '2000px'; m.appendChild(tall);
+          const rg = () => { const r = [...window.getSelection().getRangeAt(0).getClientRects()]
+                                        .filter(x => x.width > 0 || x.height > 0);
+                             return r[r.length - 1]; };
+          const before = { top: bar.getBoundingClientRect().top, end: rg().bottom };
+          m.scrollTop = m.scrollTop + 60;
+          m.dispatchEvent(new Event('scroll', { bubbles: false }));
+          return new Promise(res => requestAnimationFrame(() => requestAnimationFrame(() => {
+            const after = { shown: getComputedStyle(bar).display !== 'none',
+                            top: bar.getBoundingClientRect().top, end: rg().bottom };
+            res({ before, after,
+                  moved: Math.abs(after.top - before.top) > 20,
+                  stillUnderEnd: Math.abs(after.top - after.end) <= 12 });
+          })));
+        """)
+        check("scrolling does NOT dismiss it", scrolled["after"]["shown"] is True, str(scrolled))
+        check("...it follows the text it belongs to",
+              scrolled["moved"] is True and scrolled["stillUnderEnd"] is True, str(scrolled))
+        dismiss = drv.js("""
+          const bar = document.getElementById('sel-bar');
+          // A press on the bar is a button doing its job — it must not dismiss it.
+          bar.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+          const onBar = getComputedStyle(bar).display !== 'none';
+          // …and a press anywhere else does.
+          document.getElementById('main').dispatchEvent(
+            new PointerEvent('pointerdown', { bubbles: true }));
+          return [onBar, getComputedStyle(bar).display !== 'none'];
+        """)
+        check("...a press ON the bar keeps it", dismiss[0] is True, str(dismiss))
+        check("...and a press outside is what dismisses it", dismiss[1] is False, str(dismiss))
+        # ...and wherever the selection is, the bar goes UNDER the end of it while there
+        # is room: that is the space you just stopped dragging in, and it is the side
+        # iOS leaves free. (This check used to demand "above, when there is room above"
+        # — the old rule, which for a multi-line pick put the bar on top of the words.)
         lower = drv.js("""
           // Hidden FIRST: the bar is already on screen from the case above, so waiting
           // for "visible" would be satisfied instantly and measure the OLD position —
@@ -604,11 +687,15 @@ def main():
         drv.wait("getComputedStyle(document.getElementById('sel-bar')).display !== 'none' ? 1 : 0", tries=20)
         mid = drv.js("""
           const b = document.getElementById('sel-bar').getBoundingClientRect();
-          const sr = window.getSelection().getRangeAt(0).getBoundingClientRect();
-          return { gap: Math.round(sr.top - b.bottom), selTop: Math.round(sr.top) };
+          const rg = window.getSelection().getRangeAt(0);
+          const sr = rg.getBoundingClientRect();
+          const rects = [...rg.getClientRects()].filter(r => r.width > 0 || r.height > 0);
+          const end = rects[rects.length - 1];
+          return { under: Math.round(b.top - end.bottom), selTop: Math.round(sr.top),
+                   covers: b.top < sr.bottom - 1 && b.bottom > sr.top + 1 };
         """)
-        check("...a selection in the TOP part gets the bar above it",
-              0 <= mid["gap"] <= 12, str(mid))
+        check("...a selection in the TOP part gets the bar under its end",
+              0 <= mid["under"] <= 12 and mid["covers"] is False, str(mid))
         # The other side, and the reason for it: iOS puts its own Look Up / Copy bar
         # just above the selection whenever there is room, so for anything past the
         # middle of the screen ours has to go below or the two land on top of each

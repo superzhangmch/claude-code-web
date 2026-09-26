@@ -256,7 +256,12 @@ check("...honouring the ⚙-selected batch engine + session context",
 check("...the words appear in the bar", bar().includes("first bit"), bar().slice(0, 60));
 check("...followed by the status only, never instructions",
       /batch mode/.test(bar()) && !/tap ▶/.test(bar()) && !/Polish \/ Edit \/ Send/.test(bar()), bar().slice(0, 110));
-check("...and in the input box", inputEl.value === "first bit", inputEl.value);
+// NOT in the input box, on purpose. Writing each token in as it arrived consumed the
+// [🎤] marker on the first one — so the only thing showing where the words would land
+// disappeared the moment you started talking. The box is written once, by the button you
+// press (Polish / Edit / Send), which the cases below drive.
+check("...and NOT into the input box while you are still talking",
+      inputEl.value === "", JSON.stringify(inputEl.value));
 check("...Send becomes usable, as it does on the first realtime token", recSendEl.disabled === false);
 check("...the spinner ran in the time slot, leaving the transcript alone",
       spins.includes("start:asr") && spins.includes("stop"), spins.join(","));
@@ -811,6 +816,32 @@ console.log("=== ✕ means 'as it was', not 'before + nothing' ===");
   check("...and ✕ gives back the exact original", inputEl.value === "写了一半",
         JSON.stringify(inputEl.value));
   check("...with the target handed back too", voiceTarget === null);
+}
+
+console.log("=== the [🎤] marker survives the whole recording ===");
+// The point of the marker is to say where the words will land. Writing them in as they
+// streamed consumed it on the first token — so it was gone exactly while you were
+// talking, which is when you are looking for it.
+{
+  reset();
+  inputEl.value = "前面的话后面的话";
+  inputEl.selectionStart = inputEl.selectionEnd = 4;      // caret in the MIDDLE
+  voiceTarget = { el: inputEl, pick: false, after: "" };
+  vtMarkIn();
+  check("the marker goes in at the caret", inputEl.value === "前面的话[🎤]后面的话",
+        JSON.stringify(inputEl.value));
+  // Batch, because that is the path this harness can drive — and ⏸ mid-recording is
+  // exactly the moment the old code wrote into the box.
+  Voice.start(mkStream(), true); feedAudio(2);
+  asrQueue = ["说的第一句"];
+  Voice.togglePause(); await tick();
+  check("...and is still there after a segment comes back",
+        inputEl.value === "前面的话[🎤]后面的话", JSON.stringify(inputEl.value));
+  check("...with the words visible in the bar instead",
+        bar().includes("说的第一句"), bar().slice(0, 60));
+  Voice.stop("edit"); await tick(60);
+  check("...and Edit is what puts them in, exactly where the marker was",
+        inputEl.value === "前面的话说的第一句后面的话", JSON.stringify(inputEl.value));
 }
 
 console.log(_fails.length ? "\nFAILED: " + _fails.join(", ") : "\nall pass");

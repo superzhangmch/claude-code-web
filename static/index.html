@@ -4673,7 +4673,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const node = sel.anchorNode;
     const el = node && (node.nodeType === 1 ? node : node.parentElement);
     if (!main || !el || !main.contains(el)) return null;
-    return { text: t, rect: sel.getRangeAt(0).getBoundingClientRect() };
+    const range = sel.getRangeAt(0);
+    // Two rects: the whole selection, and the END of it. A selection of three lines has
+    // one bounding box the size of the paragraph, and a bar placed against that lands
+    // wherever the paragraph happens to be — usually above its first line, which is the
+    // opposite end from the one you just finished dragging to. getClientRects() gives a
+    // rect per line fragment; the last non-empty one is where the selection ends.
+    const rects = [...range.getClientRects()].filter(r => r.width > 0 || r.height > 0);
+    const end = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
+    return { text: t, rect: range.getBoundingClientRect(), end };
   }
   function selHide() { selBar.style.display = "none"; }
   function selShow() {
@@ -4692,14 +4700,23 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // reach. So the side is chosen to be the opposite of the one iOS will take: for a
     // selection in the lower part of the screen we go BELOW the text, and only for one
     // near the top (where iOS drops its menu underneath) do we sit above.
-    const low = s.rect.top > vh * 0.45;
-    let top = low ? s.rect.bottom + pad : s.rect.top - bh - pad;
-    // ...and if the chosen side does not fit, the other one, clamped into view.
-    if (top < pad || top + bh > vh - pad) {
-      top = low ? s.rect.top - bh - pad : s.rect.bottom + pad;
-      top = Math.max(pad, Math.min(top, vh - bh - pad));
+    // Anchored to the END of the selection — the point your finger (or the mouse) just
+    // let go of. Against the whole selection's box the bar drifted to the other end of
+    // a multi-line pick and sat over the message above it.
+    const e = s.end;
+    // BELOW the last line by default. That is the space you just stopped dragging in;
+    // it is also the side iOS leaves free (its own Look Up / Copy bar goes above the
+    // selection whenever there is room, and two bars in one place means ours is the
+    // unreachable one). Above the END line is the one thing it must not be: with a
+    // selection several lines tall, that is on top of the words you just picked.
+    let top = e.bottom + pad;
+    if (top + bh > vh - pad) {
+      // No room under it → above the WHOLE selection, still clear of the text.
+      top = Math.max(pad, Math.min(s.rect.top - bh - pad, vh - bh - pad));
     }
-    let left = s.rect.left + s.rect.width / 2 - bw / 2;
+    // Centred on the end POINT, not on the line: a last line two words long would
+    // otherwise put the bar under its middle, away from where the selection stopped.
+    let left = e.right - bw / 2;
     left = Math.max(pad, Math.min(left, window.innerWidth - bw - pad));
     selBar.style.top = Math.round(top) + "px";
     selBar.style.left = Math.round(left) + "px";
@@ -4710,10 +4727,28 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     document.addEventListener(ev, () => setTimeout(selShow, 10));
   }
   document.addEventListener("selectionchange", () => { if (!selText()) selHide(); });
+  // Scroll used to HIDE it, which is backwards: you scroll to see more of the thing you
+  // just selected, and losing the bar means doing the selection again. It follows the
+  // text instead — the bar is anchored to the end of the selection, so re-running the
+  // same placement is all "follow" means. rAF-throttled: a scroll fires ~60×/s and each
+  // pass measures the range.
   // Capture phase on document: scroll does not bubble, and this way it needs no
   // reference to the scroller at bind time.
-  document.addEventListener("scroll", selHide, true);
-  window.addEventListener("resize", selHide);
+  let _selRaf = 0;
+  const selFollow = () => {
+    if (selBar.style.display === "none" || _selRaf) return;
+    _selRaf = requestAnimationFrame(() => { _selRaf = 0; selShow(); });
+  };
+  document.addEventListener("scroll", selFollow, true);
+  window.addEventListener("resize", selFollow);
+  // It goes away when you dismiss it: a press anywhere outside it. A press INSIDE is one
+  // of its buttons, which hide it themselves after doing their work. (selectionchange
+  // still hides it when the selection itself is gone.)
+  document.addEventListener("pointerdown", (e) => {
+    if (selBar.style.display === "none") return;
+    if (selBar.contains(e.target)) return;
+    selHide();
+  }, true);
   // Appended, not prepended: the lead-in has to end up immediately before the caret,
   // and a half-written draft should stay where it was rather than be wrapped around.
   function selIntoInput(add) {
@@ -12929,10 +12964,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           recLiveEl.textContent = "";
         }
       }
-      // Into a Task box nothing is written until 插入 — the words show up live in the
-      // bar's own row instead, which is where the choice between the two versions is
-      // then made. The composer keeps its live-into-the-box behaviour.
-      if (!(voiceTarget && voiceTarget.pick)) vtWrite(s.before, full);
+      // Nothing goes into the box until you press a button — Task box or composer. The
+      // words stream in the bar's own row just above, which is where you read them
+      // while talking.
+      //
+      // The composer used to be written into live, and that CONSUMED the [🎤] marker on
+      // the very first token: the one thing the box was telling you — where the words
+      // will land — vanished the moment you started speaking, which is exactly when you
+      // want it. The marker now sits there untouched until Polish / Edit / Send, and
+      // those already write through vtWrite() at the marker.
     },
     teardown() {   // tear down everything incl. the mic stream + recorder
       const s = Voice.s; if (!s) return;
