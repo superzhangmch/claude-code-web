@@ -218,20 +218,25 @@ def main():
         # failed at "1.5ms vs 1.4ms" the day brief_picker_sessions gained one small file
         # read. The property is real on the real corpus (brief opens no JSONL at all —
         # asserted structurally above); at this size only a median has any signal.
-        def _median_ms(fn, n=15):
-            ts = []
+        # BEST of several, not the median: this has now flaked twice on a machine that was
+        # busy doing something else (1.92ms vs 1.34ms, then green three times in a row
+        # alone). A median still carries whatever the machine was doing; the fastest run
+        # of each is the closest either one gets to the cost of the code itself, which is
+        # what the claim is about.
+        def _best_ms(fn, n=15):
+            best = None
             for _ in range(n):
                 cc_web._SESSION_CTX_CACHE.clear(); cc_web._BRIEF_TS_CACHE.clear()
-                t0 = time.time(); fn(); ts.append(time.time() - t0)
-            ts.sort()
-            return ts[len(ts) // 2]
-        t_brief = _median_ms(lambda: cc_web.brief_picker_sessions(live_tabs=tabs))
-        t_full = _median_ms(lambda: cc_web.build_picker_sessions(live_tabs=tabs, recent_n=10,
-                                                                named_n=5))
+                t0 = time.time(); fn(); dt = time.time() - t0
+                best = dt if best is None else min(best, dt)
+            return best
+        t_brief = _best_ms(lambda: cc_web.brief_picker_sessions(live_tabs=tabs))
+        t_full = _best_ms(lambda: cc_web.build_picker_sessions(live_tabs=tabs, recent_n=10,
+                                                              named_n=5))
         f = cc_web.build_picker_sessions(live_tabs=tabs, recent_n=10, named_n=5)
         nb = len(json.dumps(cc_web.brief_picker_sessions(live_tabs=tabs), ensure_ascii=False).encode())
         nf = len(json.dumps(f, ensure_ascii=False).encode())
-        check("brief is cheaper to build (median of 15)", t_brief < t_full,
+        check("brief is cheaper to build (best of 15)", t_brief < t_full,
               f"{t_brief*1000:.2f}ms vs {t_full*1000:.2f}ms")
         check("brief is a smaller payload", nb < nf, f"{nb/1024:.1f}KB vs {nf/1024:.1f}KB")
 

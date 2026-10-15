@@ -230,6 +230,10 @@ class Driver:
         except Exception: pass
 
 
+def location_hash(drv):
+    return drv.js("return location.hash;")
+
+
 def main():
     if not (shutil.which("geckodriver") and shutil.which("firefox")):
         print("SKIP: needs geckodriver + firefox"); return 0
@@ -245,6 +249,25 @@ def main():
     sids = ["aaaaaaaa-1111-2222-3333-444444444444", "bbbbbbbb-1111-2222-3333-444444444444",
             "cccccccc-1111-2222-3333-444444444444"]
     seed_home(home, sids)
+    # A real file for the file viewer to read, in the tree the fs endpoints allow.
+    open(os.path.join(home, "zz_viewer_demo.md"), "w", encoding="utf-8").write(
+        "# Title\n\nsome **bold** prose with needle in it, and a formula $E=mc^2$.\n\n"
+        "```python\nx = 1  # needle\n```\n\nlast line with needle again\n")
+    open(os.path.join(home, "zz_viewer_demo.json"), "w", encoding="utf-8").write(
+        '{"a":1,"b":[1,2,3],"c":{"d":"needle"}}')
+    # Over the 2MB line: a log is not a document, and the viewer has to say so rather
+    # than render three million characters into the page.
+    open(os.path.join(home, "zz_viewer_big.txt"), "w", encoding="utf-8").write("x" * (3 * 1024 * 1024))
+    # A table whose second row has a comma and a quote INSIDE a field — the two things a
+    # split(",") gets wrong, and the reason this has a parser.
+    open(os.path.join(home, "zz_viewer_demo.csv"), "w", encoding="utf-8").write(
+        'name,note,n\nalice,"hello, world",1\nbob,"she said ""hi""",2\n')
+    # Markdown saved as .txt — prompt templates and notes arrive this way constantly,
+    # and the extension is the one thing that does not say so.
+    open(os.path.join(home, "zz_viewer_proseish.txt"), "w", encoding="utf-8").write(
+        "## Background\n\n- **Name**: a thing\n- **Type**: another\n\nplain line\n")
+    open(os.path.join(home, "zz_viewer_demo.jsonl"), "w", encoding="utf-8").write(
+        '{"i":1,"t":"first"}\n{"i":2,"t":"second"}\nnot json at all\n')
     open(os.path.join(smoke, "_stub_app.py"), "w").write(STUB_APP)
     open(os.path.join(smoke, "mode"), "w").write("ok")
     open(os.path.join(smoke, "reset_calls"), "w").write("0")
@@ -405,6 +428,49 @@ def main():
                 i.focus();
                 return (document.activeElement || {}).id;
               """) == "input")
+        print("=== a links row: three controls, one shape ===")
+        # open / ↗ direct / copy came out in two shapes: the middle one is an <a> (so
+        # copy-link-address works) and carried a hand-written imitation of the button
+        # look. Only `dim` — the file is nowhere to be found — may differ, because that
+        # one is information.
+        lr = drv.js("""
+          const m = document.getElementById('links-modal');
+          const list = document.getElementById('links-list');
+          const was = m.className, html = list.innerHTML;
+          m.classList.add('show');
+          list.innerHTML = '';
+          const row = document.createElement('div'); row.className = 'link-row';
+          const n = document.createElement('span'); n.className = 'lnum'; n.textContent = '1';
+          const t = document.createElement('span'); t.className = 'ltag ltag-path'; t.textContent = 'PATH';
+          const lk = document.createElement('span'); lk.className = 'lk path'; lk.textContent = '/tmp/x.md';
+          const b1 = document.createElement('button'); b1.className = 'btn'; b1.textContent = 'open';
+          const a = document.createElement('a'); a.className = 'btn lk-jump'; a.textContent = '↗ direct';
+          const b2 = document.createElement('button'); b2.className = 'btn'; b2.textContent = 'copy';
+          [n, t, lk, b1, a, b2].forEach(e => row.appendChild(e));
+          list.appendChild(row);
+          const box = (e) => { const c = getComputedStyle(e), r = e.getBoundingClientRect();
+            return [Math.round(r.height), c.borderTopWidth, c.borderTopLeftRadius,
+                    c.fontSize, c.backgroundColor, c.paddingLeft].join('|'); };
+          const r = { shapes: [...new Set([b1, a, b2].map(box))],
+                      heights: [b1, a, b2].map(e => Math.round(e.getBoundingClientRect().height)),
+                      // nothing greys this row out any more: the probe corrects the
+                      // href and says nothing about whether you may click
+                      allOpaque: [b1, a, b2].every(e => getComputedStyle(e).opacity === '1') };
+          list.innerHTML = html; m.className = was;
+          return r;
+        """)
+        check("open / ↗ direct / copy are the same box",
+              len(lr["shapes"]) == 1, str(lr["shapes"]))
+        check("...including their height", len(set(lr["heights"])) == 1, str(lr["heights"]))
+        # No pre-flight verdict on the row: the probe exists to fix the href for a
+        # cwd-relative path, not to decide for you whether the click is worth making.
+        # Scoped to the links code: `dim` is still a thing elsewhere (a session label
+        # with no session), and a whole-file search would have been asserting about that.
+        _links_js = src_index[src_index.index("function showLinks(text)"):]
+        _links_js = _links_js[:_links_js.index("\n  function ")]
+        check("...and none of them is greyed out by a probe",
+              lr["allOpaque"] is True and "dim" not in _links_js, str(lr))
+
         print("=== the control pages open OVER the session, not instead of it ===")
         # Going to /remote/ unloaded this view: coming back re-fetched the transcript and
         # lost the place you were reading. Driven through the real links, because the
@@ -489,6 +555,79 @@ def main():
         check("Esc closes it too", esc[0] is True and esc[1] is False and esc[2] == "about:blank",
               str(esc))
 
+        print("=== keys for the recording bar: space / s / p / e ===")
+        # Pressed for real, and observed at the BUTTONS: the shortcut's whole design is
+        # that it presses the button rather than reimplementing it, so a hidden or
+        # disabled one does nothing and a key can never mean something the bar is not
+        # offering.
+        keys = drv.js("""
+          const bar = document.getElementById('rec-bar');
+          const ids = ['rec-pause', 'rec-send', 'rec-stop', 'rec-edit', 'rec-use'];
+          const was = {}, seen = [];
+          ids.forEach(id => { const b = document.getElementById(id);
+            was[id] = [b.style.display, b.disabled];
+            b._spy = () => seen.push(id); b.addEventListener('click', b._spy); });
+          const barWas = bar.style.display;
+          document.getElementById('input').blur();
+          const raw = (k) => { const ev = new KeyboardEvent('keydown',
+                                 { key: k, bubbles: true, cancelable: true });
+                               document.dispatchEvent(ev); return ev; };
+          // Every press starts from a known bar: with no recording behind it, each of
+          // these buttons means "never mind" and closes the bar (_voiceStop →
+          // _voiceDone) or takes its own state away (插入), so one run in sequence would
+          // only ever exercise the first key.
+          const press = (k, shown) => {
+            bar.style.display = 'flex';
+            ids.forEach(id => { const b = document.getElementById(id);
+              b.style.display = shown.includes(id) ? '' : 'none'; b.disabled = false; });
+            return raw(k);
+          };
+          const composerBtns = ['rec-pause', 'rec-send', 'rec-stop', 'rec-edit'];
+          seen.length = 0;
+          [' ', 's', 'p', 'e'].forEach(k => press(k, composerBtns));
+          const composer = seen.slice();
+          // A Task box offers 插入 instead of Send/Edit — s and e must reach THAT.
+          seen.length = 0;
+          ['s', 'e'].forEach(k => press(k, ['rec-pause', 'rec-stop', 'rec-use']));
+          const memo = seen.slice();
+          // A disabled Send (no transcript yet) is not reachable by key either.
+          seen.length = 0;
+          press('s', composerBtns);
+          document.getElementById('rec-send').disabled = true;
+          raw('s');
+          const disabled = seen.slice(1);      // slice(1): the enabling press itself
+          // …with focus in the composer, a space is a space.
+          seen.length = 0;
+          const inp = document.getElementById('input');
+          const before = inp.value; inp.value = 'ab'; inp.focus();
+          bar.style.display = 'flex';
+          const ev = raw(' ');
+          const typing = { seen: seen.slice(), defaultPrevented: ev.defaultPrevented };
+          inp.blur(); inp.value = before;
+          // …and none of them fire when the bar is not up.
+          seen.length = 0;
+          bar.style.display = 'none';
+          [' ', 's', 'p', 'e'].forEach(raw);
+          const closed = seen.slice();
+          ids.forEach(id => { const b = document.getElementById(id);
+            b.removeEventListener('click', b._spy);
+            b.style.display = was[id][0]; b.disabled = was[id][1]; });
+          bar.style.display = barWas;
+          return { composer, memo, disabled, typing, closed };
+        """)
+        check("space pauses, s sends, p polishes, e edits",
+              keys["composer"] == ["rec-pause", "rec-send", "rec-stop", "rec-edit"],
+              str(keys["composer"]))
+        check("...in a Task box, s and e reach 插入 instead",
+              keys["memo"] == ["rec-use", "rec-use"], str(keys["memo"]))
+        check("...a disabled Send is not reachable by key either",
+              keys["disabled"] == [], str(keys["disabled"]))
+        check("...typing in the composer still types (a space is a space there)",
+              keys["typing"]["seen"] == [] and keys["typing"]["defaultPrevented"] is False,
+              str(keys["typing"]))
+        check("...and with the bar closed the keys do nothing",
+              keys["closed"] == [], str(keys["closed"]))
+
         print("=== the tail window's three keys sit under the output, not over it ===")
         # The box is small and the line you are watching is the LAST one. A control strip
         # that covered it, or that pushed the box past the composer, would be worse than
@@ -515,8 +654,10 @@ def main():
           box.style.display = was; pre.textContent = '';
           return r;
         """)
-        check("Esc / ↑ / clear-line are all there",
-              tk["labels"] == ["Esc", "↑", "⌫ line"], str(tk["labels"]))
+        # ← and ↓ joined them: claude's own hint line is "← for agents · ↓ to manage",
+        # and without buttons that switch was reachable from a desktop keyboard only.
+        check("Esc / ↑ / ← / ↓ / ⌃B / ⌃C / clear-line are all there",
+              tk["labels"] == ["Esc", "↑", "←", "↓", "⌃B", "⌃C", "⌫ line"], str(tk["labels"]))
         check("...inside the box and below the output",
               tk["inside"] is True and tk["belowText"] is True, str(tk))
         check("...right-aligned, and the box still fits above the composer",
@@ -2283,6 +2424,7 @@ def main():
         check("reconnect reaches the server and drops the cached connection",
               open(os.path.join(smoke, "reset_calls")).read().strip() != "0",
               open(os.path.join(smoke, "reset_calls")).read().strip())
+
     finally:
         if drv:
             drv.quit()

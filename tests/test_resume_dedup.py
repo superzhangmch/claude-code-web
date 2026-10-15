@@ -123,6 +123,22 @@ def main():
     check("...and repeat calls are cached, not 50 forks of ps",
           time.monotonic() - t0 < 0.3, f"{time.monotonic() - t0:.2f}s")
 
+    print("=== a dropped iterm socket costs one retry, not one session ===")
+    # Opening a tab makes iTerm2 send a layout notification, and the iterm2 library
+    # answers it on the same websocket — that races with our call and closes it, so the
+    # NEXT open raises "sent 1000 (OK); no close frame received". On mac-pro that meant
+    # every OTHER session failed to come back (1,3,5,7 of 14).
+    _src = open(os.path.join(ROOT, "cc_web.py"), encoding="utf-8").read()
+    _loop = _src[_src.index("async def _run_resume"):][:4800]
+    check("the open starts from a live socket",
+          "await bridge.ensure_connected()" in _loop.split("for attempt in")[0])
+    check("...and a drop gets one more try", "for attempt in (1, 2):" in _loop)
+    check("...but only after the process table says no tab came up",
+          _loop.index("if _pids_for_session(sid):") < _loop.index("if attempt == 2:"),
+          "the retry must not fire when the tab DID open")
+    check("...and the retry is visible in the log, not silent",
+          "iterm dropped and no tab came up — retrying once" in _loop)
+
     print("=== the resume loop reports a bridge drop honestly ===")
     src = open(os.path.join(ROOT, "cc_web.py"), encoding="utf-8").read()
     i = src.index("async def _run_resume")

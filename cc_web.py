@@ -32,6 +32,7 @@ import sys
 import threading
 import time as _time
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace as _dc_replace
@@ -39,7 +40,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -139,6 +140,12 @@ def _load_conf() -> dict:
         # line → no language row and no language sent, i.e. exactly the old behaviour.
         "asr_langs": [],
         "asr_lang": "",
+        # Keep the audio of recent dictations, so a mis-transcription can be replayed
+        # instead of described. Days; 0/absent = keep nothing, which is the default —
+        # storing someone's voice is not something a config file should do quietly.
+        # `asr_keep_mb` caps the directory so a busy week cannot fill a disk.
+        "asr_keep_days": 0,
+        "asr_keep_mb": 500,
         "claude_config": "",   # path to claude's .claude.json (per-project trust); default ~/.claude.json
         "icon": "",                # override the per-host tab icon: pro|air|linux|win
         # A few letters naming THIS machine. Predates this use — the bundled skills
@@ -178,6 +185,9 @@ def _load_conf() -> dict:
             if k == "cwd":
                 if v:
                     cfg["cwds"].append(v)
+            elif k in ("asr_keep_days", "asr_keep_mb"):
+                try: cfg[k] = max(0, int(v))
+                except ValueError: pass
             elif k == "asr_langs":
                 cfg["asr_langs"] = [p.strip() for p in v.split("|") if p.strip()]
             elif k == "asr":
@@ -8452,7 +8462,11 @@ async def post_iterm_input(payload: ItermInputPayload):
 
 _FS_TEXT_EXT = {".md", ".markdown", ".txt", ".log", ".json", ".yaml", ".yml",
                 ".csv", ".py", ".js", ".ts", ".sh", ".css", ".toml", ".ini",
-                ".conf", ".xml", ".rs", ".go", ".c", ".h", ".cpp", ".java"}
+                ".conf", ".xml", ".rs", ".go", ".c", ".h", ".cpp", ".java",
+                # One line per JSON object: claude's own transcripts, and every eval
+                # set around here. The viewer reads these as rows rather than as a
+                # 2MB single line, so they are worth offering.
+                ".jsonl", ".ndjson", ".tsv"}
 _FS_IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"}
 _FS_HTML_EXT = {".html", ".htm"}
 _FS_PDF_EXT = {".pdf"}
@@ -8564,9 +8578,21 @@ def fs_list(path: str = "", offset: int = 0, limit: int = FS_PAGE_SIZE, q: str =
             "entries": entries}
 
 
+@app.get("/view")
+def view_page():
+    """The file viewer, as a page of its own.
+
+    It started as an overlay inside the session app, with a #file= route and rules about
+    what to boot and what closing should reveal — and reading a file has nothing to do
+    with a claude session. A URL with both in it even opened the session and dropped the
+    file. One page, one job, no session machinery: /view?path=…[&token=…]."""
+    return FileResponse(STATIC_DIR / "view.html", headers={"Cache-Control": "no-store"})
+
+
 @app.api_route("/api/fs/file", methods=["GET", "HEAD"])
-def fs_file(path: str, token: str = "",
-            authorization: Optional[str] = Header(default=None)):
+def fs_file(request: Request, path: str, token: str = "", raw: str = "",
+            authorization: Optional[str] = Header(default=None),
+            sec_fetch_dest: Optional[str] = Header(default=None, alias="sec-fetch-dest")):
     """Serve a local file inline (browser guesses how to render via the
     Content-Type FileResponse sets from the extension). Size-capped.
 
@@ -8602,6 +8628,29 @@ def fs_file(path: str, token: str = "",
             raise HTTPException(status_code=413, detail="file too large (>25 MB)")
     except OSError:
         raise HTTPException(status_code=403, detail="cannot stat")
+    # Typed into the address bar (or clicked from somewhere that kept an old copy of
+    # this URL) and it is a document → the reading page, which is what you wanted when
+    # you opened a .txt in a browser: rendered, searchable, refreshable. Everything else
+    # is unchanged, because this endpoint's job is to hand over the bytes:
+    #   * fetch()/XHR send sec-fetch-dest: empty   → the viewer itself reads through here
+    #   * <img>/<iframe> send image/iframe         → previews and thumbnails
+    #   * HEAD                                     → the "does this exist" probe
+    #   * &raw=1                                   → "no, really, give me the file"
+    if (request.method == "GET" and (sec_fetch_dest or "") == "document" and not raw
+            and _fs_kind(p.name) == "text"):
+        try:
+            small = p.stat().st_size <= 2 * 1024 * 1024
+        except OSError:
+            small = False
+        if small:
+            # Carry the token through. The whole point of ?token= on this endpoint is
+            # that a pasted link works in a browser that knows nothing — and a redirect
+            # that drops it turns exactly that link into an "Auth required" screen.
+            # Only when it CAME from the query: a header-authenticated caller does not
+            # need one, and putting it in a URL that did not have it would be worse.
+            tok = ("&token=" + urllib.parse.quote(token)) if token else ""
+            return RedirectResponse(url="/view?path=" + urllib.parse.quote(str(p)) + tok,
+                                    status_code=302)
     return FileResponse(p, headers={"Cache-Control": "no-store"})
 
 
@@ -9074,6 +9123,142 @@ def _asr_terms(sid: str) -> list:
     return _vocab_terms(" ".join(parts))
 
 
+def _asr_keep_dir() -> Path:
+    d = _state_path("cc_web_asr_audio.d")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _wav_header(nbytes: int, rate: int, channels: int = 1) -> bytes:
+    """A 44-byte PCM16 WAV header. The realtime path carries raw PCM (that is what the
+    provider wants), and raw PCM is not something you can double-click to listen to."""
+    import struct
+    return (b"RIFF" + struct.pack("<I", 36 + nbytes) + b"WAVEfmt "
+            + struct.pack("<IHHIIHH", 16, 1, channels, rate, rate * channels * 2, channels * 2, 16)
+            + b"data" + struct.pack("<I", nbytes))
+
+
+def _asr_keep_prune(days: int = 0, cap_mb: int = 0) -> int:
+    """Drop what is past its week, then whatever is over the size cap, oldest first.
+    Returns how many files went. Runs on write: no timer to forget to start."""
+    conf = _load_conf()
+    days = days or int(conf.get("asr_keep_days") or 0)
+    cap_mb = cap_mb or int(conf.get("asr_keep_mb") or 0)
+    d = _asr_keep_dir()
+    try:
+        items = sorted((f.stat().st_mtime, f.stat().st_size, f) for f in d.iterdir() if f.is_file())
+    except OSError:
+        return 0
+    gone = 0
+    cutoff = _time.time() - days * 86400 if days else 0
+    kept = []
+    for mt, sz, f in items:
+        if cutoff and mt < cutoff:
+            try: f.unlink(); gone += 1
+            except OSError: pass
+        else:
+            kept.append((mt, sz, f))
+    if cap_mb:
+        total = sum(sz for _, sz, _ in kept)
+        for mt, sz, f in kept:                      # oldest first — `kept` is sorted
+            if total <= cap_mb * 1024 * 1024:
+                break
+            try: f.unlink(); gone += 1; total -= sz
+            except OSError: pass
+    return gone
+
+
+def _asr_keep_save(audio: bytes, ext: str, meta: dict) -> str:
+    """Write one dictation's audio + a sidecar of what we know about it. No-op unless
+    asr_keep_days is set. Returns the base name, or "" when keeping is off."""
+    if not audio:
+        return ""
+    conf = _load_conf()
+    days = int(conf.get("asr_keep_days") or 0)
+    if days <= 0:
+        return ""
+    try:
+        import datetime as _dt          # as everywhere else in this file: imported where used
+        d = _asr_keep_dir()
+        stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        base = f"{stamp}-{os.urandom(3).hex()}"
+        (d / (base + ext)).write_bytes(audio)
+        (d / (base + ".json")).write_text(
+            json.dumps(dict(meta, at=stamp, bytes=len(audio), file=base + ext),
+                       ensure_ascii=False, indent=1), encoding="utf-8")
+        _asr_keep_prune(days, int(conf.get("asr_keep_mb") or 0))
+        return base
+    except Exception as e:                          # a debug aid must never break a dictation
+        log.info("asr audio keep failed: %s", e)
+        return ""
+
+
+def _asr_keep_open():
+    """A temp file to tee one realtime dictation's PCM into, or None when keeping is off.
+
+    Realtime audio never touches disk otherwise — it streams straight through to the
+    provider — so the one recording that could settle "did it mishear me, or did it
+    invent that" did not exist. It goes to a temp file as it arrives rather than to a
+    buffer: a 5-minute dictation is ~14MB, and holding that in RAM to write it at the end
+    is the one thing here worth avoiding."""
+    if int(_load_conf().get("asr_keep_days") or 0) <= 0:
+        return None
+    try:
+        import tempfile as _tf
+        return _tf.NamedTemporaryFile(prefix="ccweb-rt-", suffix=".pcm", delete=False)
+    except Exception as e:
+        log.info("asr audio keep: no temp file (%s)", e)
+        return None
+
+
+def _asr_keep_close(tmp, rate: int, meta: dict) -> str:
+    """…and at the end, that PCM as a WAV you can double-click, beside its sidecar."""
+    if tmp is None:
+        return ""
+    try:
+        tmp.flush(); tmp.close()
+        raw = Path(tmp.name).read_bytes()
+        secs = (len(raw) / 2.0) / float(rate or 24000)
+        base = _asr_keep_save(_wav_header(len(raw), rate) + raw, ".wav",
+                              dict(meta, seconds=round(secs, 1)))
+        if base:
+            log.info("asr-stream: kept audio %s (%.1fs)", base, secs)
+        return base
+    except Exception as e:
+        log.info("asr audio keep failed: %s", e)
+        return ""
+    finally:
+        try: os.unlink(tmp.name)
+        except OSError: pass
+
+
+def _pace_delays(sizes: list, rate: int, speed: float = 6.0, budget: float = 3.0) -> list:
+    """How long to wait after sending each buffered PCM16 frame, in seconds.
+
+    Audio captured while the upstream was connecting used to be flushed back-to-back:
+    2.9s of speech (139KB at 24kHz — measured on mac-pro, 2026-09-28) arriving inside one
+    millisecond. That is the worst input a streaming recogniser can be given. It has to
+    choose a language for the whole burst with nothing before it and no time to run its
+    own VAD incrementally, which is where "the first sentence comes back in English, or
+    as a sentence I never said" came from — later speech, arriving frame by frame, was
+    always fine.
+
+    So the backlog is REPLAYED, at `speed`× real time: fast enough that nobody waits,
+    paced enough that the provider sees a stream. `budget` caps the total wait, because a
+    long handshake can leave 30s buffered and the tail of it is not what decides anything
+    — those frames go out at full speed.
+    """
+    out = []
+    spent = 0.0
+    for b in sizes:
+        n = b if isinstance(b, int) else len(b)
+        frame_sec = (n / 2.0) / float(rate or 24000)     # PCM16 mono
+        d = min(frame_sec / max(0.1, speed), max(0.0, budget - spent))
+        out.append(d)
+        spent += d
+    return out
+
+
 def _asr_prompt(sid: str) -> str:
     """Space-joined term string for OpenAI-style `prompt` fields (whisper / gpt-4o-transcribe)."""
     return " ".join(_asr_terms(sid))
@@ -9180,16 +9365,26 @@ async def post_asr(request: Request, which: Optional[str] = None, sid: Optional[
                 pass
 
     stdout, stderr = await asyncio.to_thread(_run)
+    # Kept (when asr_keep_days is set) with what it came back as, so "the first sentence
+    # was a sentence I never said" can be replayed through either engine instead of
+    # recalled. Best-effort and after the fact: never in the way of the answer.
+    def _keep(text: str, err: str = ""):
+        _asr_keep_save(data, ext, {"path": "batch", "engine": cfg.get("display") or cfg["label"],
+                                   "model": cfg["model"], "lang": lang or "", "sid": sid or "",
+                                   "text": text, "error": err})
     try:
         j = json.loads(stdout)
     except Exception:
+        _keep("", (stdout or stderr)[:200])
         raise HTTPException(status_code=502, detail=f"ASR backend error: {(stdout or stderr)[:200]}")
     text = (j.get("text") or "").strip()
     if not text:
         err = j.get("error")
         if isinstance(err, dict):
             err = err.get("message", "")
+        _keep("", str(err or "empty"))
         raise HTTPException(status_code=502, detail=f"ASR empty: {err or ''}")
+    _keep(text)
     return {"text": text, "model": cfg["model"], "label": cfg["label"]}
 
 
@@ -9240,16 +9435,24 @@ async def _soniox_bridge(ws: WebSocket, q):
                                         # — too small or too large — at any other rate)
     finish_pending = False              # user pressed stop while we were still connecting
     client_gone = asyncio.Event()
+    keep_tmp = _asr_keep_open()         # a copy of the audio, for when the words are wrong
 
     async def _flush_pre():             # caller holds up_lock
         nonlocal pre, pre_bytes
         if not pre:
             return
         n = pre_bytes
-        for b in pre:
+        # Replayed, not dumped — see _pace_delays. Live frames arriving meanwhile queue
+        # on up_lock behind this, so order is preserved and the extra latency shrinks to
+        # zero as the backlog drains.
+        delays = _pace_delays(pre, rate)
+        for b, d in zip(pre, delays):
             await up.send(b)
+            if d > 0:
+                await asyncio.sleep(d)
         pre = []; pre_bytes = 0
-        log.info("asr-stream[soniox]: flushed %dB captured while connecting", n)
+        log.info("asr-stream[soniox]: flushed %dB (%.1fs of audio) captured while "
+                 "connecting, replayed over %.1fs", n, (n / 2.0) / rate, sum(delays))
 
     async def client_reader():
         nonlocal pre_bytes, finish_pending
@@ -9262,6 +9465,9 @@ async def _soniox_bridge(ws: WebSocket, q):
                 b = data.get("bytes")
                 if b is not None:
                     stat["in_bytes"] += len(b); stat["in_frames"] += 1
+                    if keep_tmp is not None:
+                        try: keep_tmp.write(b)
+                        except Exception: pass
                     if up is None:
                         if pre_bytes + len(b) <= PRE_MAX:
                             pre.append(b); pre_bytes += len(b)
@@ -9376,6 +9582,16 @@ async def _soniox_bridge(ws: WebSocket, q):
         except Exception: pass
         log.info("asr-stream[soniox]: closed by=%s in=%dB/%dframes msgs=%d",
                     stat["who"] or "?", stat["in_bytes"], stat["in_frames"], stat["msgs"])
+        # …and the recording, next to what we know about the session that produced it.
+        # The transcript itself lives in the browser; what matters here is that the AUDIO
+        # exists at all.
+        _asr_keep_close(keep_tmp, rate,
+                        {"path": "realtime", "engine": "soniox", "model": model,
+                         "langs": langs, "rate": rate, "sid": q.get("sid") or "",
+                         "frames": stat["in_frames"], "msgs": stat["msgs"],
+                         "closed_by": stat["who"] or "?",
+                         # the number that found the first-sentence bug
+                         "buffered_before_connect_bytes": _buffered})
 
 
 @app.websocket("/api/asr-stream")
@@ -9431,6 +9647,14 @@ async def asr_stream(ws: WebSocket):
         except Exception: pass
         await ws.close(); return
     log.info("asr-stream: connected model=%s prompt_chars=%d", model, len(prompt or ""))
+    # Same signal the Soniox bridge sends. The client uses it for more than a status line
+    # now — "is the realtime path actually going to deliver words" is what decides
+    # whether ⏸ / Polish switch to the batch engine — and only one of the two bridges
+    # was sending it, so an OpenAI-realtime session looked permanently unconnected.
+    try:
+        await ws.send_text(json.dumps({"type": "status", "state": "upstream-ready"}))
+    except Exception:
+        pass
     try:
         await up.send(json.dumps({"type": "session.update", "session": {"type": "transcription",
             "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000},
@@ -9447,6 +9671,7 @@ async def asr_stream(ws: WebSocket):
         log.info("asr-stream: session.update failed: %s", e)
 
     stat = {"in_bytes": 0, "in_frames": 0, "delta": 0, "completed": 0, "text_chars": 0, "who": ""}
+    keep_tmp = _asr_keep_open()         # same copy-of-the-audio as the soniox bridge
 
     async def up_to_client():   # OpenAI events → browser (verbatim; client filters delta/completed)
         try:
@@ -9475,6 +9700,9 @@ async def asr_stream(ws: WebSocket):
                 b = data.get("bytes")
                 if b is not None:
                     stat["in_bytes"] += len(b); stat["in_frames"] += 1
+                    if keep_tmp is not None:
+                        try: keep_tmp.write(b)
+                        except Exception: pass
                     await up.send(json.dumps({"type": "input_audio_buffer.append",
                                               "audio": base64.b64encode(b).decode()}))
                 elif data.get("text") is not None:   # empty text frame = FINISH too (see above)
@@ -9496,6 +9724,12 @@ async def asr_stream(ws: WebSocket):
         log.info("asr-stream: closed by=%s in=%dB/%dframes delta=%d completed=%d chars=%d",
                     stat["who"] or "?", stat["in_bytes"], stat["in_frames"],
                     stat["delta"], stat["completed"], stat["text_chars"])
+        # 24kHz is not negotiated on this path — it is what session.update above declares.
+        _asr_keep_close(keep_tmp, 24000,
+                        {"path": "realtime", "engine": "openai", "model": model,
+                         "lang": q.get("lang") or "", "rate": 24000, "sid": q.get("sid") or "",
+                         "frames": stat["in_frames"], "completed": stat["completed"],
+                         "closed_by": stat["who"] or "?"})
 
 
 @app.get("/api/server-info", dependencies=[Depends(require_token)])
@@ -9928,25 +10162,43 @@ async def _run_resume(sessions: list[dict]) -> None:
             st["done"] += 1
             continue
         label = name or f"resume_{sid[:6]}"   # restore the real name (fallback if none saved)
+        # Opening a tab makes iTerm2 send a layout notification, and the iterm2 library
+        # answers it on the SAME websocket (notifications → App.async_refresh →
+        # async_list_sessions). That races with our own call and the socket ends up
+        # closed, so the NEXT open raises "sent 1000 (OK); no close frame received" —
+        # which is why mac-pro failed every OTHER session (1,3,5,7 of 14, measured
+        # 2026-10-15 13:19). A dead socket is cheap to notice and cheap to replace, so
+        # the open starts from a live one, and a drop gets ONE retry.
         try:
-            iterm_id = await bridge.open_resume_claude_tab(e.get("cwd", ""), sid, label)
-            status = "resumed" if iterm_id else "failed"
-            if iterm_id:
-                st["resumed"] += 1
-        except Exception as ex:
-            # The tab may well have opened before the iTerm websocket dropped under us
-            # ("sent 1000 (OK); no close frame received" — seen twice on mac-pro). Calling
-            # that "failed" invites a retry, and the retry is what produces two tabs and
-            # two claudes on one conversation. So ask the process table before reporting.
-            status = f"failed: {ex}"
+            await bridge.ensure_connected()
+        except Exception:
+            pass
+        status = ""
+        for attempt in (1, 2):
             try:
-                await asyncio.sleep(3.0)
-                await bridge.ensure_connected()
-            except Exception:
-                pass
-            if _pids_for_session(sid):
-                status = "resumed (iterm dropped mid-open; the tab came up)"
-                st["resumed"] += 1
+                iterm_id = await bridge.open_resume_claude_tab(e.get("cwd", ""), sid, label)
+                status = "resumed" + (" (2nd try)" if attempt == 2 else "") if iterm_id else "failed"
+                if iterm_id:
+                    st["resumed"] += 1
+                break
+            except Exception as ex:
+                status = f"failed: {ex}"
+                # The tab may well have opened before the socket died, and a retry then
+                # produces TWO tabs and two claudes on one conversation — so the process
+                # table decides, not the exception.
+                try:
+                    await asyncio.sleep(3.0)
+                    await bridge.ensure_connected()
+                except Exception:
+                    pass
+                if _pids_for_session(sid):
+                    status = "resumed (iterm dropped mid-open; the tab came up)"
+                    st["resumed"] += 1
+                    break
+                if attempt == 2:
+                    break
+                log.info("resume %d/%d [%s]: iterm dropped and no tab came up — retrying once",
+                         st["done"] + 1, st["total"], sid[:8])
         st["results"].append({"sid": sid, "name": name, "status": status})
         # Logged, not just kept in _resume_progress: that dict is overwritten by the
         # next run and never written down, so "which ones did not come back, and why"

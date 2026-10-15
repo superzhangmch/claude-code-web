@@ -152,6 +152,10 @@ let asrLang = "zh,en";   // the voice menu's language row; both call sites read 
 const isPhone = () => false;
 const micStates = [], parked = [], sent = [], fetches = [], spins = [];
 function _recLiveStatus(msg) { _recStatusHtml = "STATUS:" + msg; recLiveEl.innerHTML = _recStatusHtml; }
+// The phase line (no spinner) and the wave, which now has exactly one rule: it is on
+// while audio is being captured and off otherwise.
+function _recPlainStatus(msg) { _recStatusHtml = msg ? "STATUS:" + msg : ""; recLiveEl.innerHTML = _recStatusHtml; }
+function _wave(on) { recWaveEl.style.display = on ? "" : "none"; }
 // Mirrors the real chain: _setMic("rec") → _showRecBar() → _recMemoMode(), the step that
 // dresses the bar as the composer's or as a Task box's.
 function _setMic(st) { micStates.push(st); if (st === "rec") _recMemoMode(); }
@@ -206,7 +210,8 @@ class FakeAC {
 const window = { AudioContext: FakeAC };
 let endedHandler = null;
 function mkStream() {
-  const track = { stop() {}, addEventListener: (ev, fn) => { if (ev === "ended") endedHandler = fn; } };
+  const track = { stopped: false, stop() { this.stopped = true; },
+                  addEventListener: (ev, fn) => { if (ev === "ended") endedHandler = fn; } };
   return { getTracks: () => [track], getAudioTracks: () => [track] };
 }
 function feedAudio(n) {   // drive the real capture loop n times
@@ -366,16 +371,37 @@ check("a stream IS opened", sockets.length === 1 && /asr-stream/.test(sockets[0]
 check("...with the chosen engine", sockets[0].url.includes("provider=soniox"));
 check("the session is not batch-only", Voice.s.batchOnly === false && Voice.s.dropped === false);
 check("Send waits for the first realtime token", recSendEl.disabled === true);
-// Two things in one line now, and both matter at this instant: capture has started
-// (so it says you may speak — the counterpart to the "先别说话" shown while the mic was
-// still opening) and the socket has not connected yet.
-check("the bar says you may speak now", /可以说了/.test(bar()), bar().slice(0, 60));
-check("...and that the recognizer is still connecting", /连接识别服务/.test(bar()), bar().slice(0, 60));
+// One word, and it is the only one that matters here: you can talk. "connecting ASR"
+// used to be spelled out and read as "not usable yet" — untrue, since the audio is
+// buffered and the batch engine carries it if the stream never comes up.
+check("the bar just says recording", /STATUS:recording/.test(bar()), bar().slice(0, 60));
+check("...and does not report the handshake", !/连接|connecting/.test(bar()), bar().slice(0, 60));
 check("realtime DOES buffer PCM while connecting", (feedAudio(2), Voice.s.pendBytes > 0));
-check("⏸ in realtime does NOT cut a segment (the stream is the transcriber)",
-      (Voice.togglePause(), asrCalls() === 0 && recorders[0].pauses === 1));
+// ⏸ before the provider is ready: switch to batch THEN, rather than sit on a handshake
+// that has already missed its moment. The segment is cut, so the words show up now.
+asrQueue = ["what I said while it was connecting"];
+Voice.togglePause(); await tick();
+check("⏸ with nothing connected yet falls back to batch",
+      Voice.s.dropped === true && asrCalls() === 1, String(asrCalls()));
+check("...and says so, without dressing it as a failure",
+      /use batch mode/.test(bar()) && !/⚠/.test(bar()), bar().slice(0, 70));
+check("...and the words captured meanwhile are not lost",
+      Voice.s.finalText.includes("what I said while it was connecting"),
+      JSON.stringify(Voice.s.finalText));
 Voice.togglePause();
-check("...it pauses and resumes the one recorder", recorders.length === 1 && recorders[0].resumes === 1);
+
+console.log("=== a connected realtime stream is left alone ===");
+reset(); Voice.start(mkStream(), false);
+{
+  const ws = sockets[0];
+  ws.readyState = 1; ws.onopen && ws.onopen();
+  // The server says when ITS upstream is live — both bridges send this now.
+  ws.onmessage({ data: JSON.stringify({ type: "status", state: "upstream-ready" }) });
+  check("⏸ does NOT cut a segment (the stream is the transcriber)",
+        (Voice.togglePause(), asrCalls() === 0 && recorders[0].pauses === 1 && Voice.s.dropped === false));
+  Voice.togglePause();
+  check("...it pauses and resumes the one recorder", recorders.length === 1 && recorders[0].resumes === 1);
+}
 
 console.log("=== paused / stopped: the mic stays open, the wire goes quiet ===");
 // The mic device is released late (teardown, after the provider drains) — accepted.
@@ -386,6 +412,8 @@ reset();
 Voice.start(mkStream(), false);
 const ws0 = sockets[0];
 ws0.readyState = 1; ws0.onopen && ws0.onopen();      // connected → frames go straight out
+// …and the provider is live, so ⏸ keeps the stream instead of falling back to batch.
+ws0.onmessage({ data: JSON.stringify({ type: "status", state: "upstream-ready" }) });
 feedAudio(3);
 const beforePause = ws0.sent.length;
 check("while recording, frames go to the server", beforePause >= 3, String(beforePause));
@@ -413,14 +441,27 @@ check("after Polish, audio frames stop at once", ws0.sent.length === atStop,
 check("...the capture callback is detached, not just ignored",
       Voice.s.sp.onaudioprocess === null);
 check("...and the local recorder is closed", recorders[recorders.length - 1].state === "inactive");
-check("...while the mic itself is still open until the transcription ends (accepted)",
-      Voice.s.stream.getTracks()[0].stopped !== true);
+// …and the DEVICE goes back at the same moment, once the clip has been flushed. It used
+// to be held until the transcription ended, which kept the system's "microphone in use"
+// indicator on through the polish — indistinguishable, from the outside, from still
+// being listened to.
+await tick(10);   // the release is chained on the recorder's onstop (a microtask)
+check("...and the microphone itself is released as soon as the clip is closed",
+      Voice.s.stream.getTracks()[0].stopped === true && Voice.s.micReleased === true,
+      JSON.stringify(Voice.s.stream.getTracks()[0].stopped));
 check("...the only thing sent at the tap was the finish marker",
       atStop - afterResume <= 1, String(atStop - afterResume));
 
 console.log("=== realtime that never connects, stopped by hand → batch, at once ===");
+// Its own session: the block above deliberately HAS a live upstream, and the point here
+// is the opposite case. Polish pressed while the provider has never been ready switches
+// to the batch engine at the tap instead of draining a stream that has nothing in it.
+reset(); Voice.start(mkStream(), false);
+sockets[0].readyState = 1; sockets[0].onopen && sockets[0].onopen();   // socket up, provider not
+feedAudio(3);
 asrQueue = ["recovered from the local clip"];
 Voice.stop("polish");
+check("it switches to batch at the tap", Voice.s.dropped === true);
 check("no 30s drain wait when nothing was ever connected", Voice.s._finDeadline <= Date.now());
 await tick(100);
 check("it falls back to the batch engine", asrCalls() === 1);
@@ -842,6 +883,44 @@ console.log("=== the [🎤] marker survives the whole recording ===");
   Voice.stop("edit"); await tick(60);
   check("...and Edit is what puts them in, exactly where the marker was",
         inputEl.value === "前面的话说的第一句后面的话", JSON.stringify(inputEl.value));
+}
+
+console.log("=== the wave means one thing: audio is going in right now ===");
+{
+  reset();
+  // Opening the mic is not capturing: the wave used to come up with the BAR, which is
+  // before the device is even open. (_showRecBar is not extracted into this harness —
+  // the rule it has to obey is checked on the states that are.)
+  _wave(false);
+  Voice.start(mkStream(), false);
+  check("...on once capture starts", recWaveEl.style.display === "");
+  Voice.togglePause();
+  check("...off on ⏸ — nothing is being recorded", recWaveEl.style.display === "none");
+  Voice.togglePause();
+  check("...and back on ▶", recWaveEl.style.display === "");
+  Voice.stop("edit"); await tick(60);
+  check("...off once the finish button is pressed", recWaveEl.style.display === "none");
+}
+
+console.log("=== an upstream that finishes by itself is replaced, not mourned ===");
+{
+  reset(); Voice.start(mkStream(), false);
+  const ws = sockets[0];
+  ws.readyState = 1; ws.onopen && ws.onopen();
+  ws.onmessage({ data: JSON.stringify({ type: "status", state: "upstream-ready" }) });
+  ws.onmessage({ data: JSON.stringify({ tokens: [{ text: "第一句", is_final: true }] }) });
+  check("words arrive", Voice.s.finalText === "第一句", JSON.stringify(Voice.s.finalText));
+  // Soniox ends its own session once it has finalised what it holds — which is exactly
+  // what happens across a ⏸. Nothing said afterwards ever reached a recogniser: you
+  // pressed ▶, kept talking, and no more words appeared.
+  const before = sockets.length;
+  ws.onmessage({ data: JSON.stringify({ tokens: [], finished: true }) });
+  await tick(1400);
+  check("a finished upstream is replaced by a fresh one", sockets.length > before,
+        before + " → " + sockets.length);
+  check("...and the words already in are kept", Voice.s && Voice.s.finalText === "第一句",
+        JSON.stringify(Voice.s && Voice.s.finalText));
+  check("...without being reported as a failure", !/⚠/.test(bar()), bar().slice(0, 60));
 }
 
 console.log(_fails.length ? "\nFAILED: " + _fails.join(", ") : "\nall pass");

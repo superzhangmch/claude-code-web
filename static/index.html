@@ -153,8 +153,8 @@ button, .btn, .icon, label.tab-radio, label.scr-delta {
 /* 100% of the viewport, and nothing subtracted from it: the control page IS the window
    while it is open. No padding (the .modal default ring of dimmed session buys nothing
    here), no title bar, no border. */
-.ctrl-modal { padding: 0; background: var(--bg); display: none; }
-.ctrl-modal.show { display: block; }
+.modal.ctrl-modal { padding: 0; background: var(--bg); display: none; }
+.modal.ctrl-modal.show { display: block; }
 .ctrl-modal #ctrl-frame {
   /* All of the USABLE viewport — inset by the safe areas, not by nothing. `inset: 0`
      put the control page's own header under the iPhone's status bar: the clock and the
@@ -2348,17 +2348,23 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 #links-modal .link-row a.lk:hover { text-decoration: underline; }
 #links-modal .link-row .lk.path { color: var(--text); }
 #links-modal .link-row .btn { flex-shrink: 0; }
-/* The direct-jump control is a real <a> (so copy-link-address and open-in-new-tab
-   work), which means it does not get the look a <button> gets from the browser for
-   free. body.pure — the e-ink theme — already covers a.btn, so this is for the others. */
+/* open / ↗ direct / copy are ONE box, declared once for both element types. The middle
+   one is a real <a> (so copy-link-address and open-in-new-tab work), which means it gets
+   none of the look a <button> gets from the browser for free — it used to carry its own
+   hand-written imitation of it, and three controls in a row came out in two shapes. Only
+   `dim` (the file is nowhere to be found) may look different, because that is
+   information. */
+#links-modal .link-row .btn,
 #links-modal .link-row a.btn {
+  box-sizing: border-box; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
   background: var(--panel2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
-  font-size: 13px; line-height: 1; padding: 4px 7px;
-  text-decoration: none; cursor: pointer; align-self: flex-start;
+  font: inherit; font-size: 13px; line-height: 1; padding: 0 9px;
+  text-decoration: none; cursor: pointer; align-self: flex-start; white-space: nowrap;
 }
+#links-modal .link-row .btn:hover,
 #links-modal .link-row a.btn:hover { border-color: var(--accent); }
-#links-modal .link-row a.btn.dim { opacity: .45; }
 #links-modal .links-empty { color: var(--muted); padding: 12px 4px; font-size: 13px; }
 /* Per-session memo. Two stacked boxes; the card is width-capped like the others and
    the textareas grow with the card rather than the text, so the phone keyboard never
@@ -2943,6 +2949,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         <button id="files-collapse" class="btn" title="Hide the browser rows — keep just this bar">▲</button>
         <h3>Files</h3>
         <span id="files-cur-name" class="files-cur-name"></span>
+        <!-- The browser's preview is a head/tail sample on purpose. This reads the file:
+             markdown rendered, JSON pretty, code coloured, searchable. -->
+        <button id="files-read" class="btn" title="阅读这个文件(渲染/搜索)" style="display:none">⤢ 阅读</button>
         <button id="files-fav-cur" class="btn" title="Favorite the previewed file">☆</button>
         <button id="files-full" class="btn" title="fullscreen">⛶</button>
         <button id="files-close" class="btn" title="close">✕</button>
@@ -3196,6 +3205,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           <button id="key-esc" class="btn" title="Send ESC">ESC</button>
           <button id="key-up" class="btn" title="Arrow Up">↑</button>
           <button id="key-down" class="btn" title="Arrow Down">↓</button>
+          <!-- claude's own hint line reads "← for agents · ↓ to manage", so without these
+               the agent switch was reachable from a desktop keyboard only — the one place
+               that does not need buttons. -->
+          <button id="key-left" class="btn" title="Arrow Left (claude: ← 切 agent)">←</button>
+          <button id="key-right" class="btn" title="Arrow Right">→</button>
+          <!-- The two control keys claude itself tells you about: "(ctrl+b to run in
+               background)" under a long shell command, and ctrl+c to interrupt. -->
+          <button id="key-ctrlb" class="btn" title="Ctrl+B — 把正在跑的命令转后台">⌃B</button>
+          <button id="key-ctrlc" class="btn" title="Ctrl+C — 中断">⌃C</button>
           <button id="key-clearline" class="btn" title="Clear current line (Ctrl-E then Ctrl-U)">⌫ line</button>
           <button id="key-enter" class="btn" title="Enter — confirm">⏎ Enter</button>
         </div>
@@ -3293,6 +3311,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       <div id="tail-keys">
         <button id="tail-esc" title="Esc — 取消正在执行的(claude 会停下当前这轮)">Esc</button>
         <button id="tail-up" title="↑ — 把上一条请求调回输入框(可以改了再发)">↑</button>
+        <button id="tail-left" title="← — claude 用它切 agent(屏幕上那行 ← for agents)">←</button>
+        <button id="tail-down" title="↓ — claude 用它管理 agent(↓ to manage)">↓</button>
+        <button id="tail-ctrlb" title="Ctrl+B — 把正在跑的命令转后台(claude 自己提示的那个)">⌃B</button>
+        <button id="tail-ctrlc" title="Ctrl+C — 中断">⌃C</button>
         <button id="tail-clear" title="清掉输入行里的字(Ctrl+E 到行尾,再 Ctrl+U 删到行首)">⌫ line</button>
       </div>
     </div>
@@ -3361,9 +3383,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
              phone (~308px of usable width there); Polish/Edit/Send keep words
              because those are the decisions worth reading. title= for desktop. -->
         <button id="rec-cancel" class="rec-cancel rec-ico" title="Cancel — discard" aria-label="Cancel">✕</button>
-        <button id="rec-pause" class="rec-pause rec-ico" style="display:none" title="Stop recording (keep the result)" aria-label="Stop recording">⏸</button>
-        <button id="rec-stop" class="rec-stop">Polish</button>
-        <button id="rec-edit" class="rec-edit" style="display:none">Edit</button>
+        <button id="rec-pause" class="rec-pause rec-ico" style="display:none" title="Stop recording (keep the result) — space" aria-label="Stop recording">⏸</button>
+        <button id="rec-stop" class="rec-stop" title="润色后放进输入框 — p">Polish</button>
+        <button id="rec-edit" class="rec-edit" style="display:none" title="原文放进输入框 — e">Edit</button>
         <!-- Task-box mode only, and the composer never shows these. Two jobs, two
              button sets: the composer decides "polish / edit / send" because the text
              is a MESSAGE; a Task box has no send and editing it is what you are already
@@ -3371,8 +3393,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
              it creates is made HERE, under the text the bar already echoes, instead of
              in a window that covers it. -->
         <button id="rec-swap" class="rec-swap" style="display:none">看润色</button>
-        <button id="rec-use" class="rec-use" style="display:none">插入</button>
-        <button id="rec-send" class="rec-send" style="display:none">Send</button>
+        <button id="rec-use" class="rec-use" style="display:none" title="放进这个框 — s / e">插入</button>
+        <button id="rec-send" class="rec-send" style="display:none" title="原文直接发出 — s">Send</button>
       </div>
     </div>
     <div id="statusline" style="display:none"></div>
@@ -3482,6 +3504,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 (() => {
   const TOKEN_KEY = "cc_web_token";
   let authToken = localStorage.getItem(TOKEN_KEY) || "";
+  // A link can carry the token (?token=…), the way /api/fs/file has always allowed —
+  // that is what makes a pasted document link work in a browser that has never been
+  // unlocked. Taken once, stored, and wiped from the address bar so it is not left
+  // sitting in the URL you then copy to somebody else.
+  (() => {
+    const m = /[?&]token=([^&#]+)/.exec(location.search || "");
+    if (!m) return;
+    try { authToken = decodeURIComponent(m[1]); } catch { return; }
+    try { localStorage.setItem(TOKEN_KEY, authToken); } catch {}
+    try { history.replaceState(history.state, "", location.pathname + location.hash); } catch {}
+  })();
   // User-facing terminal name for this host (iTerm2 on macOS, tmux on Linux).
   // Filled from /api/server-info at startup; drives all UI wording.
   let TERM = "iTerm2";
@@ -4291,7 +4324,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     recBar.classList.add("rec-memo", "rec-live-on");
     recBar.classList.remove("rec-arming", "rec-paused");
     recBar.classList.toggle("rec-two", !!(_pick.polished && _pick.raw && _pick.polished !== _pick.raw));
-    if (recWaveEl) recWaveEl.style.display = "none";
+    _wave(false);
     if (recPauseEl) recPauseEl.style.display = "none";   // recording is over
     [recCancelEl, recStopEl].forEach((b) => b && (b.style.display = "", b.disabled = false));
     if (recStopEl) { recStopEl.textContent = "Polish"; recStopEl.disabled = !_pick.raw; }
@@ -7303,8 +7336,16 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
 
   // Name + ☆ of the previewed file. Only shown while collapsed — that's exactly
   // when the list (and with it the per-row star) is hidden.
+  const filesReadBtn = document.getElementById("files-read");
+  filesReadBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (filesCurFile) openFileViewer(filesCurFile.path);
+  });
   function setFilesCurFile(f) {
     filesCurFile = f;
+    // Only for things that could be documents — the viewer itself re-checks the size
+    // and the content type, this just keeps the button from being offered for a PNG.
+    filesReadBtn.style.display = (f && f.kind === "text") ? "" : "none";
     filesCurNameEl.textContent = f ? f.name : "";
     filesCurNameEl.title = f ? f.path : "";
     filesFavCur.classList.toggle("has-file", !!f);
@@ -7344,7 +7385,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       filesFilterEl.value = "";
       loadFilesDir(f.path, 0, "");
     } else {
-      // Open the file directly in a new browser tab.
+      // A text file opens in the reader — you starred it to come back and READ it.
+      // Anything else (an image, a PDF) goes to the browser, which renders those better.
+      if (fvIsDocPath(f.path)) { openFileViewer(f.path); return; }
       const url = location.origin + "/api/fs/file?path="
                 + encodeURIComponent(f.path) + "&token=" + encodeURIComponent(authToken);
       window.open(url, "_blank");
@@ -7689,10 +7732,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     } catch {}
     pokeScreenPoll();   // key sent → kick the adaptive poll to the fast ramp so the change shows quickly
   }
-  const UP = "\x1b[A", DOWN = "\x1b[B";
+  const UP = "\x1b[A", DOWN = "\x1b[B", RIGHT = "\x1b[C", LEFT = "\x1b[D";
+  // Ctrl+B backgrounds the command claude is running ("(ctrl+b to run in background)" is
+  // its own hint); Ctrl+C interrupts. One definition each, shared by both key rows.
+  const CTRL_B = "\x02", CTRL_C = "\x03";
   document.getElementById("key-esc").addEventListener("click", () => sendRaw("\x1b"));
   document.getElementById("key-up").addEventListener("click", () => sendRaw(UP));
   document.getElementById("key-down").addEventListener("click", () => sendRaw(DOWN));
+  document.getElementById("key-left").addEventListener("click", () => sendRaw(LEFT));
+  document.getElementById("key-right").addEventListener("click", () => sendRaw(RIGHT));
+  document.getElementById("key-ctrlb").addEventListener("click", () => sendRaw(CTRL_B));
+  document.getElementById("key-ctrlc").addEventListener("click", () => sendRaw(CTRL_C));
   // Clear the current input line: Ctrl-E (to end of line) then Ctrl-U (kill to start).
   document.getElementById("key-clearline").addEventListener("click", () => sendRaw("\x05\x15"));
   document.getElementById("key-enter").addEventListener("click", () => sendRaw("", true));
@@ -10174,9 +10224,24 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     }
     // strip URLs first so their host/path parts aren't re-matched as local paths
     const stripped = t.replace(URLM, " ");
-    const PATHM = /(?:~\/|\/)[\w.\-+@]+(?:\/[\w.\-+@]+)+\/?/g;
+    // \p{L}\p{N}, not \w: \w is [A-Za-z0-9_], so `~/Desktop/卡片现状_v7.html` matched
+    // nothing at all and `/Users/me/x/卡片.md` came out truncated to `/Users/me/x/` —
+    // every path with a CJK (or accented) name was invisible to this button. Unicode
+    // classes also exclude CJK punctuation by construction, so 。、，after a path are
+    // not swallowed into it.
+    //
+    // The leading group is a boundary, standing in for a lookbehind (iOS Safari only
+    // got those in 16.4): a path starts at the beginning, after whitespace, or after
+    // an opening bracket/quote — otherwise the "/or" in "and/or" is a path. `~/x` and
+    // `./x` are allowed to be a single segment, because the prefix already says
+    // someone meant a path; a bare `/x` still needs two, for the same reason.
+    const SEG = "[\\p{L}\\p{N}_.\\-+@%#]+";
+    const PATHM = new RegExp(
+      "(^|[\\s\"'`(\\[{<>,;:，。、（）【】「」])" +
+      "((?:~\\/|\\.{1,2}\\/)" + SEG + "(?:\\/" + SEG + ")*\\/?" +
+      "|\\/" + SEG + "(?:\\/" + SEG + ")+\\/?)", "gu");
     while ((m = PATHM.exec(stripped))) {
-      const p = m[0].replace(/[.,;:)\]}>]+$/, "");
+      const p = m[2].replace(/[.,;:)\]}>。，、]+$/, "");
       if (p && !seen.has(p)) { seen.add(p); paths.push(p); }
     }
     return { urls, paths };
@@ -10223,7 +10288,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     const key = cwd + " " + p;
     if (_fsResolved.has(key)) return _fsResolved.get(key);
     const cands = [p];
-    if (cwd && p !== cwd && !p.startsWith(cwd + "/"))
+    // The second reading: the same string taken as relative to the session's cwd. Not
+    // tried for `~/...` — that one is already rooted (at the SERVER's home, which is
+    // where expanduser() takes it), so `<cwd>/~/x` is a guess that can only 404.
+    if (cwd && p !== cwd && !p.startsWith("~") && !p.startsWith(cwd + "/"))
       cands.push(cwd + "/" + p.replace(/^\/+/, ""));
     const probe = (async () => {
       for (const c of cands) {
@@ -10282,34 +10350,51 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         if (img) {   // image → click the link to preview full-screen in THIS window (no new page)
           node.classList.add("lk-img"); node.title = "click to preview";
           node.addEventListener("click", async () => { await resolved; openImagePreview(best.url, best.path); });
+        } else if (fvIsDocPath(it.v)) {
+          // The path IS the thing you want to read, so clicking it reads it — in its
+          // own tab, leaving this session where it was.
+          node.classList.add("lk-img"); node.title = "点开查看(新标签页)";
+          node.addEventListener("click", async () => { await resolved; openFileViewer(best.path); });
         }
       }
       if (img) tag.textContent = "IMG";
       li.appendChild(num); li.appendChild(tag); li.appendChild(node);
       if (it.t === "path") {
         const open = document.createElement("button");
-        open.className = "btn"; open.textContent = "open"; open.title = "Open in the file viewer";
+        open.className = "btn"; open.textContent = "open"; open.title = "打开(文本文件会直接渲染出来看)";
         // The resolved path, not the raw one: the viewer looks up a parent dir and
         // searches it, so a cwd-relative path used to send it to "/differential_geometry"
         // — a directory that does not exist — and it quietly found nothing.
-        open.addEventListener("click", async () => { await resolved; openPathInFiles(best.path); });
+        open.addEventListener("click", async () => {
+          await resolved;
+          // A text file is a document: its own page, in its own tab. Anything else goes
+          // to the file browser, which previews images and PDFs.
+          if (fvIsDocPath(best.path)) { openFileViewer(best.path); return; }
+          openPathInFiles(best.path);
+        });
         li.appendChild(open);
         // Direct jump: a real <a>, so the BROWSER renders the file (html, pdf, image)
         // in a new tab, and right-click → copy link address / long-press → open in new
-        // tab work like any link. href starts at the raw reading and is corrected when
-        // the probe answers; dimmed if the file is nowhere to be found, which is worth
-        // knowing before you click rather than after.
+        // tab work like any link. The href starts at the raw reading and is corrected
+        // when the probe answers.
         const jump = document.createElement("a");
+        // For a DOCUMENT this opens the reading page in its own tab — a real URL you
+        // can refresh, bookmark and send. The raw endpoint stays the target for the
+        // things a browser renders better than we do (images, PDFs, web pages).
+        // Decided from the extension, not from a probe: it picks which URL the link
+        // carries, and that has to be settled before you click, without asking the
+        // server for permission.
+        const asDoc = fvIsDocPath(it.v);
         jump.className = "btn lk-jump"; jump.textContent = "↗ direct";
         jump.target = "_blank"; jump.rel = "noopener noreferrer";
-        jump.href = best.url;
-        jump.title = "在浏览器新标签页直接打开(/api/fs/file?path=…&token=…)";
-        resolved.then(hit => {
-          jump.href = best.url;
-          jump.title = hit ? "在浏览器新标签页直接打开:\n" + hit
-                           : "找不到这个文件 —— 原样和 " + (_sessionCwd() || "(cwd 未知)") + " 下面都试过了";
-          if (!hit) jump.classList.add("dim");
-        });
+        jump.href = asDoc ? fvPageUrl(it.v) : best.url;
+        jump.title = asDoc ? "新标签页打开阅读页(可刷新 / 可收藏 / 可发给别人)"
+                           : "原样交给浏览器打开(图片 / PDF / 网页)";
+        // The probe's only job here is to CORRECT the target (a cwd-relative path
+        // written with a leading slash). It does not get to grey the button out or
+        // relabel it: whether to click is not a question this needs to answer first,
+        // and a 404 in a tab says it just as well, a second later, when asked.
+        resolved.then(() => { jump.href = asDoc ? fvPageUrl(best.path) : best.url; });
         li.appendChild(jump);
       }
       li.appendChild(mkCopy(it.v));
@@ -11427,6 +11512,34 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
     } catch (e) { tailPre.textContent = "Error: " + e; }
   }
+  // ---------- reading a text file ----------
+  // A page of its own (/view?path=…), opened in a new tab. It was an overlay in here
+  // once, with a #file= route and rules about what to boot and what closing should
+  // reveal; reading a file has nothing to do with a session, and every one of those
+  // rules was a way for it to go wrong. So this is the whole client side of it now.
+  const FV_MD_EXT = new Set(["md", "markdown", "mdx"]);
+  const FV_CODE_EXT = new Set(["js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "rb", "go",
+    "rs", "java", "c", "h", "cpp", "cc", "hpp", "cs", "sh", "bash", "zsh", "fish", "sql",
+    "css", "scss", "html", "htm", "xml", "svg", "yaml", "yml", "toml", "ini", "conf",
+    "json", "jsonl", "ndjson", "swift", "kt", "php", "pl", "lua", "r", "vim", "diff",
+    "patch", "txt", "log", "csv", "tsv", "text"]);
+  function fvExt(path) {
+    const base = (path || "").split("/").pop() || "";
+    const i = base.lastIndexOf(".");
+    return i > 0 ? base.slice(i + 1).toLowerCase() : base.toLowerCase();
+  }
+  // By name only. Deciding which URL a link carries has to happen before the click,
+  // and the page itself re-checks the size and the type when it opens.
+  function fvIsDocPath(path) {
+    const e = fvExt(path);
+    return FV_MD_EXT.has(e) || FV_CODE_EXT.has(e);
+  }
+  const fvPageUrl = (path) => "/view?path=" + encodeURIComponent(path);
+  function openFileViewer(path) {
+    window.open(fvPageUrl(path), "_blank", "noopener");
+    return true;
+  }
+
   // ---------- the control pages, as an overlay over this one ----------
   // Leaving for /remote/ unloaded the session view: coming back re-fetched the
   // transcript and lost the place you were reading. Same pages, shown here instead.
@@ -11489,6 +11602,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
   document.getElementById("tail-esc").addEventListener("click", tailKey("\x1b"));
   document.getElementById("tail-up").addEventListener("click", tailKey(UP));
+  document.getElementById("tail-left").addEventListener("click", tailKey(LEFT));
+  document.getElementById("tail-down").addEventListener("click", tailKey(DOWN));
+  document.getElementById("tail-ctrlb").addEventListener("click", tailKey(CTRL_B));
+  document.getElementById("tail-ctrlc").addEventListener("click", tailKey(CTRL_C));
   // Ctrl-E to the end of the line, then Ctrl-U to kill back to its start — the same pair
   // the screen window's ⌫ line uses, because Ctrl-U alone leaves anything right of the
   // caret behind.
@@ -11600,6 +11717,30 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // its own key handling — this only fires when focus is still on THIS document.
     if (e.key === "Escape" && ctrlModal.classList.contains("show")) {
       e.preventDefault(); ctrlClose(); return;
+    }
+    // While the recording bar is up, its buttons get keys: space pauses/resumes,
+    // s sends, p polishes, e edits. Nothing new is implemented — the key presses the
+    // BUTTON, so a hidden or disabled one does nothing and the shortcut can never mean
+    // something the bar is not offering. In a Task box the commit button is 插入, and
+    // that is what s / e reach there.
+    //
+    // Skipped while focus is in a text box: typing into the composer WHILE dictating is
+    // supported (vtWrite goes by the marker, not by a stale offset), and there a space
+    // is a space. Tapping 🎤 leaves focus on the button, so the keys work straight away.
+    if (recBar && recBar.style.display !== "none"
+        && !e.metaKey && !e.ctrlKey && !e.altKey && !_isEditable(document.activeElement)) {
+      const usable = (el) => el && el.style.display !== "none" && !el.disabled;
+      const first = (...els) => els.find(usable) || null;
+      const k = e.key === " " ? " " : (e.key.length === 1 ? e.key.toLowerCase() : e.key);
+      const btn = k === " " ? first(recPauseEl)
+                : k === "s" ? first(recSendEl, recUseEl)
+                : k === "p" ? first(recStopEl)
+                : k === "e" ? first(recEditEl, recUseEl)
+                : null;
+      if (btn) { e.preventDefault(); btn.click(); return; }
+      // Space must not scroll the page behind the bar even when there is nothing to
+      // pause (batch mode between segments, a parked result).
+      if (k === " ") { e.preventDefault(); return; }
     }
     // Esc closes the ask list first — it's the topmost thing on screen when open.
     if (e.key === "Escape" && asksMenu.style.display !== "none") {
@@ -12695,6 +12836,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // ASR is up) and by every token-less message, so the whole connect window showed
   // nothing at all and then text appeared out of nowhere.
   let _recStatusHtml = "";
+  // The wave means ONE thing: audio is being captured at this instant. Every place that
+  // starts or stops capture goes through here, so it cannot drift out of step — it used
+  // to be shown when the BAR opened, which is while the mic is still being opened and
+  // nothing is being recorded yet.
+  function _wave(on) { if (recWaveEl) recWaveEl.style.display = on ? "" : "none"; }
+  // A phase, not an operation in flight: no spinner, no sentence. "connecting ASR" read
+  // as "not usable yet" when in truth you could already talk — the audio is buffered and
+  // the batch engine carries it if the stream never comes up. So the only phases named
+  // here are the two you can act on: recording, paused.
+  function _recPlainStatus(msg) {
+    _recStatusHtml = msg ? "<span class='rec-live-partial'>" + _escHtml(msg) + "</span>" : "";
+    if (recLiveEl) { recLiveEl.style.display = ""; recLiveEl.innerHTML = _recStatusHtml; }
+  }
   function _recLiveStatus(msg) {
     _recStatusHtml = "<span class='rec-live-hint'><span class='rec-spin'></span>" + _escHtml(msg) + "</span>";
     if (recLiveEl) { recLiveEl.style.display = ""; recLiveEl.innerHTML = _recStatusHtml; }
@@ -12710,9 +12864,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (!recPauseEl) return;
     recPauseEl.textContent = on ? "▶" : "⏸";
     // In batch mode ⏸ is also the transcribe trigger, so say that rather than "stop".
-    recPauseEl.title = on ? "Resume recording"
+    recPauseEl.title = (on ? "Resume recording"
       : (Voice.s && Voice.s.batchOnly) ? "Pause and transcribe what you have said so far"
-                                       : "Stop recording (keep the result)";
+                                       : "Stop recording (keep the result)") + " — space";
     recPauseEl.setAttribute("aria-label", on ? "Resume recording" : "Stop recording");
   }
   function _recTimerPause() { if (_recTimer) { clearInterval(_recTimer); _recTimer = null; } }
@@ -12730,7 +12884,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     recTimeEl.textContent = "0:00";
     recBar.style.display = "flex";
     recBar.classList.remove("rec-live-on");
-    recWaveEl.style.display = "";
+    _wave(false);   // not capturing yet — the mic is still opening
     recLiveEl.style.display = "none";
     // Bare base state (Cancel + Stop). Voice.start() immediately dresses it for the
     // actual recording — ⏸, Polish / Edit / Send, and the transcript/status row — in
@@ -12771,7 +12925,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (recStopEl) recStopEl.textContent = "Polish";
     // No wave: those bars animate as though sound were arriving, and nothing is being
     // captured until the device opens. Voice.start() turns it on when that is true.
-    if (recWaveEl) recWaveEl.style.display = "none";
+    _wave(false);
     // Said plainly instead of faking a live recording. Audio does not exist until the
     // device opens, so words spoken in this gap are genuinely lost — being told not to
     // start yet beats finding them missing afterwards.
@@ -12790,7 +12944,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   function _showVoiceNotice(reason, raw) {
     recBar.style.display = "flex"; recBar.classList.add("rec-live-on");
     recBar.classList.remove("rec-arming");
-    if (recWaveEl) recWaveEl.style.display = "none";
+    _wave(false);
     [recCancelEl, recStopEl, recEditEl, recSendEl].forEach(b => b && (b.style.display = ""));
     if (recPauseEl) recPauseEl.style.display = "none";   // recording is over — nothing to pause
     recBar.classList.remove("rec-paused");
@@ -12798,7 +12952,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     if (recStopEl) recStopEl.textContent = "Polish";
     // Send was disabled during recording (nothing to submit yet) — re-enable it here
     // only if this state actually carries text.
-    if (recSendEl) { recSendEl.disabled = !raw; recSendEl.title = raw ? "submit this text as-is (no polish)" : "nothing to send"; }
+    if (recSendEl) { recSendEl.disabled = !raw; recSendEl.title = raw ? "submit this text as-is (no polish) — s" : "nothing to send"; }
     if (recLiveEl) {
       recLiveEl.style.display = "";
       recLiveEl.innerHTML = "<span class='rec-live-err'>⚠ " + _escHtml(reason || "录音已结束") + "</span>"
@@ -12830,7 +12984,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // still on screen, so the elapsed time should stay visible, just static.
   function _recFreeze() {
     if (_recTimer) { recTimeEl.textContent = _fmtDur(Date.now() - _recStartMs); clearInterval(_recTimer); _recTimer = null; }
-    if (recWaveEl) recWaveEl.style.display = "none";
+    _wave(false);
   }
   let _batchResult = null;   // set = a finished/parked result awaiting Polish/Edit/Send/Cancel
   recBar.addEventListener("click", (e) => {   // click bar background (not a button) → Polish (finish)
@@ -12951,7 +13105,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // First actual transcript → Send becomes meaningful (see start()).
       if (recSendEl && full && recSendEl.disabled) {
         recSendEl.disabled = false;
-        recSendEl.title = "submit this text as-is (no polish)";
+        recSendEl.title = "submit this text as-is (no polish) — s";
       }
       if (recLiveEl) {
         if (full) {
@@ -12973,6 +13127,21 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // will land — vanished the moment you started speaking, which is exactly when you
       // want it. The marker now sits there untouched until Polish / Edit / Send, and
       // those already write through vtWrite() at the marker.
+    },
+    // Let the DEVICE go. Nothing after the finish button needs it — the words are either
+    // in the provider's hands or on the local clip — and holding it keeps the system's
+    // "microphone in use" indicator on through the polish, which reads as "it is still
+    // listening to me". Called as soon as the clip is closed (mr.onstop), not after the
+    // transcription: mr.stop() flushes its data through ondataavailable, and cutting the
+    // track before that has landed can truncate the clip.
+    releaseMic() {
+      const s = Voice.s; if (!s || s.micReleased) return;
+      s.micReleased = true;
+      try { s.sp && (s.sp.onaudioprocess = null, s.sp.disconnect()); } catch {}
+      try { s.src && s.src.disconnect(); } catch {}
+      try { s.mute && s.mute.disconnect(); } catch {}
+      try { s.ac && s.ac.close(); } catch {}
+      try { s.stream && s.stream.getTracks().forEach(t => t.stop()); } catch {}
     },
     teardown() {   // tear down everything incl. the mic stream + recorder
       const s = Voice.s; if (!s) return;
@@ -12999,12 +13168,28 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // we are in — pressing ▶ resumes into batch instead of claiming to connect an ASR
     // we already gave up on. Deliberately per-SESSION: the next tap on 🎤 reads the ⚙
     // mode again, so this is a temporary fallback, not a sticky mode switch.
-    goBatch(why) {
+    goBatch(why, soft) {
       const s = Voice.s; if (!s || s.dropped) return;
       s.dropped = true;
+      // Remembered, not just painted: paintBatchOnly runs again on every segment that
+      // comes back, and without this the reason flashed once and was replaced by the
+      // generic "batch mode · <engine>" line.
+      s.fellBack = why ? (soft ? why : "⚠ " + why) : "";
       s.pending = []; s.pendBytes = 0;   // buffered PCM can never be shipped now — free it
       Voice.teardownStream();            // stop holding a socket that isn't delivering
-      Voice.paintBatchOnly(why);
+      Voice.paintBatchOnly(why, "", soft);
+    },
+    // Pressed a button and the stream never came up? Switch now, and say so — waiting
+    // out a handshake that is already too late to matter is the one thing the moment
+    // cannot afford. Only worth saying when realtime is what you asked for.
+    batchIfNotConnected() {
+      const s = Voice.s;
+      // "Connected" = words can actually come: the server said its upstream is live, or
+      // some already arrived. An open socket to US says nothing about the provider —
+      // that is exactly the state the old "connecting…" line was reporting.
+      if (!s || s.batchOnly || s.dropped || s.upReady || s.gotAny) return false;
+      Voice.goBatch("use batch mode", true);
+      return true;
     },
     // The transcript row for a batch-only session, in both of its flavours:
     //   why === ""  → batch by choice (⚙ 🎤): nothing went wrong, so just say which mode
@@ -13013,16 +13198,19 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     //                 keep whatever it did manage to return (half a sentence is still
     //                 worth having).
     // Either way, "no words appearing" must never read as a freeze.
-    paintBatchOnly(why, warn) {
+    paintBatchOnly(why, warn, soft) {
       const s = Voice.s; if (!s || !recLiveEl) return;
       const txt = (s.finalText + s.partial).trim();
       // STATUS only, no instructions: which mode, which engine, recording or paused, plus
       // anything that actually went wrong. The how-to blurb this used to carry ("tap ▶ to
       // record more, or Polish / Edit / Send") was noise stapled to the end of the user's
       // own words — the buttons are right there and already say what they do.
-      const stat = why
-        ? "⚠ " + _escHtml(why) + " — " + (s.paused ? "paused" : "recording") + " (batch)"
-        : "batch mode" + (asrWhich ? " · " + _escHtml(asrWhich) : "") + " — " + (s.paused ? "paused" : "recording");
+      // The label, in order of specificity: what this call was told to say, else what
+      // the session fell back with, else plain "which mode is this".
+      const label = why ? ((soft ? "" : "⚠ ") + _escHtml(why))
+                        : s.fellBack ? _escHtml(s.fellBack)
+                        : "batch mode" + (asrWhich ? " · " + _escHtml(asrWhich) : "");
+      const stat = label + " — " + (s.paused ? "paused" : "recording");
       const note = "<span class='rec-live-partial'>" + (txt ? "  " : "") + stat + "</span>"
                  + (warn ? "<span class='rec-live-err'>  ⚠ " + _escHtml(warn) + "</span>" : "");
       recLiveEl.style.display = "";
@@ -13168,6 +13356,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // upstream time out, streamDrop marks the session and Stop recovers via batch.
     togglePause() {
       const s = Voice.s; if (!s || s.stopping) return;
+      if (!s.paused) Voice.batchIfNotConnected();   // ⏸ with nothing connected → batch, now
       s.paused = !s.paused;
       if (s.paused) {
         s.pausedAt = Date.now();
@@ -13177,27 +13366,29 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         try { if (s.ws && s.ws.readyState === 1) Voice.flushPending(s.ws); } catch {}
         // Batch: ⏸ is also the "transcribe what I have said so far" button — it closes the
         // clip and sends it, so the text is on screen before you choose Polish/Edit/Send.
-        if (s.batchOnly) Voice.cutSegment();
+        // A fallen-back session has a local clip running too, so ⏸ can transcribe what
+        // you have said so far exactly like a batch one — otherwise the text only turns
+        // up when the whole recording ends.
+        if (s.batchOnly || s.dropped) Voice.cutSegment();
         try { if (s.mr && s.mr.state === "recording") s.mr.pause(); } catch {}
-        if (recWaveEl) recWaveEl.style.display = "none";   // the wave means "listening"
+        _wave(false);                      // ⏸ = stop feeding it audio
         // Same contradiction as stop: a "recording — connecting…" line must not survive
         // a pause. Only when there's no transcript to protect.
-        if (s.dropped) Voice.paintBatchOnly(s.batchOnly ? "" : "realtime ASR unavailable");
-        else if (!s.gotAny) _recLiveStatus("paused — tap ▶ to continue");
+        if (s.dropped) Voice.paintBatchOnly("");
+        else if (!s.gotAny) _recPlainStatus("paused");
         _recTimerPause();
       } else {
         const gap = Date.now() - (s.pausedAt || Date.now());
         s.startMs += gap;        // the 5-min cap measures captured audio, not wall clock
         s.pausedAt = 0;
-        if (s.batchOnly) Voice.mrStart();      // a fresh clip for the next segment
+        if (s.batchOnly || s.dropped) Voice.mrStart();   // a fresh clip for the next segment
         else { try { if (s.mr && s.mr.state === "paused") s.mr.resume(); } catch {} }
-        if (recWaveEl) recWaveEl.style.display = "";
+        _wave(true);
         // A batch session (by choice, or one that already fell back) must NOT resume
         // claiming to connect an ASR. A fallback stays batch until this recording ends;
         // the next 🎤 tap reads ⚙ again.
-        if (s.dropped) Voice.paintBatchOnly(s.batchOnly ? "" : "realtime ASR unavailable");
-        else if (!s.gotAny) _recLiveStatus(s.upReady ? "listening — say something…"
-                                                    : "recording — connecting ASR…");
+        if (s.dropped) Voice.paintBatchOnly("");
+        else if (!s.gotAny) _recPlainStatus("recording");
         _recTimerResume(gap);
       }
       _syncPauseBtn();
@@ -13256,12 +13447,18 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         Voice.finalize();
         return;
       }
-      if (!s.gotAny && (s.retries || 0) < 3) {
+      // Retried whether or not words have already arrived. It used to give up the
+      // moment there WAS text (`!s.gotAny`), which is the common case by the time a
+      // socket blips — so the rest of what you said had nowhere to go. As long as the
+      // recording is alive, a live stream is worth getting back.
+      if ((s.retries || 0) < 3) {
         s.retries = (s.retries || 0) + 1;
         console.warn("asr-rt early drop (" + (msg || "") + ") → retry #" + s.retries);
         // Say that recording continues — it does now, and the audio captured during
         // these retries is buffered and sent once a connection sticks.
-        _recLiveStatus("recording — reconnecting ASR (" + s.retries + "/3)…");
+        // Not said out loud: from here it is still just "recording". The audio is
+        // buffered and goes up as soon as a connection sticks.
+        _recPlainStatus("recording");
         Voice.teardownStream();
         setTimeout(() => { if (Voice.s && !Voice.s.stopping) Voice.openStream(); }, 400 * s.retries);
         return;
@@ -13272,7 +13469,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // timing out during a pause killed the whole session ("语音连接中断") instead of
       // just marking it batch-only, and there was nothing left to resume.
       if (s.mr && s.mr.state !== "inactive") {
-        Voice.goBatch("realtime ASR dropped" + (msg ? "（" + msg + "）" : ""));
+        Voice.goBatch("realtime ASR dropped" + (msg ? "（" + msg + "）" : ""));   // sticks as ⚠ …
         return;
       }
       // Nothing transcribed, retries spent, and no local recording to fall back on.
@@ -13283,7 +13480,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     },
     stop(mode) {   // the finish action. mode: "polish" (default) | "edit" (raw→box) | "send" (raw→submit)
       const s = Voice.s; if (!s || s.stopping) return;
+      Voice.batchIfNotConnected();   // never wait on a handshake that missed its moment
+
       s.stopping = true; s.mode = mode || "polish"; _recording = false; _setMic("busy");
+      _wave(false);   // said here too, not only as a side effect of _setMic("busy"):
+                      // stop() means stop capturing, and the wave means capturing
       s.paused = false; recBar.classList.remove("rec-paused");
       // Immediate, visible acknowledgement of the tap. Draining the provider's tail
       // can take a few seconds (see _finDeadline), and with the wave hidden and the
@@ -13297,6 +13498,11 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       try { s.sp && (s.sp.onaudioprocess = null); } catch {}   // stop appending audio
       try { s.ws && s.ws.readyState === 1 && s.ws.send(JSON.stringify({ type: s.provider === "soniox" ? "finish" : "input_audio_buffer.commit" })); } catch {}
       try { s.mr && s.mr.state !== "inactive" && s.mr.stop(); } catch {}   // finalize the full local recording
+      // …and give the microphone back. The upload of what you already said continues
+      // (flushPending above, plus the provider's own drain) — that is data in flight,
+      // not the device.
+      if (s.mrDone) s.mrDone.then(() => Voice.releaseMic(), () => Voice.releaseMic());
+      else Voice.releaseMic();
       // Streaming text lags the audio, so the provider is still draining the tail of
       // your last sentence when you press Polish/Edit/Send. A FIXED 2.5s timer used to
       // fire mid-drain: finalize() nulls Voice.s, every later token was dropped by
@@ -13323,7 +13529,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
       // batchOnly: no stream ever existed, so go straight to the transcription.
       s._finTimer = setTimeout(() => Voice.finalize(),
-                               s.batchOnly ? 0 : s.dropped ? 400 : (waiting ? 30000 : 0));
+                               (s.batchOnly || !waiting) ? 0 : s.dropped ? 400 : 30000);
     },
     async polish(raw, before) {   // shared polish step (same endpoint + gating as batch)
       _setMic("busy");
@@ -13495,10 +13701,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           // session is no longer recording, and the server keeps reporting its upstream
           // retries — repainting "recording — connecting ASR…" then contradicted the
           // state the user had just chosen. Those paths own the message instead.
-          if (!s.gotAny && !s.stopping && !s.paused) {
-            if (ev.state === "upstream-ready") _recLiveStatus("listening — say something…");
-            else _recLiveStatus("recording — connecting ASR" + (ev.attempt > 1 ? " (attempt " + ev.attempt + ")" : "") + "…");
-          }
+          // Connected → nothing to say: the words themselves are the signal, and the
+          // wave already says we are listening. Not connected → "recording", which is
+          // both true and all you need: keep talking.
+          if (!s.gotAny && !s.stopping && !s.paused) _recPlainStatus("recording");
           return;
         }
         if (s.provider === "soniox") {
@@ -13523,7 +13729,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
           if (ev.finished && s.stopping) {
             clearTimeout(s._finTimer);
             s._finTimer = setTimeout(() => Voice.finalize(), 400);
+            return;
           }
+          // `finished` while the recording is still going — Soniox ends its session on
+          // its own once it has finalised the audio it holds, which is exactly what
+          // happens across a ⏸. Nothing said so afterwards ever reached a recogniser:
+          // you pressed ▶, kept talking, and no more words appeared. A finished upstream
+          // is a dead upstream, so get a new one.
+          if (ev.finished) { Voice.streamDrop("upstream finished"); return; }
           return;
         }
         const t = ev.type || "";   // OpenAI path
@@ -13544,7 +13757,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         // Do NOT blank the area here: this only means the browser→server hop is up;
         // the server may still be connecting to the ASR provider (it reports that
         // with {"type":"status"} below). The first real token clears the status.
-        if (!s.gotAny && !s.dropped) _recLiveStatus("recording — connecting ASR…");
+        if (!s.gotAny && !s.dropped) _recPlainStatus("recording");
       };
     },
     // ONE recording path for both ⚙ modes. batchOnly = the user picked 🎤 batch (or no
@@ -13605,14 +13818,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       // bug. Bonus: the AudioContext is now created inside the tap's user gesture
       // instead of in a socket callback seconds later, which iOS prefers.
       Voice.startCapture();
-      if (recWaveEl) recWaveEl.style.display = "";
+      _wave(true);                       // capture has actually started
       if (recLiveEl) recLiveEl.style.display = "";
       // "你可以有个地方提醒我什么时候 ready" — the moment audio starts existing, say so.
       // It is a distinct line rather than a colour change because the thing it replaces
       // ("先别说话") was also words, and the pair has to read as a state changing.
       recBar.classList.remove("rec-arming");     // dot goes red: audio exists from here
       if (batchOnly) Voice.paintBatchOnly("");   // says which mode this is + when text arrives
-      else _recLiveStatus("🎙 可以说了 — 正在连接识别服务…");
+      else _recPlainStatus("recording");
       if (recPauseEl) { recPauseEl.style.display = ""; }   // ⏸ pause / ▶ resume
       _syncPauseBtn();
       if (recSendEl) {

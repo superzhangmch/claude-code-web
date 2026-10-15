@@ -1,0 +1,753 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>file</title>
+<!--
+  A page that shows a text file. That is all it is.
+
+  It used to be a mode of the session app — an overlay, a #file= route, rules about what
+  to boot and what pressing ✕ should reveal. Reading a file has nothing to do with a
+  claude session, and every one of those rules was a way for it to go wrong (a URL with
+  both a session and a file in it opened the session and dropped the file). So: its own
+  page, its own URL, nothing else running.
+
+      /view?path=/abs/or/~/path[&token=…][&raw=1]
+
+  The token is optional: taken from the URL when it is there (that is what the redirect
+  from /api/fs/file passes), otherwise from localStorage, which is where the app keeps
+  it — same origin, same key. Favourites are the same localStorage list the app's file
+  browser shows, for the same reason.
+-->
+<link rel="icon" href="/static/favicon.svg">
+<style>
+:root {
+  --bg: #000; --panel: #1c1f2a; --panel2: #232735; --text: #e6e6ea; --muted: #8a8f9c;
+  --accent: #e08b4a; --border: #2a2e3e; --code-bg: #0f1017; --warn: #ff8b6a;
+}
+body.light {
+  --bg: #fdf6e3; --panel: #f5edd6; --panel2: #ece3c8; --text: #1d2021; --muted: #7c6f64;
+  --accent: #af3a03; --border: #e2d8bc; --code-bg: #f3ebd2; --warn: #9d0006;
+}
+body.pure {
+  --bg: #fff; --panel: #fff; --panel2: #fff; --text: #000; --muted: #333;
+  --accent: #000; --border: #000; --code-bg: #fff; --warn: #000;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--text);
+  font: calc(16px * var(--cs, 1)) -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  display: flex; flex-direction: column;
+}
+/* The file viewer: the whole viewport, minus the safe areas, like the control overlay.
+   One bar of controls, then the document. */
+/* A PANEL, not a centred card. `.modal` centres its child (align-items/justify-content:
+   center) and pads 20px, which for a flex column meant the bar and the document shrank
+   to their content and floated in the middle of a see-through page — "一个长条" with the
+   transcript showing through it. Everything that made it a dialog is undone here. */
+.modal.fv { padding: 0; background: var(--bg); display: none; }
+.fv {
+  display: flex; flex-direction: column;
+  align-items: stretch; justify-content: flex-start;
+}
+.fv .fv-bar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+  padding: calc(6px + env(safe-area-inset-top, 0px)) 8px 6px;
+  background: var(--panel); border-bottom: 1px solid var(--border);
+}
+.fv .fv-name {
+  color: var(--text); font: 12px ui-monospace, Menlo, monospace; cursor: pointer;
+  max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fv .fv-gap { flex: 1 1 auto; }
+.fv .fv-views { display: inline-flex; gap: 3px; }
+.fv .fv-views button {
+  background: var(--panel2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 5px;
+  padding: 2px 8px; font-size: 12px; cursor: pointer;
+}
+.fv .fv-views button.current { color: var(--text); border-color: var(--accent); font-weight: 700; }
+.fv .fv-q {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 5px; padding: 3px 7px; font-size: 12px; width: 22vw; min-width: 90px;
+}
+.fv .fv-hits { color: var(--muted); font-size: 11px; min-width: 42px; text-align: right; }
+.fv .fv-ic {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 5px; min-width: 26px; height: 26px; font-size: 12px; cursor: pointer;
+}
+.fv .fv-ic:hover { border-color: var(--accent); }
+.fv .fv-ic.on { color: #e8b339; border-color: #e8b339; }
+.fv .fv-body {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+}
+/* code / raw: a gutter column that is not part of the text. A CSS-side column rather
+   than numbers in the DOM, so selecting the code and copying it gives you the code —
+   line numbers in a copied snippet are the classic reason people stop using them. */
+.fv .fv-codewrap { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 10px; }
+.fv .fv-gutter {
+  color: var(--muted); text-align: right; user-select: none; -webkit-user-select: none;
+  font: calc(12px * var(--cs, 1))/1.55 ui-monospace, Menlo, monospace; white-space: pre;
+  border-right: 1px solid var(--border); padding-right: 8px;
+}
+.fv .fv-code, .fv .fv-code code {
+  font: calc(12px * var(--cs, 1))/1.55 ui-monospace, Menlo, monospace;
+  margin: 0; background: none; padding: 0; white-space: pre; overflow-x: auto;
+}
+.fv.fv-wrapped .fv-code, .fv.fv-wrapped .fv-code code { white-space: pre-wrap; word-break: break-word; }
+.fv.fv-wrapped .fv-gutter { display: none; }   /* wrapped lines and a gutter cannot both be true */
+.fv .fv-md { max-width: 52em; }
+/* csv: a table, with the header staying put — the first row is the only thing that
+   makes column 7 mean anything once you have scrolled. */
+.fv .fv-table { border-collapse: collapse; font: calc(12px * var(--cs, 1))/1.5 ui-monospace, Menlo, monospace; }
+.fv .fv-table th, .fv .fv-table td {
+  border: 1px solid var(--border); padding: 2px 7px; text-align: left;
+  vertical-align: top; max-width: 46ch; overflow-wrap: anywhere;
+}
+.fv .fv-table thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--panel); color: var(--text); font-weight: 700; white-space: nowrap;
+}
+.fv .fv-table tbody tr:nth-child(2n) { background: rgba(127,127,127,.06); }
+.fv .fv-table td.fv-rn { color: var(--muted); text-align: right; user-select: none; border-left: 0; }
+/* jsonl: one row per line, opened in place. The preview line is what you scan; the
+   pretty-printed object is what you read. */
+.fv .fv-jl { display: flex; flex-direction: column; }
+.fv .fv-jl .jl-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 10px;
+  border-bottom: 1px solid var(--border); padding: 2px 0; cursor: pointer;
+  font: calc(12px * var(--cs, 1))/1.55 ui-monospace, Menlo, monospace;
+}
+.fv .fv-jl .jl-n { color: var(--muted); text-align: right; user-select: none; min-width: 4ch; }
+.fv .fv-jl .jl-one { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fv .fv-jl .jl-row.open .jl-one { white-space: pre; overflow: visible; text-overflow: clip; }
+.fv .fv-jl .jl-row.bad .jl-one { color: var(--warn, #e08a5a); }
+.fv mark.fv-hit { background: #ffd54a; color: #000; border-radius: 2px; }
+.fv mark.fv-hit.cur { background: #ff8f1f; }
+.fv .fv-note { color: var(--muted); font-size: 12px; padding: 6px 2px; }
+
+
+.markdown { word-break: break-word; }
+.markdown blockquote {
+  margin: 6px 0; padding: 2px 0 2px 10px;
+  border-left: 3px solid var(--border); color: var(--muted);
+}
+.markdown blockquote p { margin: 3px 0; }
+.markdown p { margin: 0 0 .7em 0; }
+.markdown p:last-child { margin-bottom: 0; }
+.markdown h1, .markdown h2, .markdown h3 { margin: .8em 0 .4em 0; line-height: 1.3; }
+.markdown code {
+  background: var(--code-bg); padding: 1px 5px; border-radius: 3px;
+  /* em (not a fixed px) so inline `code` scales with the chat A+/A− (--cs) too —
+     0.87em ≈ the old 13px against the 15px prose base, so it looks unchanged. */
+  font-family: ui-monospace, Menlo, monospace; font-size: 0.87em;
+}
+.markdown pre {
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 10px 12px; overflow-x: auto; margin: .5em 0;
+}
+.markdown pre code { background: none; padding: 0; font-size: 0.84em; }
+.markdown .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; margin: .5em 0; }
+.markdown ul, .markdown ol { margin: .3em 0 .7em 1.4em; padding: 0; }
+.markdown a { color: var(--accent); }
+.markdown .table-wrap {
+  max-width: 100%; overflow-x: auto;
+  margin: .5em 0;
+  -webkit-overflow-scrolling: touch;
+}
+.markdown table {
+  border-collapse: collapse; margin: 0;
+  font-size: 0.84em;
+  min-width: max-content;
+}
+.markdown td, .markdown th { white-space: nowrap; }
+.markdown th, .markdown td {
+  border: 1px solid var(--border);
+  padding: 4px 8px; text-align: left; vertical-align: top;
+}
+.markdown th { background: var(--code-bg); font-weight: 600; }
+.markdown tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+.fv .fv-bar a.fv-ic { text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
+.fv .fv-bar .fv-home { color: var(--muted); font-size: 12px; text-decoration: none; white-space: nowrap; }
+.fv .fv-bar .fv-home:hover { color: var(--text); }
+#tokbox { padding: 18px; max-width: 420px; }
+#tokbox input { width: 100%; padding: 8px; font: inherit; background: var(--panel2);
+  color: var(--text); border: 1px solid var(--border); border-radius: 6px; }
+#tokbox button { margin-top: 8px; padding: 7px 14px; font: inherit; cursor: pointer;
+  background: var(--accent); color: #fff; border: 0; border-radius: 6px; }
+</style>
+</head>
+<body class="fv">
+  <div class="fv-bar">
+    <span id="fv-name" class="fv-name" title="点一下复制完整路径"></span>
+    <span id="fv-views" class="fv-views"></span>
+    <span class="fv-gap"></span>
+    <input id="fv-q" class="fv-q" type="search" placeholder="搜索" />
+    <span id="fv-hits" class="fv-hits"></span>
+    <button id="fv-prev" class="fv-ic" title="上一个 (⇧Enter)">◀</button>
+    <button id="fv-next" class="fv-ic" title="下一个 (Enter)">▶</button>
+    <button id="fv-wrap" class="fv-ic" title="折行 / 不折行">⏎</button>
+    <button id="fv-fav" class="fv-ic" title="收藏(会出现在 cc-web 文件浏览器的 Favorites 里)">☆</button>
+    <button id="fv-copy" class="fv-ic" title="复制全文">⧉</button>
+    <button id="fv-link" class="fv-ic" title="复制这个页面的链接">🔗</button>
+    <a id="fv-open" class="fv-ic" target="_blank" rel="noopener" title="原始文件(浏览器直接打开)">↗</a>
+    <a id="fv-home" class="fv-home" href="/">cc-web</a>
+  </div>
+  <div id="fv-body" class="fv-body"></div>
+  <div id="tokbox" style="display:none">
+    <p>需要 token（服务器启动时打印的那个，或 <code>CC_WEB_TOKEN</code>）。</p>
+    <input id="tokin" type="password" placeholder="token" autocomplete="current-password">
+    <button id="tokgo">打开</button>
+  </div>
+
+<script src="/static/vendor/marked.min.js"></script>
+<script>
+(() => {
+  "use strict";
+  // ---- the little bits this page needs on its own ------------------------------
+  const TOKEN_KEY = "cc_web_token", FAV_KEY = "cc_web_fav", THEME_KEY = "cc_web_theme";
+  const qs = new URLSearchParams(location.search);
+  let authToken = "";
+  {
+    const t = qs.get("token");
+    if (t) {
+      authToken = t;
+      try { localStorage.setItem(TOKEN_KEY, t); } catch {}
+      // Out of the address bar once it is stored: the URL you copy from here should not
+      // carry a credential.
+      try {
+        const keep = new URLSearchParams(location.search); keep.delete("token");
+        history.replaceState(null, "", location.pathname + (keep.toString() ? "?" + keep : ""));
+      } catch {}
+    } else {
+      try { authToken = localStorage.getItem(TOKEN_KEY) || ""; } catch {}
+    }
+  }
+  // The app's theme, because this is the same app's file.
+  try {
+    const th = localStorage.getItem(THEME_KEY);
+    if (th === "light" || th === "pure") document.body.classList.add(th);
+    const cs = parseFloat(localStorage.getItem("cc_web_chat_scale") || "1");
+    if (cs > 0) document.body.style.setProperty("--cs", cs);
+  } catch {}
+
+  const authedFetch = (url, opts = {}) => fetch(url, {
+    ...opts, cache: "no-store",
+    headers: { ...(opts.headers || {}), Authorization: "Bearer " + authToken },
+  });
+  const fsFileUrl = (p) => location.origin + "/api/fs/file?path=" + encodeURIComponent(p)
+                         + "&raw=1&token=" + encodeURIComponent(authToken);
+  function copyText(t) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).catch(() => {});
+      return;
+    }
+    const ta = document.createElement("textarea");
+    ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); } catch {}
+    ta.remove();
+  }
+  const loadFavs = () => { try { return JSON.parse(localStorage.getItem(FAV_KEY) || "[]"); } catch { return []; } };
+  const isFav = (p) => loadFavs().some(f => f.path === p);
+  function toggleFav(entry) {
+    const a = loadFavs();
+    const i = a.findIndex(f => f.path === entry.path);
+    if (i >= 0) a.splice(i, 1); else a.unshift(entry);
+    try { localStorage.setItem(FAV_KEY, JSON.stringify(a.slice(0, 100))); } catch {}
+  }
+  function _loadCSS(href) {
+    return new Promise((res, rej) => {
+      const l = document.createElement("link");
+      l.rel = "stylesheet"; l.href = href; l.onload = res; l.onerror = rej;
+      document.head.appendChild(l);
+    });
+  }
+  function _loadScript(src) {
+    return new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = src; s.onload = res; s.onerror = rej;
+      document.head.appendChild(s);
+    });
+  }
+  let _katexP = null;
+  function loadKatex() {
+    if (_katexP) return _katexP;
+    _katexP = (async () => {
+      _loadCSS("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css");
+      await _loadScript("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js");
+      await _loadScript("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js");
+      return window.renderMathInElement;
+    })();
+    _katexP.catch(() => { _katexP = null; });
+    return _katexP;
+  }
+  const _katexOpts = { delimiters: [
+    { left: "$$", right: "$$", display: true },
+    { left: "\\[", right: "\\]", display: true },
+    { left: "$", right: "$", display: false },
+    { left: "\\(", right: "\\)", display: false },
+  ], throwOnError: false, ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"] };
+  function autoRenderMath(el) { loadKatex().then(fn => { try { fn(el, _katexOpts); } catch {} }).catch(() => {}); }
+  function _warnNoMarked() { console.warn("marked.min.js missing — markdown shown as text"); }
+  // renderMarkdown()'s last step turns bare URLs in the text into links. It lived in the
+  // app's scope; without it here the whole function threw a ReferenceError, the throw
+  // landed in a promise nobody awaited (so window.onerror saw nothing either), and the
+  // md view was simply blank while raw — which does not go through it — was fine.
+  const URL_RE = /(https?:\/\/[^\s<>"'）)\]]+)/g;
+  const _escHtml = (s) => String(s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const _mathRe = /\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\s][^$\n]*[^$\s]\$/;
+  function renderMarkdown(text) {
+    // Collapse newlines INSIDE display math $$…$$ before markdown: with
+    // breaks:true, marked turns those newlines into <br>, splitting the $$…$$
+    // across text nodes so KaTeX can't pair the delimiters (multi-line display
+    // math then showed up raw). LaTeX treats a newline as whitespace, so this is
+    // safe. Inline $…$ is single-line by construction, unaffected.
+    let src = (text || "").replace(/\$\$[\s\S]*?\$\$/g, m => m.replace(/\s*\n\s*/g, " "));
+    let html = "";
+    if (typeof marked === "undefined" || !marked || typeof marked.parse !== "function") {
+      // The renderer itself never loaded — i.e. static/vendor/marked.min.js is
+      // missing from this deploy. Say so ONCE and show the text escaped, instead
+      // of quietly serving raw markdown that looks like a broken app.
+      _warnNoMarked();
+      html = "<pre class='md-raw'>" + _escHtml(src) + "</pre>";
+    } else {
+      try { html = marked.parse(src); } catch { html = _escHtml(src); }
+    }
+    const tmp = document.createElement("div");
+    tmp.innerHTML = html;
+    // Sanitize: marked passes raw HTML through, and transcript / peer-relayed
+    // content is not fully trusted. Drop dangerous elements and strip on*/
+    // javascript:/srcdoc attributes before this ever hits the live DOM.
+    tmp.querySelectorAll("script,style,iframe,object,embed,link,meta,base,form,svg")
+       .forEach(el => el.remove());
+    tmp.querySelectorAll("*").forEach(el => {
+      for (const attr of [...el.attributes]) {
+        const n = attr.name.toLowerCase();
+        const v = (attr.value || "").replace(/\s+/g, "").toLowerCase();
+        if (n.startsWith("on") || n === "srcdoc" || n === "srcset") el.removeAttribute(attr.name);
+        else if ((n === "href" || n === "src" || n === "xlink:href") && v.startsWith("javascript:")) el.removeAttribute(attr.name);
+      }
+    });
+    // Wrap every <table> in a scrollable div so wide tables don't blow out
+    // the message bubble on narrow screens (phone). The table keeps its
+    // native cell layout; the wrapper provides horizontal scroll only when
+    // the table actually exceeds the viewport.
+    tmp.querySelectorAll("table").forEach(t => {
+      const wrap = document.createElement("div");
+      wrap.className = "table-wrap";
+      t.parentNode.insertBefore(wrap, t);
+      wrap.appendChild(t);
+    });
+    tmp.querySelectorAll("a").forEach(a => {
+      const t = (a.textContent || "").trim();
+      if (/^https?:\/\//i.test(t)) {
+        a.replaceWith(document.createTextNode(a.textContent || ""));
+      } else {
+        a.setAttribute("target", "_blank");
+        a.setAttribute("rel", "noopener noreferrer");
+      }
+    });
+    const walker = document.createTreeWalker(tmp, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue || !node.nodeValue.includes("http")) return NodeFilter.FILTER_REJECT;
+        const p = node.parentElement;
+        if (p && (p.closest("a") || p.closest("code") || p.closest("pre"))) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const targets = [];
+    let n;
+    while ((n = walker.nextNode())) targets.push(n);
+    for (const node of targets) {
+      const parts = node.nodeValue.split(URL_RE);
+      if (parts.length === 1) continue;
+      const frag = document.createDocumentFragment();
+      for (const p of parts) {
+        if (/^https?:\/\//.test(p)) {
+          const a = document.createElement("a");
+          a.href = p; a.target = "_blank"; a.rel = "noopener noreferrer";
+          a.textContent = p; frag.appendChild(a);
+        } else if (p) {
+          frag.appendChild(document.createTextNode(p));
+        }
+      }
+      node.parentNode.replaceChild(frag, node);
+    }
+    return tmp.innerHTML;
+  }
+
+  // ---------- reading a text file, here ----------
+  // A path in a transcript had two destinations: the file browser's head/tail preview
+  // (bounded, deliberately — it is a browser, not a reader) and a raw browser tab. For a
+  // document — notes, a spec, a JSON dump, a source file — neither is reading it. This
+  // renders it: markdown with its formulas, JSON pretty-printed, code coloured, raw
+  // honest, all four searchable, with the line numbers OUTSIDE the text so copying gives
+  // you the file and not a listing.
+  const FV_MAX = 2 * 1024 * 1024;          // over this it is not a document, it is a log
+  const FV_MD_EXT = new Set(["md", "markdown", "mdx"]);
+  // Extension → the language hint highlight.js wants. Unlisted extensions still open;
+  // they just get no colour, which is the honest outcome of "we do not know".
+  const FV_LANG = { js: "javascript", mjs: "javascript", cjs: "javascript", ts: "typescript",
+    tsx: "typescript", jsx: "javascript", py: "python", rb: "ruby", go: "go", rs: "rust",
+    java: "java", c: "c", h: "c", cpp: "cpp", cc: "cpp", hpp: "cpp", cs: "csharp",
+    sh: "bash", bash: "bash", zsh: "bash", fish: "bash", sql: "sql", css: "css",
+    scss: "scss", html: "xml", xml: "xml", svg: "xml", yaml: "yaml", yml: "yaml",
+    toml: "ini", ini: "ini", conf: "ini", json: "json", swift: "swift", kt: "kotlin",
+    php: "php", pl: "perl", lua: "lua", r: "r", m: "objectivec", vim: "vim",
+    dockerfile: "dockerfile", make: "makefile", mk: "makefile", diff: "diff", patch: "diff" };
+  const fvEl = (id) => document.getElementById(id);
+  const fvBody = fvEl("fv-body"), fvNameEl = fvEl("fv-name");
+  const fvViewsEl = fvEl("fv-views"), fvQ = fvEl("fv-q"), fvHits = fvEl("fv-hits");
+  let fvState = null;   // { path, text, ext, view, hits: [], at }
+  let _hljsP = null;
+  function loadHljs() {
+    if (_hljsP) return _hljsP;              // memoised, like KaTeX
+    _hljsP = (async () => {
+      _loadCSS("https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css");
+      await _loadScript("https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/common.min.js");
+      return window.hljs;
+    })();
+    _hljsP.catch(() => { _hljsP = null; });  // offline now ≠ offline forever
+    return _hljsP;
+  }
+  // Is this path a document (something the reader renders) by its NAME alone? The
+  // viewer still re-checks size and content-type when it opens; this is only here to
+  // decide which URL a link should carry, before anything has been fetched.
+  function fvIsDocPath(path) {
+    const e = fvExt(path);
+    return FV_MD_EXT.has(e) || !!FV_LANG[e]
+        || ["txt", "log", "csv", "tsv", "jsonl", "ndjson", "json", "text"].includes(e);
+  }
+  function fvExt(path) {
+    const base = (path || "").split("/").pop() || "";
+    const i = base.lastIndexOf(".");
+    return i > 0 ? base.slice(i + 1).toLowerCase() : base.toLowerCase();
+  }
+  // Which views this file gets, and which one it opens on. Offering "md" for a .py or
+  // "json" for something that is not JSON would be offering a wrong answer.
+  // Markdown written into a .txt is the common case here — prompt templates, notes,
+  // specs. The extension says nothing, the content does: headings, bullets, bold.
+  function fvLooksMarkdown(text) {
+    const head = (text || "").slice(0, 4000);
+    let score = 0;
+    if (/^#{1,6}\s+\S/m.test(head)) score += 2;      // a heading is the strong signal
+    if (/^\s*[-*+]\s+\S/m.test(head)) score += 1;
+    if (/\*\*[^*\n]+\*\*/.test(head)) score += 1;
+    if (/^\s*```/m.test(head)) score += 1;
+    if (/\[[^\]\n]+\]\([^)\n]+\)/.test(head)) score += 1;
+    return score >= 2;
+  }
+  function fvViewsFor(text, ext) {
+    const views = [];
+    if (FV_MD_EXT.has(ext)) views.push("md");
+    if (ext === "csv" || ext === "tsv") views.push("csv");
+    if (ext === "jsonl" || ext === "ndjson") views.push("jsonl");
+    let jsonOk = false;
+    if (ext === "json" || /^[\s]*[[{]/.test(text || "")) {
+      try { JSON.parse(text); jsonOk = true; } catch {}
+    }
+    if (jsonOk) views.push("json");
+    // Prose opens as prose. Syntax colouring a .txt or a .log highlights nothing and
+    // costs the one thing those files need, which is plain legible lines.
+    const prose = !FV_LANG[ext] && !views.length;
+    if (prose) views.push("raw");
+    if (!views.includes("md") && fvLooksMarkdown(text)) views.push("md");
+    views.push("code");
+    if (!views.includes("raw")) views.push("raw");
+    return views;
+  }
+  // RFC4180-ish: quoted fields, doubled quotes inside them, delimiters and newlines
+  // inside quotes, CRLF. A split(",") would have been two lines of code and wrong on
+  // the first address column it met.
+  function fvParseCsv(text, delim) {
+    const rows = []; let row = [], field = "", q = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (q) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { field += '"'; i++; }   // "" → a literal quote
+          else q = false;
+        } else field += c;
+        continue;
+      }
+      if (c === '"') { q = true; continue; }
+      if (c === delim) { row.push(field); field = ""; continue; }
+      if (c === "\r") continue;
+      if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; continue; }
+      field += c;
+    }
+    if (field !== "" || row.length) { row.push(field); rows.push(row); }
+    // A trailing newline is punctuation, not an empty record.
+    if (rows.length && rows[rows.length - 1].length === 1 && rows[rows.length - 1][0] === "") rows.pop();
+    return rows;
+  }
+  const FV_ROWS_MAX = 2000;   // past this it is a dataset, not a document: say so
+  function fvTable(text, delim) {
+    const rows = fvParseCsv(text, delim);
+    const wrap = document.createElement("div");
+    if (!rows.length) { wrap.className = "fv-note"; wrap.textContent = "(空文件)"; return wrap; }
+    const shown = rows.slice(0, FV_ROWS_MAX + 1);        // +1: the header is not a record
+    const t = document.createElement("table"); t.className = "fv-table";
+    const thead = document.createElement("thead"), tr0 = document.createElement("tr");
+    const th0 = document.createElement("th"); th0.textContent = "#"; tr0.appendChild(th0);
+    for (const h of shown[0]) { const th = document.createElement("th"); th.textContent = h; tr0.appendChild(th); }
+    thead.appendChild(tr0); t.appendChild(thead);
+    const tb = document.createElement("tbody");
+    const cols = shown[0].length;
+    for (let i = 1; i < shown.length; i++) {
+      const tr = document.createElement("tr");
+      const rn = document.createElement("td"); rn.className = "fv-rn"; rn.textContent = i;
+      tr.appendChild(rn);
+      for (let c = 0; c < cols; c++) {
+        const td = document.createElement("td");
+        td.textContent = shown[i][c] === undefined ? "" : shown[i][c];
+        tr.appendChild(td);
+      }
+      tb.appendChild(tr);
+    }
+    t.appendChild(tb); wrap.appendChild(t);
+    if (rows.length - 1 > FV_ROWS_MAX) {
+      const n = document.createElement("div"); n.className = "fv-note";
+      n.textContent = "只显示了前 " + FV_ROWS_MAX + " 行(共 " + (rows.length - 1) + " 行) — raw 视图是完整的";
+      wrap.appendChild(n);
+    }
+    return wrap;
+  }
+  function fvJsonl(text) {
+    const lines = text.split("\n").filter((l, i, a) => l !== "" || i < a.length - 1);
+    const wrap = document.createElement("div"); wrap.className = "fv-jl";
+    const shown = lines.slice(0, FV_ROWS_MAX);
+    shown.forEach((line, i) => {
+      const row = document.createElement("div"); row.className = "jl-row";
+      const n = document.createElement("span"); n.className = "jl-n"; n.textContent = (i + 1);
+      const one = document.createElement("span"); one.className = "jl-one";
+      let obj = null;
+      try { obj = JSON.parse(line); } catch { row.classList.add("bad"); }
+      one.textContent = line;
+      row.appendChild(n); row.appendChild(one);
+      // Click opens THIS line, pretty-printed, where it sits — scanning stays possible
+      // because every other line keeps its one-line shape.
+      row.addEventListener("click", () => {
+        const open = row.classList.toggle("open");
+        one.textContent = (open && obj !== null) ? JSON.stringify(obj, null, 2) : line;
+      });
+      wrap.appendChild(row);
+    });
+    if (lines.length > FV_ROWS_MAX) {
+      const n = document.createElement("div"); n.className = "fv-note";
+      n.textContent = "只显示了前 " + FV_ROWS_MAX + " 行(共 " + lines.length + " 行) — raw 视图是完整的";
+      wrap.appendChild(n);
+    }
+    return wrap;
+  }
+  function fvLineCount(text) { return (text.match(/\n/g) || []).length + 1; }
+  function fvGutter(n) {
+    let out = "";
+    for (let i = 1; i <= n; i++) out += i + (i < n ? "\n" : "");
+    return out;
+  }
+  async function fvRender() {
+    const st = fvState; if (!st) return;
+    fvBody.innerHTML = "";
+    [...fvViewsEl.children].forEach(b => b.classList.toggle("current", b.dataset.v === st.view));
+    if (st.view === "md") {
+      const d = document.createElement("div");
+      d.className = "markdown fv-md";
+      try {
+        d.innerHTML = renderMarkdown(st.text);
+      } catch (e) {
+        // Never a blank page: say what broke and show the file as it is.
+        const n = document.createElement("div"); n.className = "fv-note";
+        n.textContent = "markdown 渲染失败(" + (e && e.message || e) + ") —— 下面是原文";
+        fvBody.appendChild(n);
+        fvBody.appendChild(fvCodeBlock(st.text, null));
+        fvSearch();
+        return;
+      }
+      fvBody.appendChild(d);
+      // Formulas render without being asked here. In the transcript that is a per-message
+      // choice (⚙ latex) because the cost repeats; a document you opened on purpose is
+      // one element, once — and a .md full of raw $\frac{}{}$ is not a rendered document.
+      if (_mathRe.test(st.text)) { try { autoRenderMath(d, null); } catch {} }
+    } else if (st.view === "csv") {
+      fvBody.appendChild(fvTable(st.text, st.ext === "tsv" ? "\t" : ","));
+    } else if (st.view === "jsonl") {
+      fvBody.appendChild(fvJsonl(st.text));
+    } else if (st.view === "json") {
+      let pretty = st.text;
+      try { pretty = JSON.stringify(JSON.parse(st.text), null, 2); } catch {}
+      fvBody.appendChild(fvCodeBlock(pretty, "json"));
+    } else if (st.view === "code") {
+      fvBody.appendChild(fvCodeBlock(st.text, FV_LANG[st.ext] || ""));
+    } else {
+      fvBody.appendChild(fvCodeBlock(st.text, null));   // raw: no colour, no guessing
+    }
+    fvSearch();            // a view change keeps the search you were in the middle of
+  }
+  function fvCodeBlock(text, lang) {
+    const wrap = document.createElement("div"); wrap.className = "fv-codewrap";
+    const g = document.createElement("div"); g.className = "fv-gutter";
+    g.textContent = fvGutter(fvLineCount(text));
+    const pre = document.createElement("pre"); pre.className = "fv-code";
+    const code = document.createElement("code");
+    code.textContent = text;
+    pre.appendChild(code);
+    wrap.appendChild(g); wrap.appendChild(pre);
+    if (lang) {
+      // Colour is a nice-to-have: it is applied when (and if) the library arrives, and
+      // the file is readable the whole time either way.
+      loadHljs().then(h => {
+        if (!h || fvState?.text !== text) return;
+        try {
+          code.innerHTML = h.highlight(text, { language: lang, ignoreIllegals: true }).value;
+          fvSearch();      // re-highlighting replaced the nodes the marks were in
+        } catch {}
+      }).catch(() => {});
+    }
+    return wrap;
+  }
+  // Search over the rendered TEXT, not the markup: walking text nodes keeps it working
+  // the same in all four views (and after hljs rewrites the code into spans).
+  function fvSearch() {
+    const st = fvState; if (!st) return;
+    const q = (fvQ.value || "");
+    st.hits = []; st.at = 0;
+    fvBody.querySelectorAll("mark.fv-hit").forEach(m => {
+      const t = document.createTextNode(m.textContent);
+      m.parentNode.replaceChild(t, m);
+    });
+    fvBody.normalize();
+    if (!q) { fvHits.textContent = ""; return; }
+    const needle = q.toLowerCase();
+    const walker = document.createTreeWalker(fvBody, NodeFilter.SHOW_TEXT);
+    const targets = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (n.nodeValue && n.nodeValue.toLowerCase().includes(needle)) targets.push(n);
+    }
+    for (const node of targets) {
+      const s = node.nodeValue; const frag = document.createDocumentFragment();
+      let i = 0;
+      for (;;) {
+        const j = s.toLowerCase().indexOf(needle, i);
+        if (j < 0) { frag.appendChild(document.createTextNode(s.slice(i))); break; }
+        if (j > i) frag.appendChild(document.createTextNode(s.slice(i, j)));
+        const m = document.createElement("mark"); m.className = "fv-hit";
+        m.textContent = s.slice(j, j + q.length);
+        frag.appendChild(m); st.hits.push(m);
+        i = j + q.length;
+      }
+      node.parentNode.replaceChild(frag, node);
+    }
+    fvGo(0);
+  }
+  function fvGo(delta) {
+    const st = fvState; if (!st || !st.hits.length) {
+      fvHits.textContent = fvQ.value ? "0" : "";
+      return;
+    }
+    st.at = (st.at + delta + st.hits.length) % st.hits.length;
+    st.hits.forEach((m, i) => m.classList.toggle("cur", i === st.at));
+    fvHits.textContent = (st.at + 1) + "/" + st.hits.length;
+    try { st.hits[st.at].scrollIntoView({ block: "center" }); } catch {}
+  }
+
+  // ---- this page ---------------------------------------------------------------
+  function fail(why, path) {
+    fvBody.innerHTML = "";
+    const d = document.createElement("div"); d.className = "fv-note";
+    d.style.whiteSpace = "pre-wrap";
+    d.textContent = "打不开:" + why + (path ? "\n" + path : "");
+    fvBody.appendChild(d);
+  }
+  function syncFav(path) {
+    const b = fvEl("fv-fav"), on = isFav(path);
+    b.textContent = on ? "★" : "☆";
+    b.classList.toggle("on", on);
+  }
+  async function open_(path) {
+    document.title = path.split("/").pop() + " — cc-web";
+    fvNameEl.textContent = path.split("/").pop();
+    fvNameEl.title = path;
+    fvEl("fv-open").href = fsFileUrl(path);
+    syncFav(path);
+    const url = "/api/fs/file?path=" + encodeURIComponent(path) + "&raw=1";
+    // HEAD for the size first: refusing a 10MB log should not mean downloading it. (It
+    // is also the honest check — a GET's content-length is not guaranteed to be there,
+    // and when it was missing the size test silently passed and the page rendered three
+    // million characters.)
+    let size = 0;
+    try {
+      const h = await authedFetch(url, { method: "HEAD" });
+      if (h.status === 401) { fvBody.innerHTML = ""; document.getElementById("tokbox").style.display = ""; return; }
+      if (!h.ok) return fail(h.status === 404
+            // Four hosts, one path syntax: a 404 that does not name the machine is a
+            // 404 you have to go and check by hand. (This is how it goes wrong: a path
+            // copied from one host, opened on another.)
+            // The first label of a hostname, but the whole thing for an IP — "127 上
+            // 没有这个文件" names nothing.
+            ? (/^[\d.:]+$/.test(location.hostname) ? location.hostname
+                                                   : location.hostname.split(".")[0])
+              + " 上没有这个文件(404)"
+            : "HTTP " + h.status, path);
+      size = parseInt(h.headers.get("content-length") || "0", 10) || 0;
+    } catch {}
+    if (size > FV_MAX) return fail("文件 " + Math.round(size / 1024) + "KB,超过 2MB —— 用 ↗ 打开原始文件", path);
+    let r;
+    try { r = await authedFetch(url); } catch (e) { return fail(String(e && e.message || e), path); }
+    if (r.status === 401) { fvBody.innerHTML = ""; document.getElementById("tokbox").style.display = ""; return; }
+    if (!r.ok) return fail("HTTP " + r.status, path);
+    const text = await r.text();
+    if (text.length > FV_MAX) {            // no content-length to go on: the last word
+      return fail("文件 " + Math.round(text.length / 1024) + "KB,超过 2MB —— 用 ↗ 打开原始文件", path);
+    }
+    fvState = { path, text, ext: fvExt(path), view: "raw", hits: [], at: 0 };
+    const views = fvViewsFor(text, fvState.ext);
+    fvState.view = views[0];
+    fvViewsEl.innerHTML = "";
+    for (const v of views) {
+      const b = document.createElement("button"); b.dataset.v = v; b.textContent = v;
+      b.addEventListener("click", () => { fvState.view = v; fvRender(); });
+      fvViewsEl.appendChild(b);
+    }
+    await fvRender();
+  }
+  fvEl("fv-copy").addEventListener("click", () => { if (fvState) copyText(fvState.text); });
+  fvEl("fv-link").addEventListener("click", () => copyText(location.href));
+  fvEl("fv-wrap").addEventListener("click", () => document.body.classList.toggle("fv-wrapped"));
+  fvEl("fv-fav").addEventListener("click", () => {
+    if (!fvState) return;
+    const p = fvState.path;
+    toggleFav({ path: p, is_dir: false, kind: "text", name: p.split("/").pop() });
+    syncFav(p);
+  });
+  fvNameEl.addEventListener("click", () => { if (fvState) copyText(fvState.path); });
+  fvQ.addEventListener("input", fvSearch);
+  fvQ.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault(); fvGo(e.shiftKey ? -1 : 1);
+  });
+  fvEl("fv-next").addEventListener("click", () => fvGo(1));
+  fvEl("fv-prev").addEventListener("click", () => fvGo(-1));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "/" && document.activeElement !== fvQ) { e.preventDefault(); fvQ.focus(); }
+  });
+  document.getElementById("tokgo").addEventListener("click", () => {
+    const t = document.getElementById("tokin").value.trim();
+    if (!t) return;
+    try { localStorage.setItem(TOKEN_KEY, t); } catch {}
+    location.reload();
+  });
+
+  const path = qs.get("path") || "";
+  if (!path) fail("没有给 path 参数");
+  else if (!authToken) document.getElementById("tokbox").style.display = "";
+  else open_(path);
+})();
+</script>
+</body>
+</html>

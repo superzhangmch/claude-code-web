@@ -48,12 +48,14 @@ function mkBtn(id) {
     addEventListener(ev, fn) { this.handlers[ev] = fn; },
     click() { return this.handlers.click({ stopPropagation() { log.push("stopProp"); } }); } };
 }
-["tail-esc", "tail-up", "tail-clear"].forEach(mkBtn);
+["tail-esc", "tail-up", "tail-left", "tail-down", "tail-ctrlb", "tail-ctrlc",
+ "tail-clear"].forEach(mkBtn);
 const document = { getElementById: (id) => els[id] || null };
 const log = [];
 const timers = [];
 const setTimeout = (fn, ms) => { timers.push([fn, ms]); return timers.length; };
-const UP = "\x1b[A";
+const UP = "\x1b[A", DOWN = "\x1b[B", LEFT = "\x1b[D";
+const CTRL_B = "\x02", CTRL_C = "\x03";
 async function sendRaw(text, pressEnter) { log.push(["send", text, !!pressEnter]); }
 async function tailScreen() { log.push("refresh"); }
 
@@ -65,6 +67,16 @@ const seqOf = (l) => l.find(x => Array.isArray(x) && x[0] === "send");
   console.log("=== the bytes each button sends ===");
   for (const [id, want, label] of [["tail-esc", "\x1b", "Esc"],
                                    ["tail-up", "\x1b[A", "↑"],
+                                   // claude's own hint line says "← for agents · ↓ to
+                                   // manage" — without these the agent switch was
+                                   // reachable from a desktop keyboard only, which is
+                                   // the one place that does not need buttons.
+                                   ["tail-left", "\x1b[D", "←"],
+                                   ["tail-down", "\x1b[B", "↓"],
+                                   // claude's own hint under a long command is
+                                   // "(ctrl+b to run in background)"; ctrl+c interrupts.
+                                   ["tail-ctrlb", "\x02", "⌃B"],
+                                   ["tail-ctrlc", "\x03", "⌃C"],
                                    ["tail-clear", "\x05\x15", "clear line"]]) {
     log.length = 0; timers.length = 0;
     await els[id].click();
@@ -112,15 +124,28 @@ def main():
     check("...and clear-line is the same Ctrl-E Ctrl-U pair",
           src.count('"\\x05\\x15"') == 2, str(src.count('"\\x05\\x15"')))
 
+    print("=== every key handler has a button to hang on ===")
+    # The failure mode this guards: a handler added for an id that no markup defines.
+    # getElementById returns null, .addEventListener throws AT BOOT, and the whole app
+    # dies — a blank page with a default title. (Exactly what happened adding ← / →:
+    # one patch wrote the handlers, the other never wrote the buttons.)
+    ids = set(re.findall(r'getElementById\("((?:key|tail)-[^"]+)"\)', src))
+    have = set(re.findall(r'id="((?:key|tail)-[^"]+)"', src))
+    check("no key/tail handler points at an id that does not exist",
+          not (ids - have), str(sorted(ids - have)))
+
     print("=== the buttons are in the tail box, under the output ===")
     box = src[src.index('<div id="tail-box"'):]
     box = box[:box.index("</div>\n  </main>") if "</div>\n  </main>" in box else 900]
-    check("all three live inside #tail-box",
-          all(i in box for i in ("tail-esc", "tail-up", "tail-clear")), box[:120])
+    check("all of them live inside #tail-box",
+          all(i in box for i in ("tail-esc", "tail-up", "tail-left", "tail-down",
+                                 "tail-ctrlb", "tail-ctrlc", "tail-clear")),
+          box[:120])
     check("...after the output, not before it",
           box.index("tail-pre") < box.index("tail-keys"))
     check("...and each says what it is for",
-          box.count("title=") >= 5 and "取消" in box and "输入行" in box)
+          box.count("title=") >= 9 and "取消" in box and "输入行" in box
+          and "agent" in box and "后台" in box)
 
     node = shutil.which("node")
     if not node:

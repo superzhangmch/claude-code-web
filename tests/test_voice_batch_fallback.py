@@ -53,7 +53,10 @@ def main():
     if not node:
         print("SKIP: needs node"); return 0
 
-    methods = ", ".join(method(n) for n in ("goBatch", "paintBatchOnly", "togglePause", "streamDrop"))
+    # batchIfNotConnected comes along because togglePause calls it: ⏸ before the provider
+    # is ready switches to batch at the tap rather than sitting on a handshake.
+    methods = ", ".join(method(n) for n in ("goBatch", "paintBatchOnly", "togglePause",
+                                            "streamDrop", "batchIfNotConnected"))
 
     js = r"""
 const _fails = [];
@@ -70,6 +73,9 @@ const recBar = { classList: { toggle() {}, add() {}, remove() {} } };
 let _recStatusHtml = "";
 const calls = [];
 function _recLiveStatus(msg) { _recStatusHtml = "STATUS:" + msg; recLiveEl.innerHTML = _recStatusHtml; }
+// The phase line (no spinner) and the wave, whose one rule is "audio is going in now".
+function _recPlainStatus(msg) { _recStatusHtml = msg ? "STATUS:" + msg : ""; recLiveEl.innerHTML = _recStatusHtml; }
+function _wave(on) { recWaveEl.style.display = on ? "" : "none"; }
 function _recTimerPause() {}
 function _recTimerResume() {}
 function _syncPauseBtn() {}
@@ -82,6 +88,10 @@ const Voice = {
   fail(r) { calls.push("fail:" + r); },
   render() { calls.push("render"); },
   flushPending() {},
+  // ⏸ on a fallen-back session cuts a segment now, exactly like a batch one, so the
+  // words show up at the pause instead of only when the whole recording ends.
+  cutSegment() { calls.push("cutSegment"); },
+  mrStart() { calls.push("mrStart"); if (Voice.s && Voice.s.mr) Voice.s.mr.state = "recording"; },
   __METHODS__
 };
 
@@ -102,7 +112,10 @@ Voice.goBatch("realtime ASR unreachable");
 check("goBatch marks the session batch-only", Voice.s.dropped === true);
 check("...frees the PCM that can never be shipped", Voice.s.pending.length === 0 && Voice.s.pendBytes === 0);
 check("...closes the socket it gave up on", calls.includes("teardownStream"));
-check("...and says recording continues, in batch", /recording \(batch\)/.test(bar()), bar().slice(0, 90));
+check("...and says recording continues, with the reason",
+      /⚠ realtime ASR unreachable — recording/.test(bar()), bar().slice(0, 90));
+check("...a reason that sticks, so a returning segment cannot wipe it",
+      Voice.s.fellBack === "⚠ realtime ASR unreachable", JSON.stringify(Voice.s.fellBack));
 check("...as a status line, not a how-to", !/tap /.test(bar()) && !/Polish/.test(bar()));
 check("...without claiming it is still connecting", !/connecting/i.test(bar()));
 check("a second goBatch is a no-op (no double teardown)",
@@ -115,19 +128,36 @@ check("⏸ on a batch-only session says so", Voice.s.paused === true && /paused/
 check("...and does not resurrect 'connecting ASR'", !/connecting/i.test(bar()));
 Voice.togglePause();
 check("▶ resumes capture", Voice.s.paused === false && Voice.s.mr.state === "recording");
-check("▶ stays in batch for the REST of this recording",
-      /recording \(batch\)/.test(bar()), bar().slice(0, 90));
+// The reason is the session's now, not this one repaint's: it has to survive every
+// later repaint (each returning segment triggers one).
+check("▶ stays in batch for the REST of this recording, reason and all",
+      /⚠ realtime ASR unreachable — recording/.test(bar()), bar().slice(0, 90));
 check("▶ never claims to connect an ASR we gave up on", !/connecting/i.test(bar()));
 check("▶ does not reopen the stream", !calls.includes("openStream"));
 
-console.log("=== the healthy path is untouched ===");
+console.log("=== ⏸ before the provider is ready: switch, do not wait ===");
+// The handshake has already missed its moment by the time you press a button, and the
+// audio is on the local clip either way — so the batch engine takes it from here. Said
+// plainly, not as a warning: nothing failed.
 Voice.s = mkSession(); calls.length = 0;
-Voice.togglePause(); Voice.togglePause();
-check("▶ on a live session still says it is connecting",
-      /connecting ASR/.test(bar()) && Voice.s.dropped === false, bar().slice(0, 80));
-Voice.s = mkSession({ upReady: true });
-Voice.togglePause(); Voice.togglePause();
-check("▶ with the upstream already up says it is listening", /listening/.test(bar()), bar().slice(0, 80));
+Voice.togglePause();
+check("⏸ with nothing connected falls back", Voice.s.dropped === true);
+check("...and says which mode it is using now",
+      /use batch mode — paused/.test(bar()) && !/⚠/.test(bar()), bar().slice(0, 80));
+check("...cutting the segment, so the words show up at the pause",
+      calls.includes("cutSegment"), calls.join(","));
+Voice.togglePause();
+check("▶ carries on in batch", Voice.s.paused === false && /use batch mode — recording/.test(bar()),
+      bar().slice(0, 80));
+
+console.log("=== a connected stream is left alone ===");
+Voice.s = mkSession({ upReady: true, opened: true }); calls.length = 0;
+Voice.togglePause();
+check("⏸ keeps the stream", Voice.s.dropped === false && !calls.includes("teardownStream"));
+check("...and the line is one word", /STATUS:paused/.test(bar()), bar().slice(0, 60));
+Voice.togglePause();
+check("▶ says recording, and nothing about handshakes",
+      /STATUS:recording/.test(bar()) && !/connecting|listening/i.test(bar()), bar().slice(0, 60));
 
 console.log("=== an upstream dying while ⏸ is held must not kill the recording ===");
 Voice.s = mkSession({ retries: 3 }); calls.length = 0;
@@ -135,21 +165,37 @@ Voice.togglePause();                                   // mr.state -> "paused"
 Voice.streamDrop("closed");
 check("the session survives (no Voice.fail)", !calls.some(c => c.startsWith("fail:")), calls.join(","));
 check("...as batch-only", Voice.s.dropped === true);
-check("...showing it is paused, in batch", /paused \(batch\)/.test(bar()), bar().slice(0, 90));
+// It had already switched at the ⏸ (nothing was connected), so the later socket death
+// changes nothing and must not be dressed up as a new failure.
+check("...showing it is paused, in batch, without a second alarm",
+      /— paused/.test(bar()) && /batch/.test(bar()) && !/⚠/.test(bar()), bar().slice(0, 90));
 Voice.togglePause();
 check("...resuming after that drop records in batch", Voice.s.paused === false && /batch/.test(bar()));
 
 console.log("=== streamDrop, other shapes ===");
+// A drop with text used to go straight to batch-only (`!s.gotAny` guarded the retry),
+// which is the common case by the time a socket blips — so the rest of what you said had
+// nowhere to go. The stream is worth getting back while the recording is alive.
 Voice.s = mkSession({ gotAny: true, finalText: "half a sentence" }); calls.length = 0;
 Voice.streamDrop("error");
-check("a drop while recording with text → batch-only, text kept",
-      Voice.s.dropped === true && bar().includes("half a sentence"), bar().slice(0, 90));
+check("a drop with text already in is RETRIED, not given up on",
+      Voice.s.dropped === false && Voice.s.retries === 1 && calls.includes("teardownStream"),
+      calls.join(",") + " retries=" + Voice.s.retries);
+check("...and the words stay", Voice.s.finalText === "half a sentence");
 check("...no fail()", !calls.some(c => c.startsWith("fail:")));
+// …until the retries are spent, and then it is batch with the text kept.
+Voice.s = mkSession({ gotAny: true, finalText: "half a sentence", retries: 3 }); calls.length = 0;
+Voice.streamDrop("error");
+check("once the retries are spent it falls back, text and all",
+      Voice.s.dropped === true && bar().includes("half a sentence"), bar().slice(0, 90));
 
 Voice.s = mkSession(); calls.length = 0;              // fresh, no text → silent reconnect
 Voice.streamDrop("closed");
 check("an early drop still retries instead of falling back", Voice.s.retries === 1 && Voice.s.dropped === false);
-check("...and says it is reconnecting while recording", /reconnecting/.test(bar()), bar().slice(0, 80));
+// Not narrated: from where you sit it is still just "recording" — the audio is buffered
+// and goes up when a connection sticks. "reconnecting ASR (1/3)" read as a malfunction.
+check("...and still says only that it is recording",
+      /STATUS:recording/.test(bar()) && !/reconnect|connecting/i.test(bar()), bar().slice(0, 80));
 
 Voice.s = mkSession({ retries: 3, mr: null }); calls.length = 0;
 Voice.streamDrop("closed");
