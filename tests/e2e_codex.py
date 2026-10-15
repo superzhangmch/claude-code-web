@@ -30,12 +30,17 @@ while every API call returned 200).
 """
 
 import importlib.util, json, os, re, socket, ssl, subprocess, sys, time, urllib.request, pathlib
-ROOT = "/home/zhangmiaochang/code/claude-code-web"; sys.path.insert(0, ROOT)
+ROOT = str(pathlib.Path(__file__).resolve().parent.parent); sys.path.insert(0, ROOT)
 spec = importlib.util.spec_from_file_location("u", os.path.join(ROOT, "tests/test_ui_smoke.py"))
 u = importlib.util.module_from_spec(spec); spec.loader.exec_module(u)
-TOK = next(l.split('=',1)[1].strip() for l in (pathlib.Path.home()/'.claude/cc_web.conf').read_text().splitlines() if l.startswith('token='))
+_conf = {k: v.strip() for k, v in (l.split('=', 1) for l in
+         (pathlib.Path.home()/'.claude/cc_web.conf').read_text().splitlines() if '=' in l and not l.startswith('#'))}
+TOK = _conf['token']
 CTX = ssl.create_default_context(); CTX.check_hostname=False; CTX.verify_mode=ssl.CERT_NONE
-CX, CC = "https://100.80.14.27:8444", "https://100.80.14.27:8443"
+# Which machine to drive. From the environment, else the first host in the local conf,
+# else this one — addresses of real machines belong in that conf, never in the repo.
+HOST = os.environ.get("CC_WEB_E2E_HOST") or (_conf.get("hosts", "").split(",")[0].strip()) or "127.0.0.1"
+CX, CC = f"https://{HOST}:8444", f"https://{HOST}:8443"
 fails = []
 def ck(label, ok, extra=""):
     print(("  PASS  " if ok else "  FAIL  ") + label + (f"   [{str(extra)[:150]}]" if extra and not ok else ""))
@@ -79,7 +84,7 @@ try:
         try: urllib.request.urlopen(f"http://127.0.0.1:{wd}/status",timeout=2).read(); break
         except Exception: pass
     drv = u.Driver(wd)
-    base = "https://thinkpad-x13-linux.tail3870a7.ts.net:8444"
+    base = CX          # the codex side of the same host (see HOST above)
     drv.go(base); drv.js(f"localStorage.setItem('cc_web_token','{TOK}');"); drv.go(base)
     time.sleep(10)
     # 点行进入, 不用 #s= 直接跳: 那样页面不会走完打开流程 (脚本的问题, 非产品的)
@@ -178,7 +183,7 @@ real = next((t["sid"] for t in live if t.get("cwd") == cwd), sid)
 print(f"      (ask-peer 用的 id: {real[:20]}  原始: {sid})")
 sid = real
 p = subprocess.run(["/usr/bin/python3", os.path.expanduser("~/.claude/skills/ask-peer-claude-code/ask_peer.py"),
-                    "--to", sid, "--host", "100.80.14.27", "--timeout", "120"],
+                    "--to", sid, "--host", HOST, "--timeout", "120"],
                    input="What is 5*5? Just the number.", capture_output=True, text=True, timeout=200)
 try: peer = json.loads(p.stdout)
 except Exception: peer = {"raw": p.stdout[-200:], "err": p.stderr[-200:]}

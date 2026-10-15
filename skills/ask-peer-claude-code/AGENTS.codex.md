@@ -45,7 +45,7 @@ claude 的 session id 由不同的工具寻址，认错了就会把回复投到�
 
 ```bash
 codexsid
-# -> codex_session=01a05d35-… at thinkpad-x13-linux.tail3870a7.ts.net:8444, with tab_name=tmp4
+# -> codex_session=01a05d35-… at <本机 host>:8444, with tab_name=tmp4
 
 echo "你现在在忙什么?" | python3 ~/.claude/skills/ask-peer-claude-code/ask_peer.py \
     --to <对方的 session/thread id> --from <你自己的 id> --from-agent codex
