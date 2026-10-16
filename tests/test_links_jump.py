@@ -31,6 +31,10 @@ def main():
     src = open(INDEX, encoding="utf-8").read()
     deps = []
     for pat, what in ((r"\n  (const fsFileUrl = .*?;)\n", "fsFileUrl"),
+                      # which extensions the reading page is FOR — the decision a link
+                      # row makes before you click it
+                      (r"\n  (const FV_DOC_EXT = new Set\(.*?function fvIsDocPath\(path\) \{[^\n]*\n)",
+                       "fvIsDocPath"),
                       # the per-cwd+path cache fsResolve() memoises into — extracted,
                       # not restated, so the "asked once per row" assertion is about
                       # the real cache and not a copy of it
@@ -74,6 +78,22 @@ authToken = "a b&c=d";
 check("a token needing escapes is escaped, not concatenated raw",
       fsFileUrl("/x").endsWith("&token=a%20b%26c%3Dd"), fsFileUrl("/x"));
 authToken = "tok-123";
+
+console.log("=== which files the reading page is for ===");
+// "html 应该直接吐出啊" / "只有 txt/json/jsonl/md/csv 等几种才有特殊的 renderer. 其他的
+// 直接出" — a saved report opened in the reader showed its own markup. So the list is
+// the renderers this page HAS, and everything else is the browser's job: a page, an
+// image, a PDF, a source file.
+// What stays OUT is only what the browser renders rather than lists: a page, an image,
+// a PDF. Source is in — "py、sh、yaml 可以放进去, 毕竟有code" — it gets colour and line
+// numbers here, which is reading it rather than looking at it.
+for (const p of ["/x/report.html", "/x/a.htm", "/x/icon.svg", "/x/Report.HTML",
+                 "/x/d.png", "/x/e.pdf", "/x/Makefile"])
+  check("not sent to the reader: " + p, fvIsDocPath(p) === false, String(fvIsDocPath(p)));
+for (const p of ["~/notes.md", "/x/log.txt", "/x/run.log", "/x/d.json", "/x/t.csv",
+                 "/x/l.jsonl", "/x/NOTES.MD", "/x/a.py", "/x/b.sh", "/x/c.yaml",
+                 "/x/d.ts", "/x/e.go", "/x/f.conf", "/x/g.sql"])
+  check("...and these are: " + p, fvIsDocPath(p) === true, String(fvIsDocPath(p)));
 
 console.log("=== resolving what the transcript wrote ===");
 (async () => {

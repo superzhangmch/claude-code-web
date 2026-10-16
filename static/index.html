@@ -1102,6 +1102,16 @@ body.light .msg.system.stack-tool { background: var(--panel2); }
 .copy-btn.math-btn { font-size: 13px; font-weight: 500; line-height: 1; }   /* ∑ render-math — match the 12px icon buttons (inherits muted color + hover) */
 .msg .markdown ul, .msg .markdown ol { margin: .3em 0 .7em 1.4em; padding: 0; }
 .msg .markdown a { color: var(--accent); }
+/* The ↗ after a path, and the #1234 that became a link. Both are additions to someone
+   else's sentence, so they are quiet: the arrow is superscript and dimmed until you go
+   for it, and the reference keeps the accent colour every other link has. The arrow's
+   padding is there to be tappable — 10px of glyph is not a touch target. */
+.msg .markdown a.path-sup {
+  font-size: .72em; vertical-align: super; text-decoration: none;
+  opacity: .62; padding: 0 3px; margin-left: 1px;
+}
+.msg .markdown a.path-sup:hover { opacity: 1; }
+body.pure .msg .markdown a.path-sup { opacity: 1; }   /* e-ink: no faint anything */
 .msg .markdown .table-wrap {
   max-width: 100%; overflow-x: auto;
   margin: .5em 0;
@@ -3559,7 +3569,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         document.title = pageTitle();
         if (d && d.terminal) { TERM = d.terminal; }
         applyTermName();
-        if (d && d.agent) rebuild(true);   // relabel anything already on screen
+        // Where `#1234` points on this host, if anywhere. It arrives after the first
+        // messages may already be on screen, so a template that turns up late forces
+        // the same relabel the agent name does — otherwise the references you were
+        // looking at stay plain until something else happens to re-render.
+        const tpl = String((d && d.issue_link) || "").trim();
+        const tplNew = tpl !== ISSUE_TPL;
+        ISSUE_TPL = tpl;
+        if ((d && d.agent) || tplNew) rebuild(true);   // relabel anything already on screen
       }
     } catch {}
   }
@@ -4096,7 +4113,58 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       }
       node.parentNode.replaceChild(frag, node);
     }
+    linkifyRefs(tmp);
+    markPathLinks(tmp);
     return tmp.innerHTML;
+  }
+
+  // ---------- #1234 → wherever this host's numbers live ----------
+  // A bare `#1234` is a reference to something, and which something is local knowledge:
+  // one machine's work is a repo's pull requests, another's is nothing at all. So the
+  // template comes from the conf (`issue_link=https://…/{#N}`) and arrives with
+  // /api/server-info; unset — the default — leaves every `#1234` as plain text.
+  let ISSUE_TPL = "";
+  // Nothing word-like may follow: `#1a2b3c` is a colour, and a lookahead that only
+  // refused more digits read its leading `#1` as pull request number 1.
+  const REF_RE = /#(\d{1,7})(?![\w#])/g;
+  const refUrl = (n) => ISSUE_TPL.split("{#N}").join(n);
+  function linkifyRefs(root) {
+    if (!ISSUE_TPL) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue || node.nodeValue.indexOf("#") < 0) return NodeFilter.FILTER_REJECT;
+        const p = node.parentElement;
+        // Already a link, or code: `#1` in a snippet is a comment, an argument or a
+        // colour — never a pull request. (This is also why the URL pass runs first:
+        // the `#12` at the end of a URL is inside an <a> by the time we get here.)
+        if (p && (p.closest("a") || p.closest("code") || p.closest("pre"))) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const targets = [];
+    let n;
+    while ((n = walker.nextNode())) targets.push(n);
+    for (const node of targets) {
+      const s = node.nodeValue;
+      const frag = document.createDocumentFragment();
+      let i = 0, m, any = false;
+      REF_RE.lastIndex = 0;
+      while ((m = REF_RE.exec(s))) {
+        // The `#` must START the token. `v1.2#3`, `abc#45`, `#aa#12` are parts of
+        // something else, and a hex colour (`#1a2b3c`) is not six digits by accident.
+        if (m.index > 0 && /[\w#/.\-]/.test(s[m.index - 1])) continue;
+        if (m.index > i) frag.appendChild(document.createTextNode(s.slice(i, m.index)));
+        const a = document.createElement("a");
+        a.href = refUrl(m[1]);
+        a.target = "_blank"; a.rel = "noopener noreferrer";
+        a.className = "ref-link"; a.textContent = m[0]; a.title = a.href;
+        frag.appendChild(a);
+        i = m.index + m[0].length; any = true;
+      }
+      if (!any) continue;
+      if (i < s.length) frag.appendChild(document.createTextNode(s.slice(i)));
+      node.parentNode.replaceChild(frag, node);
+    }
   }
 
   // ---------- DOM refs ----------
@@ -5977,6 +6045,9 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   const grammarMap = new Map();        // normalized sent text → auto learning correction (see fireGrammar)
   const manualGrammarMap = new Map();  // 🔧-button on-demand correction (aggressive idiomatic, separate cache)
   let claudeIdle = false;
+  // The previous answer to "is it idle", per session — the edge busy→idle is what starts
+  // a watch window (see pokeLive). null = this session has not answered yet.
+  let _prevIdle = null, _prevIdleSid = "";
   // ---------- quick-switch tabs (client-side, MRU, memory-capped) ----------
   const MAX_TABS = 5;                    // at most N kept sessions (bounds memory)
   const OPEN_TABS_KEY = "cc_web_open_tabs";
@@ -6217,6 +6288,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     lastPromptKey = "";
     keepAlive();
     schedulePoll(300);
+    pokeLive();        // answering a prompt moves the screen before the jsonl hears about it
   }
 
   function updatePromptRow(pending) {
@@ -7731,6 +7803,8 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       });
     } catch {}
     pokeScreenPoll();   // key sent → kick the adaptive poll to the fast ramp so the change shows quickly
+    pokeLive();         // …and watch the live block too: Esc / ⌃C / a menu pick all move the
+                        // screen without the jsonl saying anything for a while
   }
   const UP = "\x1b[A", DOWN = "\x1b[B", RIGHT = "\x1b[C", LEFT = "\x1b[D";
   // Ctrl+B backgrounds the command claude is running ("(ctrl+b to run in background)" is
@@ -10235,16 +10309,111 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
     // an opening bracket/quote — otherwise the "/or" in "and/or" is a path. `~/x` and
     // `./x` are allowed to be a single segment, because the prefix already says
     // someone meant a path; a bare `/x` still needs two, for the same reason.
-    const SEG = "[\\p{L}\\p{N}_.\\-+@%#]+";
-    const PATHM = new RegExp(
-      "(^|[\\s\"'`(\\[{<>,;:，。、（）【】「」])" +
-      "((?:~\\/|\\.{1,2}\\/)" + SEG + "(?:\\/" + SEG + ")*\\/?" +
-      "|\\/" + SEG + "(?:\\/" + SEG + ")+\\/?)", "gu");
+    const PATHM = new RegExp(PATH_PATTERN, "gu");
     while ((m = PATHM.exec(stripped))) {
       const p = m[2].replace(/[.,;:)\]}>。，、]+$/, "");
       if (p && !seen.has(p)) { seen.add(p); paths.push(p); }
     }
     return { urls, paths };
+  }
+
+  // The path matcher itself, shared: the 🔗 popup lists what this finds, and the ↗ beside
+  // a path in a message marks the same matches in place. Two readings of "what counts as
+  // a path" would drift, and the one that drifted would be the one you clicked.
+  const PATH_SEG = "[\\p{L}\\p{N}_.\\-+@%#]+";
+  const PATH_PATTERN =
+    "(^|[\\s\"'`(\\[{<>,;:，。、（）【】「」])" +
+    "((?:~\\/|\\.{1,2}\\/)" + PATH_SEG + "(?:\\/" + PATH_SEG + ")*\\/?" +
+    "|\\/" + PATH_SEG + "(?:\\/" + PATH_SEG + ")+\\/?)";
+  // Something with an extension, i.e. a FILE. A directory has nothing to hand to the
+  // browser, and /api/fs/file would answer 403 — a badge that only ever fails is worse
+  // than no badge.
+  const PATH_FILE_RE = /\.[\p{L}\p{N}]{1,8}$/u;
+
+  // ---------- ↗ beside a path or an unlinked URL ----------
+  // The paths in an answer are the thing you want next, and until now getting to one
+  // meant opening the 🔗 popup and finding it in the list. This is the same destination,
+  // one tap, in place: a superscript ↗ right after the path, opening
+  // /api/fs/file?path=…&token=… in a new tab — the file itself for a page or an image,
+  // the reading page for a document (that redirect is the server's business, not this
+  // link's). The path text is left exactly as written: a wrong substitution inside a
+  // path someone is about to copy would be much worse than no link at all.
+  //
+  // A URL gets one too, but only where it is NOT already a link — which in practice
+  // means inside a `code` span, the one place the linkifier above deliberately does not
+  // touch and the one place long URLs are usually written. In prose the text is the
+  // link and a second arrow would be noise.
+  function mkPathBadge(href, title) {
+    const a = document.createElement("a");
+    a.className = "path-sup";
+    a.href = href;
+    a.target = "_blank"; a.rel = "noopener noreferrer";
+    a.textContent = "↗";
+    a.title = title;
+    return a;
+  }
+  function markPathLinks(root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue || node.nodeValue.indexOf("/") < 0) return NodeFilter.FILTER_REJECT;
+        const p = node.parentElement;
+        // Inline `code` is where paths USUALLY are, so that one is included. Not inside
+        // a link (it already goes somewhere), and not inside a fenced block — a diff or
+        // a script can mention twenty paths, and twenty arrows is not a feature.
+        if (!p || p.closest("a") || p.closest("pre")) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const targets = [];
+    let n;
+    while ((n = walker.nextNode())) targets.push(n);
+    const trailing = [];           // badges that belong after a <code>, not inside it
+    for (const node of targets) {
+      const s = node.nodeValue;
+      const code = node.parentElement;
+      const endOfCode = code && code.tagName === "CODE" && node === code.lastChild;
+      // Both kinds of destination, in the order they appear in the sentence. A URL
+      // reached here only because nothing linkified it — the URL pass above skips
+      // `code`, and in prose these text nodes are inside an <a> and never offered to
+      // this walker. So: in prose the link IS the text, and in a code span, where it
+      // cannot be, the arrow stands in for it.
+      const hits = [];
+      let m;
+      const ure = new RegExp(URL_RE.source, "g");
+      while ((m = ure.exec(s))) {
+        const u = m[1].replace(/[.,;:，。、]+$/, "");
+        hits.push({ start: m.index, end: m.index + u.length, badge: () => mkPathBadge(u, "打开链接:" + u) });
+      }
+      if (authToken) {             // a file link carries the token; without one it is a 401
+        const pre = new RegExp(PATH_PATTERN, "gu");
+        while ((m = pre.exec(s))) {
+          const start = m.index + m[1].length;
+          const p = m[2].replace(/[.,;:)\]}>。，、]+$/, "");
+          if (!PATH_FILE_RE.test(p)) continue;
+          // `/a/b` inside `https://host/a/b` is not a local file — the URL already
+          // claimed those characters.
+          if (hits.some(h => start >= h.start && start < h.end)) continue;
+          hits.push({ start, end: start + m[2].length,
+                      badge: () => mkPathBadge(fsFileUrl(p), "直接打开:" + p) });
+        }
+      }
+      if (!hits.length) continue;
+      hits.sort((a, b) => a.start - b.start);
+      const frag = document.createDocumentFragment();
+      let i = 0;
+      for (const h of hits) {
+        if (h.end < i) continue;
+        frag.appendChild(document.createTextNode(s.slice(i, h.end)));
+        // At the end of an inline `code` the arrow goes OUTSIDE it: inside, it sits in
+        // the grey box and reads as part of the path you are about to copy.
+        if (endOfCode && h.end >= s.length) trailing.push([code, h.badge()]);
+        else frag.appendChild(h.badge());
+        i = h.end;
+      }
+      if (i < s.length) frag.appendChild(document.createTextNode(s.slice(i)));
+      node.parentNode.replaceChild(frag, node);
+    }
+    for (const [code, badge] of trailing) code.after(badge);
   }
 
   // 🔗 button — extract links from a block and show them in a popup.
@@ -11517,12 +11686,17 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   // once, with a #file= route and rules about what to boot and what closing should
   // reveal; reading a file has nothing to do with a session, and every one of those
   // rules was a way for it to go wrong. So this is the whole client side of it now.
-  const FV_MD_EXT = new Set(["md", "markdown", "mdx"]);
-  const FV_CODE_EXT = new Set(["js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "rb", "go",
-    "rs", "java", "c", "h", "cpp", "cc", "hpp", "cs", "sh", "bash", "zsh", "fish", "sql",
-    "css", "scss", "html", "htm", "xml", "svg", "yaml", "yml", "toml", "ini", "conf",
-    "json", "jsonl", "ndjson", "swift", "kt", "php", "pl", "lua", "r", "vim", "diff",
-    "patch", "txt", "log", "csv", "tsv", "text"]);
+  // The reading page is for the formats it has a RENDERER for: markdown, json, jsonl,
+  // csv/tsv, prose — and source, which gets colour and line numbers and is worth reading
+  // here. What is NOT in it: the things a browser RENDERS rather than lists. A .html
+  // report is a page; opening one here showed its own markup, which is the bug this list
+  // replaced. Images and PDFs go to the browser for the same reason.
+  const FV_DOC_EXT = new Set([
+    "md", "markdown", "mdx", "txt", "text", "log", "json", "jsonl", "ndjson", "csv", "tsv",
+    "js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "rb", "go", "rs", "java", "c", "h",
+    "cpp", "cc", "hpp", "cs", "sh", "bash", "zsh", "fish", "sql", "css", "scss", "xml",
+    "yaml", "yml", "toml", "ini", "conf", "swift", "kt", "php", "pl", "lua", "r", "vim",
+    "diff", "patch"]);
   function fvExt(path) {
     const base = (path || "").split("/").pop() || "";
     const i = base.lastIndexOf(".");
@@ -11530,10 +11704,7 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   }
   // By name only. Deciding which URL a link carries has to happen before the click,
   // and the page itself re-checks the size and the type when it opens.
-  function fvIsDocPath(path) {
-    const e = fvExt(path);
-    return FV_MD_EXT.has(e) || FV_CODE_EXT.has(e);
-  }
+  function fvIsDocPath(path) { return FV_DOC_EXT.has(fvExt(path)); }
   const fvPageUrl = (path) => "/view?path=" + encodeURIComponent(path);
   function openFileViewer(path) {
     window.open(fvPageUrl(path), "_blank", "noopener");
@@ -11929,6 +12100,14 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       const m = await resp.json();
       if (sid !== attachedSid) return;   // switched away during json() → don't ingest into the new session
       claudeIdle = m.claude_idle === true;
+      // Just went busy → idle: keep watching for the same 30s. The end of a turn is not
+      // the end of what appears on screen — a hook runs, a background shell prints, an
+      // auto-compact starts, claude re-draws — and none of that is in the jsonl either.
+      // Per session and edge-triggered: `null` until this session has answered once, so
+      // merely OPENING an idle session is not mistaken for a turn that just ended.
+      if (_prevIdleSid !== sid) { _prevIdleSid = sid; _prevIdle = null; }
+      if (_prevIdle === false && claudeIdle) pokeLive();
+      _prevIdle = claudeIdle;
       setStatus("ok"); setReady(m.claude_idle); updateAutoload();
       memoSync(m.memo_ver);   // mtime moved (or another session) → refetch the memo text
       checkSync(m.check_ver);  // ...same for the self-check report
@@ -12013,7 +12192,27 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
       hbSimple = [],     // plain string lines (2-line concise mode; no buffer)
       hbBusy = false, hbTicker = null, hbEl = null, hbFrozen = false, _lineSeq = 0,
       hbLastChange = 0,  // when the live tail last actually changed (ms)
-      hbAwayAt = 0;      // when the page last stopped watching this session (hidden/paused/detached)
+      hbAwayAt = 0,      // when the page last stopped watching this session (hidden/paused/detached)
+      hbGraceUntil = 0;  // keep the live view fetching even though the jsonl says idle (see pokeLive)
+  // `!cmd` — a shell command typed as the request — runs entirely inside claude's TUI,
+  // and its two jsonl records (<bash-input> and <bash-stdout>) are written TOGETHER when
+  // it finishes (measured 36-47ms apart). So for the whole run there is nothing in the
+  // file, the last entry is still the previous turn's end_turn, and the server rightly
+  // says idle — while the terminal scrolls. Reported as "terminal 有内容在滚动，但是 cc
+  // web 的 realtime 显示区域没有显示出".
+  //
+  // The signal used here is the only one that cannot drift: WE sent something, so watch
+  // for a while. Extended by a significant change, i.e. by BYTES moving on screen —
+  // never by reading what the TUI printed ("esc to interrupt" and friends are chrome,
+  // and chrome changes between releases).
+  const HB_GRACE_MS = 30000;
+  function pokeLive() {
+    if (!attachedSid) return;
+    hbGraceUntil = Date.now() + HB_GRACE_MS;
+    hbDelay = HB_BASE; hbNextAt = 0;        // …and look NOW, not at the end of a backoff
+    syncHeartbeat();                        // (re)start the ticker if idle had stopped it
+  }
+  const hbInGrace = () => Date.now() < hbGraceUntil;
   // The commit box ("gone in 10s · keep 5m · remove") is an offer: the turn just
   // ended, the live tail is about to go, say so if you are mid-read. That only makes
   // sense if you were HERE when it ended. Come back to a session whose turn finished
@@ -12207,6 +12406,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
   function hbTick() {
     if (!attachedSid || document.hidden || isPaused) { stopHeartbeat(); return; }
     if (attachedSid !== hbSid) { _hbReset(); hbNextAt = Date.now(); }
+    // Idle, but we sent something less than HB_GRACE_MS ago (or something is still
+    // moving on screen) → keep watching. A `!cmd` lives entirely in this window.
+    if (claudeIdle && hbInGrace()) {
+      hbFrozen = false; ensureHb().classList.remove("idle");
+      if (Date.now() >= hbNextAt && !hbBusy) hbFetch();
+      sweepBuf();
+      hbPaint();
+      return;
+    }
     if (claudeIdle) {                          // idle: turn done → whatever's still shown is final. Convert the
       hbFrozen = true;                         // whole tail to committed so it fades on a countdown instead of
       // …or the turn ended while nobody was looking, in which case there is no read to
@@ -12265,9 +12473,15 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         else if (typeof d.full === "string") {
           hbDelay = HB_BASE; hbFrame = d.full ? d.full.split("\n") : []; hbVer = d.ver || "";
           hbLastChange = Date.now();
+          if (hbInGrace() && d.full) hbGraceUntil = Date.now() + HB_GRACE_MS;   // still producing → stay
           stitchFrame(hbFrame); _st.textContent = `${d.full.length}B/${hbFrame.length}L`;
         } else if (d.changed && d.base === hbVer) {
           hbDelay = HB_BASE; hbLastChange = Date.now();
+          // Only a SIGNIFICANT change renews the window — the same test the screen poll
+          // uses (POLL_SIGNIF_LINES). A spinner or an elapsed timer touches 1-2 lines a
+          // second and would otherwise keep every session polling for ever.
+          if (hbInGrace() && (d.changed.length >= POLL_SIGNIF_LINES || d.scroll))
+            hbGraceUntil = Date.now() + HB_GRACE_MS;
           const k = d.scroll || 0, prev = hbFrame, lines = [];
           for (let i = 0; i < d.n; i++) { const j = i + k; lines[i] = (j >= 0 && j < prev.length) ? prev[j] : ""; }
           for (const [i, v] of d.changed) if (i >= 0 && i < d.n) lines[i] = (typeof v === "string") ? v : v.c.repeat(v.n);
@@ -12341,6 +12555,10 @@ body.pure #newdlg-cwds button.selected { background: #000; color: #fff; border-c
         inputEl.value = ""; fitInput();   // …and un-stack the row the long text grew into
         pendingUploads = []; renderUploadRow();
         keepAlive(); schedulePoll(400);
+        // Watch the screen for a while whatever the jsonl says. A `!cmd` request writes
+        // nothing to the file until it has finished, and a slash command may write
+        // nothing at all — in both cases "idle" is true and true is not the point.
+        pokeLive();
       } else if (resp.status === 410) {
         alert("tab/pid is gone");
       } else {

@@ -91,6 +91,16 @@ def main():
         check(f"{name} still gets the file", type(got).__name__ == "FileResponse",
               type(got).__name__)
     check("an image still gets the file", type(call(img)).__name__ == "FileResponse")
+    # A PAGE is not a document to read the source of — it was served as its own markup
+    # once, through here. Source files are: they get colour and line numbers there.
+    for name, want in (("report.html", "FileResponse"), ("icon.svg", "FileResponse"),
+                       ("prog.py", "RedirectResponse"), ("run.sh", "RedirectResponse"),
+                       ("conf.yaml", "RedirectResponse")):
+        f = os.path.join(home, name)
+        open(f, "w").write("<h1>x</h1>" if name.endswith((".html", ".svg")) else "x = 1\n")
+        verb = "is served as-is" if want == "FileResponse" else "goes to the reader"
+        check(f"a .{name.split('.')[-1]} navigation {verb}",
+              type(call(f)).__name__ == want, type(call(f)).__name__)
     check("a 3MB text file still gets the file (not a document)",
           type(call(big)).__name__ == "FileResponse")
 

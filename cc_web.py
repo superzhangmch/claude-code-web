@@ -174,6 +174,13 @@ def _load_conf() -> dict:
         # test_conf_keys.py now checks the whole documented surface, because the next key
         # added would have joined these two just as quietly.
         "snapshot_every_min": "",
+        # `#1234` in a message, turned into a link. The template says where it points —
+        # `{#N}` is where the number goes:
+        #     issue_link=https://github.com/acme/widgets/pull/{#N}
+        # Not set (the default) → `#1234` stays plain text, which is the right answer
+        # when the number means nothing in particular. Which tracker, which repo, and
+        # whether this host has one at all is local knowledge, so it lives in the conf.
+        "issue_link": "",
     }
     try:
         for line in CONF_PATH.read_text(encoding="utf-8").splitlines():
@@ -2720,6 +2727,20 @@ def _trim_brief(e: dict) -> Optional[dict]:
         # brief keeps text; also keeps tool_use as NAME ONLY (drop args) so the
         # UI can show a compact "Tool calls: a · b · c" stack. tool_result is
         # still dropped in brief.
+        #
+        # …and thinking is kept ONLY when this turn has no text of its own. Reported as
+        # "为啥忽然丢消息了": claude said something on screen ("放心，PR2 合并后我没再动它…"),
+        # the web showed that round as nothing but a Bash bar. The reason is in the
+        # store — the whole turn was `thinking` + `tool_use`, with no text block at all:
+        #
+        #   assistant  thinking  '放心，PR2 合并后我没再动它…'   ← the ● you saw in the terminal
+        #   assistant  tool_use  Bash
+        #
+        # When the model works that way, dropping thinking drops the ANSWER. A turn that
+        # also has a text block is the old shape, and there the thinking really is
+        # thinking out loud, so brief stays quiet about it.
+        has_text = any(isinstance(p, dict) and p.get("type") == "text"
+                       and (p.get("text") or "").strip() for p in content)
         parts = []
         for p in content:
             if not isinstance(p, dict):
@@ -2727,6 +2748,8 @@ def _trim_brief(e: dict) -> Optional[dict]:
             t = p.get("type")
             if t == "text" and (p.get("text") or "").strip():
                 parts.append({"type": "text", "text": _strip_pasted(p["text"])})
+            elif t == "thinking" and not has_text and (p.get("thinking") or "").strip():
+                parts.append({"type": "thinking", "thinking": p["thinking"]})
             elif t == "tool_use":
                 tu = {"type": "tool_use", "id": p.get("id"),
                       "name": p.get("name"), "input": {}}
@@ -3343,6 +3366,15 @@ def _is_claude_idle(all_entries: list[dict]) -> bool:
             return sr == "end_turn"
         if e.get("type") == "user":
             if e.get("isMeta") or e.get("isSidechain") or e.get("toolUseResult"):
+                continue
+            # `!cmd` (a shell command typed as the request) and slash commands are
+            # recorded as type=user too — <bash-input>/<bash-stdout>, <command-name>,
+            # <local-command-stdout>. Nobody is waiting on an answer to those: they ARE
+            # the answer, written when the command finished. Counting them as an
+            # unanswered prompt left a session reading "busy" from the moment a `!cmd`
+            # returned until claude's next real turn. Same discriminator the transcript
+            # uses to label them System rather than You.
+            if _is_system_user_entry(e):
                 continue
             return False
     return True
@@ -7951,9 +7983,18 @@ def _entry_text(e: dict) -> str:
     if isinstance(c, list):
         if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
             return ""
-        return _strip_pasted("\n".join(
+        txt = _strip_pasted("\n".join(
             b.get("text", "") for b in c
             if isinstance(b, dict) and b.get("type") == "text")).strip()
+        if txt:
+            return txt
+        # No text block at all → the model put what it said in `thinking` (see
+        # _trim_brief). Everything downstream of this function asks the same question —
+        # "what did it last say" — for a list row, for an /api/live anchor, for the
+        # reply a peer reads — and "" is the wrong answer when there WAS an answer.
+        return _strip_pasted("\n".join(
+            b.get("thinking", "") for b in c
+            if isinstance(b, dict) and b.get("type") == "thinking")).strip()
     return ""
 
 
@@ -8467,6 +8508,19 @@ _FS_TEXT_EXT = {".md", ".markdown", ".txt", ".log", ".json", ".yaml", ".yml",
                 # set around here. The viewer reads these as rows rather than as a
                 # 2MB single line, so they are worth offering.
                 ".jsonl", ".ndjson", ".tsv"}
+#: The extensions /view has a renderer for — the only ones a browser gets redirected
+#: there. Not every text file: a .py or a .sh is a few plain lines, and a .html is a
+#: PAGE, so sending those through a reader shows markup where the thing itself belongs.
+#: Kept in step with FV_DOC_EXT in static/view.html (and in static/index.html, which
+#: decides the same thing one click earlier).
+_FS_VIEW_EXT = {".md", ".markdown", ".mdx", ".txt", ".text", ".log",
+                ".json", ".jsonl", ".ndjson", ".csv", ".tsv",
+                # source too: colour and line numbers are worth the detour
+                ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".py", ".rb", ".go", ".rs",
+                ".java", ".c", ".h", ".cpp", ".cc", ".hpp", ".cs", ".sh", ".bash", ".zsh",
+                ".fish", ".sql", ".css", ".scss", ".xml", ".yaml", ".yml", ".toml", ".ini",
+                ".conf", ".swift", ".kt", ".php", ".pl", ".lua", ".r", ".vim", ".diff",
+                ".patch"}
 _FS_IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"}
 _FS_HTML_EXT = {".html", ".htm"}
 _FS_PDF_EXT = {".pdf"}
@@ -8637,7 +8691,7 @@ def fs_file(request: Request, path: str, token: str = "", raw: str = "",
     #   * HEAD                                     → the "does this exist" probe
     #   * &raw=1                                   → "no, really, give me the file"
     if (request.method == "GET" and (sec_fetch_dest or "") == "document" and not raw
-            and _fs_kind(p.name) == "text"):
+            and p.suffix.lower() in _FS_VIEW_EXT):
         try:
             small = p.stat().st_size <= 2 * 1024 * 1024
         except OSError:
@@ -9743,8 +9797,13 @@ async def get_server_info():
     per request like `icon=`, and for the same reason: renaming a box should not need a
     restart. Config-only, no hostname sniffing — a hostname is either useless
     ('zhangmiaochang-ThinkPad-X13-Gen-1') or already the thing you'd type by hand."""
+    conf = _load_conf()
     return {"terminal": TERM_NAME, "platform": _platform.system(), "agent": AGENT,
-            "name": (_load_conf().get("name") or "").strip()}
+            "name": (conf.get("name") or "").strip(),
+            # The template for `#1234` → a link, or "" for "leave those alone". Read per
+            # request like the two above, so pointing a host at a different repo is a
+            # conf edit and a reload.
+            "issue_link": (conf.get("issue_link") or "").strip()}
 
 
 @app.post("/api/resume", dependencies=[Depends(require_token)])

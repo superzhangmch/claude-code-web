@@ -90,10 +90,16 @@ def main():
     if not node:
         print("SKIP: needs node"); return 0
     src = open(INDEX, encoding="utf-8").read()
-    m = re.search(r"\n  (function extractLinks\(text\) \{.*?\n  \})\n", src, re.S)
-    if not m:
-        print("  FAIL  could not extract extractLinks from static/index.html"); return 1
-    js = JS.replace("__EXTRACT__", m.group(1))
+    # extractLinks shares its path pattern with the ↗ badge in a message, so the
+    # constants come along — one reading of "what is a path", not two.
+    parts = []
+    for pat, what in ((r'\n  (const PATH_SEG = .*?\+ "\)\+\\\\/\?\)";)\n', "PATH_PATTERN"),
+                      (r"\n  (function extractLinks\(text\) \{.*?\n  \})\n", "extractLinks")):
+        m = re.search(pat, src, re.S)
+        if not m:
+            print(f"  FAIL  could not extract {what} from static/index.html"); return 1
+        parts.append(m.group(1))
+    js = JS.replace("__EXTRACT__", "\n".join(parts))
     with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False, encoding="utf-8") as fh:
         fh.write(js); path = fh.name
     try:

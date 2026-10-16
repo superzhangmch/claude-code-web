@@ -390,6 +390,17 @@ body {
   // you the file and not a listing.
   const FV_MAX = 2 * 1024 * 1024;          // over this it is not a document, it is a log
   const FV_MD_EXT = new Set(["md", "markdown", "mdx"]);
+  // What this page is FOR — the formats below have a renderer here. Anything else is
+  // handed back to the browser, which shows it better than a wrapper would: a .html
+  // report is a page, not markup to read. Checked here as well as in the app, because
+  // a /view?path=…v6.html link already exists — sent, bookmarked, typed — and it has to
+  // land on the report.
+  const FV_DOC_EXT = new Set([
+    "md", "markdown", "mdx", "txt", "text", "log", "json", "jsonl", "ndjson", "csv", "tsv",
+    "js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "rb", "go", "rs", "java", "c", "h",
+    "cpp", "cc", "hpp", "cs", "sh", "bash", "zsh", "fish", "sql", "css", "scss", "xml",
+    "yaml", "yml", "toml", "ini", "conf", "swift", "kt", "php", "pl", "lua", "r", "vim",
+    "diff", "patch"]);
   // Extension → the language hint highlight.js wants. Unlisted extensions still open;
   // they just get no colour, which is the honest outcome of "we do not know".
   const FV_LANG = { js: "javascript", mjs: "javascript", cjs: "javascript", ts: "typescript",
@@ -746,6 +757,9 @@ body {
   const path = qs.get("path") || "";
   if (!path) fail("没有给 path 参数");
   else if (!authToken) document.getElementById("tokbox").style.display = "";
+  // replace(), not assign(): this page was never a destination for those, so Back
+  // should go wherever you came from rather than through here.
+  else if (!FV_DOC_EXT.has(fvExt(path))) location.replace(fsFileUrl(path));
   else open_(path);
 })();
 </script>

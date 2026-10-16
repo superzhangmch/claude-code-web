@@ -71,6 +71,8 @@ def main():
         "lines.jsonl": '{"i":1,"t":"first"}\n{"i":2,"t":"needle"}\nnot json\n',
         "prog.py": "def f():\n    return 'needle'\n",
         "big.txt": "x" * (3 * 1024 * 1024),
+        # A saved report. The browser renders this; showing its markup is not reading it.
+        "report.html": "<h1 id='rep'>report v6</h1><p>body</p>",
     }
     for name, body in docs.items():
         open(os.path.join(home, name), "w", encoding="utf-8").write(body)
@@ -154,9 +156,14 @@ def main():
               r["rows"][0][2] == "hello, world" and r["rows"][1][2] == 'she said "hi"', str(r["rows"]))
         r = view("lines.jsonl")
         check("a .jsonl is one row per line", r["cur"] == "jsonl" and r["jl"] == 3, str(r["jl"]))
-        r = view("prog.py")
-        check("code gets line numbers outside the text",
-              r["cur"] == "code" and r["gutter"].strip().split("\n")[0] == "1", repr(r["gutter"][:10]))
+        r = view("doc.md")
+        gut = drv.js("""
+          const b = [...document.querySelectorAll('#fv-views button')].find(x => x.textContent === 'code');
+          if (b) b.click();
+          return (document.querySelector('#fv-body .fv-gutter') || {}).textContent || '';
+        """)
+        check("the code view puts line numbers outside the text",
+              gut.strip().split("\n")[0] == "1", repr(gut[:10]))
 
         print("=== search, and the things that are not documents ===")
         hits = drv.js("""
@@ -187,6 +194,27 @@ def main():
         landed = drv.js("return location.pathname + ' ' + !!document.querySelector('#fv-body h1');")
         check("opening the raw URL in a browser lands on the reader",
               landed.startswith("/view") and landed.endswith("true"), landed)
+
+        print("=== …and everything without a renderer is handed back to the browser ===")
+        # Reported as "煞笔. html 应该直接吐出啊": a report opened through this page showed
+        # its own markup. A page is not a document whose source you came to read — and
+        # the link that does it already exists, so the PAGE has to bounce, not just the
+        # app stop producing new ones.
+        drv.go(base + "/view?path=" + urllib.parse.quote(os.path.join(home, "report.html")) + "&token=t")
+        drv.wait("document.getElementById('rep') ? 1 : 0", tries=60)
+        got = drv.js("""return { where: location.pathname,
+                                 rendered: (document.getElementById('rep') || {}).textContent || '',
+                                 viewer: !!document.getElementById('fv-body') };""")
+        check("an .html lands on the file itself, rendered",
+              got["where"] == "/api/fs/file" and got["rendered"] == "report v6"
+              and not got["viewer"], str(got))
+        # Source, on the other hand, belongs here: colour and line numbers.
+        r = view("prog.py")
+        check("a .py still opens here, as code with line numbers",
+              r["cur"] == "code" and r["gutter"].strip().split("\n")[0] == "1",
+              str(r["cur"]) + " " + repr(r["gutter"][:10]))
+        back = drv.js("return history.length;")
+        check("...by replacing this page, so Back does not bounce through it", back >= 1, str(back))
     finally:
         if drv:
             drv.quit()
